@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f6f4ee">
+    <title>Fireseed Voice Studio</title>
+    <link rel="stylesheet" href="/web/styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header><span class="eyebrow">FIRESEED SPEECH</span><h1>Voice Studio</h1><p>Create a voice, try a line, and keep the voices you want.</p></header>
+      <section class="card" aria-labelledby="voice-title">
+        <div class="section-heading"><div><span class="eyebrow">YOUR STUDIO</span><h2 id="voice-title">Voice</h2></div><span class="local-badge">Local prototype</span></div>
+        <label for="voice-name">Voice name</label><input id="voice-name" value="My voice" maxlength="60">
+        <label for="source">Voice source</label><select id="source"><option value="import">Import reference</option><option value="record">Record reference</option><option value="builtin">Built-in</option><option value="random">Random</option></select>
+        <label for="reference">Reference audio <span class="muted">(optional in M0)</span></label><input id="reference" type="file" accept="audio/*">
+        <button id="create-voice" class="secondary">Create voice</button><p id="voice-status" class="status" aria-live="polite">No voice selected.</p>
+      </section>
+      <section class="card" aria-labelledby="line-title">
+        <div class="section-heading"><div><span class="eyebrow">TRY A LINE</span><h2 id="line-title">Text preview</h2></div></div>
+        <label for="text">What should your voice say?</label><textarea id="text" rows="3" maxlength="500">Hello, this is a voice preview.</textarea>
+        <div class="actions"><button id="preview" disabled>Preview</button><button id="generate" class="secondary" disabled>Generate</button></div>
+        <p id="render-status" class="status" aria-live="polite">Create a voice to begin.</p>
+      </section>
+      <section class="card" aria-labelledby="saved-title"><div class="section-heading"><div><span class="eyebrow">DURABLE ASSETS</span><h2 id="saved-title">Saved audio</h2></div></div><ul id="saved-list" class="saved-list"><li class="muted">Nothing saved yet.</li></ul></section>
+      <footer>M0 uses a data-only mock renderer. It does not record, play, or synthesize audio.</footer>
+    </main>
+    <script type="module" src="/web/main.js"></script>
+  </body>
+</html>

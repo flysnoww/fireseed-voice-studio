@@ -1,0 +1,28 @@
+# Node.js prototype and local tooling
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+coverage/
+dist/
+build/
+.env
+.env.*
+!.env.example
+
+# Xcode and Swift build products (for the planned native iOS project)
+DerivedData/
+build/
+.build/
+.swiftpm/
+*.xcuserstate
+xcuserdata/
+*.ipa
+*.dSYM/
+*.mobileprovision
+*.p12
+
+# Operating-system/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
