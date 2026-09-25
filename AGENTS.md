@@ -50,3 +50,9 @@ Do not implement Language Learning, pronunciation scoring, Speech Comparator, Du
 ## Future shared capabilities
 
 Keep the current implementation local to this product. Extract a shared capability only after the same need appears repeatedly in real products: duplicate, compare, generalize, extract, verify, then share.
+
+## M1 native iOS boundary
+
+- The authorized native audio slice is Record → managed audio file → playback, and Import → managed audio copy → playback, with Save Voice promoting its reference audio to durable storage.
+- M1 does not include AI rendering, voice cloning, model downloads, complex UI, or excluded future products. Preview and Generate stay clearly unavailable until a real renderer is authorized and integrated.
+- On Windows, do not claim an Apple build passed locally. The GitHub Actions macOS workflow is authoritative. Internal device packages are unsigned IPA artifacts for Sideloadly; do not add Apple signing secrets or certificates.

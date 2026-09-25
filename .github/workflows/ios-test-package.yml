@@ -1,0 +1,117 @@
+name: iOS Internal Test Package
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test-package:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Swift domain and file lifecycle tests
+        run: swift test --package-path ios/VoiceStudioCore -Xswiftc -strict-concurrency=complete
+
+      - name: Xcode Simulator build
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project ios/VoiceStudio.xcodeproj \
+            -scheme VoiceStudio \
+            -sdk iphonesimulator \
+            -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO \
+            build | tee xcodebuild-simulator-build.log
+
+      - name: Select simulator
+        run: |
+          DEVICE_ID=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"]; print(next(x["udid"] for runtime in d.values() for x in runtime if x["name"].startswith("iPhone")))')
+          echo "DEVICE_ID=$DEVICE_ID" >> "$GITHUB_ENV"
+
+      - name: Xcode unit tests
+        run: |
+          set -o pipefail
+          xcodebuild test \
+            -project ios/VoiceStudio.xcodeproj \
+            -scheme VoiceStudio \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=$DEVICE_ID" \
+            -resultBundlePath TestResults.xcresult \
+            CODE_SIGNING_ALLOWED=NO | tee xcodebuild-test.log
+
+      - name: Build unsigned iPhone app
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project ios/VoiceStudio.xcodeproj \
+            -scheme VoiceStudio \
+            -sdk iphoneos \
+            -configuration Release \
+            -derivedDataPath DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build | tee xcodebuild-device-build.log
+
+      - name: Package and verify unsigned IPA
+        run: |
+          APP_PATH="DerivedData/Build/Products/Release-iphoneos/VoiceStudio.app"
+          test -d "$APP_PATH"
+          mkdir -p package/Payload
+          cp -R "$APP_PATH" package/Payload/
+          (cd package && zip -qry ../VoiceStudio-unsigned.ipa Payload)
+          unzip -Z1 VoiceStudio-unsigned.ipa | grep -q '^Payload/VoiceStudio.app/'
+          test -s VoiceStudio-unsigned.ipa
+
+          VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")
+          BUILD=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")
+          BUNDLE_ID=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP_PATH/Info.plist")
+          test "$BUNDLE_ID" = "com.fireseed.voicestudio"
+          SIZE=$(stat -f%z VoiceStudio-unsigned.ipa)
+          {
+            echo "Git commit: $GITHUB_SHA"
+            echo "Build date (UTC): $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+            echo "Build configuration: Release (iphoneos, unsigned)"
+            echo "Bundle identifier: $BUNDLE_ID"
+            echo "App version: $VERSION"
+            echo "Build number: $BUILD"
+            echo "IPA size (bytes): $SIZE"
+            echo "Status: INTERNAL DEVICE TEST"
+            echo "Signing: Sideloadly"
+          } | tee build-info.txt
+          {
+            echo "## iOS internal test package"
+            echo
+            echo '```text'
+            cat build-info.txt
+            echo '```'
+            echo
+            echo "Verified: Payload/VoiceStudio.app exists in VoiceStudio-unsigned.ipa"
+            echo "This artifact is unsigned; use Sideloadly for signing and installation."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload iPhone package
+        uses: actions/upload-artifact@v4
+        with:
+          name: VoiceStudio-unsigned-IPA
+          retention-days: 7
+          path: |
+            VoiceStudio-unsigned.ipa
+            build-info.txt
+          if-no-files-found: error
+
+      - name: Upload failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-test-package-failure-logs
+          path: |
+            xcodebuild-*.log
+            TestResults.xcresult
+          if-no-files-found: ignore

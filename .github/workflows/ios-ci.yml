@@ -1,0 +1,82 @@
+name: iOS CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Environment
+        run: |
+          sw_vers
+          xcodebuild -version
+          xcrun simctl list devices available
+
+      - name: Swift domain and file lifecycle tests
+        run: swift test --package-path ios/VoiceStudioCore -Xswiftc -strict-concurrency=complete
+
+      - name: Xcode Simulator build
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project ios/VoiceStudio.xcodeproj \
+            -scheme VoiceStudio \
+            -sdk iphonesimulator \
+            -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO \
+            build | tee xcodebuild-build.log
+
+      - name: Select simulator
+        run: |
+          DEVICE_ID=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"]; print(next(x["udid"] for runtime in d.values() for x in runtime if x["name"].startswith("iPhone")))')
+          echo "DEVICE_ID=$DEVICE_ID" >> "$GITHUB_ENV"
+          echo "Selected iPhone simulator: $DEVICE_ID"
+
+      - name: Xcode unit tests
+        run: |
+          set -o pipefail
+          xcodebuild test \
+            -project ios/VoiceStudio.xcodeproj \
+            -scheme VoiceStudio \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=$DEVICE_ID" \
+            -resultBundlePath TestResults.xcresult \
+            CODE_SIGNING_ALLOWED=NO | tee xcodebuild-test.log
+
+      - name: Export simulator screenshots
+        if: always()
+        run: |
+          if [ -d TestResults.xcresult ]; then
+            xcrun xcresulttool export attachments --path TestResults.xcresult --output-path ui-screenshots
+          fi
+
+      - name: Upload simulator test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-ui-regression-evidence
+          path: |
+            TestResults.xcresult
+            ui-screenshots
+          if-no-files-found: ignore
+
+      - name: Upload failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-ci-failure-logs
+          path: |
+            xcodebuild-*.log
+            TestResults.xcresult
+          if-no-files-found: ignore
