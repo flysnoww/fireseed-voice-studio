@@ -104,7 +104,7 @@ public final class AudioFileStore {
         let saved = VoiceAsset(id: voice.id, name: voice.name, sourceType: voice.sourceType,
                                referenceAudio: reference, languageHint: voice.languageHint,
                                defaultAccent: voice.defaultAccent, defaultAttributes: voice.defaultAttributes,
-                               createdAt: voice.createdAt, updatedAt: .now)
+                               createdAt: voice.createdAt, updatedAt: Date())
         try write(saved, named: "voice-\(saved.id.uuidString.lowercased()).json")
         return saved
     }

@@ -25,7 +25,7 @@ public struct AudioAsset: Identifiable, Codable, Equatable, Sendable {
     public let text: String?
     public let persistenceState: AudioPersistenceState
 
-    public init(id: UUID = UUID(), fileName: String, duration: TimeInterval, createdAt: Date = .now,
+    public init(id: UUID = UUID(), fileName: String, duration: TimeInterval, createdAt: Date = Date(),
                 sourceVoiceID: UUID? = nil, text: String? = nil,
                 persistenceState: AudioPersistenceState = .temporary) {
         self.id = id
@@ -59,7 +59,7 @@ public struct VoiceAsset: Identifiable, Codable, Equatable, Sendable {
 
     public init(id: UUID = UUID(), name: String, sourceType: VoiceSourceType, referenceAudio: AudioAsset,
                 languageHint: String? = nil, defaultAccent: String? = nil,
-                defaultAttributes: [String: String] = [:], createdAt: Date = .now, updatedAt: Date = .now) {
+                defaultAttributes: [String: String] = [:], createdAt: Date = Date(), updatedAt: Date = Date()) {
         self.id = id
         self.name = name
         self.sourceType = sourceType
