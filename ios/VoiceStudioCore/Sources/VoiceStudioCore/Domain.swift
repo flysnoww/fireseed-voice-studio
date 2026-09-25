@@ -157,7 +157,7 @@ public enum VoiceStudioError: Error, LocalizedError, Equatable {
         case .microphonePermissionDenied:
             return "Microphone access is off. Allow it in Settings to record a voice reference."
         case .unsupportedAudioFormat(let ext):
-            return "The .(ext) audio format is not supported. Choose M4A, AAC, WAV, AIFF, CAF, or MP3."
+            return "The .\(ext) audio format is not supported. Choose M4A, AAC, WAV, AIFF, CAF, or MP3."
         case .invalidAudioFile:
             return "This audio file is empty or cannot be played."
         case .missingManagedAudio:

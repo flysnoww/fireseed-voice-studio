@@ -50,8 +50,9 @@ jobs:
             -project ios/VoiceStudio.xcodeproj \
             -scheme VoiceStudio \
             -configuration Debug \
-            -destination "platform=iOS Simulator,id=$DEVICE_ID" \
+            -destination "platform=iOS Simulator,id=$DEVICE_ID,arch=arm64" \
             -resultBundlePath TestResults.xcresult \
+            ARCHS=arm64 \
             CODE_SIGNING_ALLOWED=NO | tee xcodebuild-test.log
 
       - name: Export simulator screenshots
