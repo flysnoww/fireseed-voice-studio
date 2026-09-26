@@ -6,7 +6,11 @@ import VoiceStudioCore
 struct VoiceStudioHome: View {
     @StateObject private var model: VoiceStudioModel
     @State private var voiceName = "My voice"
+    @State private var defaultVoiceName = "My voice"
+    @State private var voiceNameWasEdited = false
     @State private var text = ""
+    @State private var voiceToDelete: VoiceAsset?
+    @Environment(\.locale) private var locale
     @Environment(\.openURL) private var openURL
 
     init(model: VoiceStudioModel) { _model = StateObject(wrappedValue: model) }
@@ -66,10 +70,15 @@ struct VoiceStudioHome: View {
                                 .disabled(!model.isPlaying)
                                 .accessibilityIdentifier("stopPlaybackButton")
                         }
-                        TextField("Voice name", text: $voiceName)
+                        TextField("Voice Name", text: Binding(
+                            get: { voiceName },
+                            set: { voiceName = $0 }
+                        ), onEditingChanged: { isEditing in
+                            if isEditing { voiceNameWasEdited = true }
+                        })
                             .accessibilityIdentifier("voiceNameField")
                         Button("Save Voice") { model.saveVoice(name: voiceName) }
-                            .disabled(!model.canSaveVoice)
+                            .disabled(!model.canSaveVoice || voiceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                             .accessibilityIdentifier("saveVoiceButton")
                     }
                 }
@@ -87,30 +96,31 @@ struct VoiceStudioHome: View {
                 }
 
                 if !model.savedVoices.isEmpty {
-                    Section("Saved voices") {
-                        ForEach(model.savedVoices) { voice in
-                            HStack {
-                                VStack(alignment: .leading) {
-                                    Text(voice.name)
-                                    Text(sourceLocalizationKey(for: voice.sourceType))
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-                                Spacer()
-                                Button("Play") { model.playVoiceReference(voice) }
-                                    .labelStyle(.iconOnly)
-                                    .accessibilityLabel("Play \(voice.name) reference")
-                                Button("Stop") { model.stopPlayback() }
-                                    .labelStyle(.iconOnly)
-                                    .accessibilityLabel("Stop playback")
-                            }
-                        }
-                    }
+                    savedVoiceLibrarySection
                 }
             }
             // Form rows can contain multiple actions; each button owns its tap.
             .buttonStyle(.borderless)
             .navigationTitle("Voice Studio")
+            .onAppear(perform: updateDefaultVoiceName)
+            .onChange(of: model.currentReference?.asset.id) { _, newID in
+                guard newID != nil else { return }
+                voiceNameWasEdited = false
+                updateDefaultVoiceName()
+            }
+            .onChange(of: locale.identifier) { _, _ in updateDefaultVoiceName() }
+            .confirmationDialog("Delete Voice?", isPresented: Binding(
+                get: { voiceToDelete != nil },
+                set: { if !$0 { voiceToDelete = nil } }
+            ), titleVisibility: .visible) {
+                Button("Delete", role: .destructive) {
+                    if let voiceToDelete { model.deleteSavedVoice(id: voiceToDelete.id) }
+                    voiceToDelete = nil
+                }
+                Button("Cancel", role: .cancel) { voiceToDelete = nil }
+            } message: {
+                Text("This voice and its saved reference audio will be removed.")
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     NavigationLink(destination: SettingsView()) {
@@ -120,6 +130,87 @@ struct VoiceStudioHome: View {
                     .accessibilityIdentifier("settingsButton")
                 }
             }
+        }
+    }
+
+    private var savedVoiceLibrarySection: some View {
+        Section("Saved Voices") {
+            Menu {
+                ForEach(SavedVoiceFilter.allCases) { filter in
+                    Button {
+                        model.setSavedVoiceFilter(filter)
+                    } label: {
+                        if model.savedVoiceFilter == filter {
+                            Label(filterLocalizationKey(for: filter), systemImage: "checkmark")
+                        } else {
+                            Text(filterLocalizationKey(for: filter))
+                        }
+                    }
+                }
+            } label: {
+                Label(filterLocalizationKey(for: model.savedVoiceFilter), systemImage: "line.3.horizontal.decrease")
+            }
+            .accessibilityIdentifier("savedVoiceFilterMenu")
+
+            if model.pagedSavedVoices.isEmpty {
+                Text("No voices in this filter.")
+                    .foregroundStyle(.secondary)
+            }
+
+            ForEach(model.pagedSavedVoices) { voice in
+                savedVoiceRow(voice)
+            }
+
+            if model.savedVoicePageCount > 1 {
+                HStack {
+                    Button("Previous") { model.setSavedVoicePage(model.savedVoicePage - 1) }
+                        .disabled(model.savedVoicePage == 0)
+                    Spacer()
+                    HStack(spacing: 4) {
+                        Text("Page")
+                        Text("\(model.savedVoicePage + 1) / \(model.savedVoicePageCount)")
+                    }
+                    .accessibilityIdentifier("savedVoicePageState")
+                    Spacer()
+                    Button("Next") { model.setSavedVoicePage(model.savedVoicePage + 1) }
+                        .disabled(model.savedVoicePage >= model.savedVoicePageCount - 1)
+                }
+            }
+        }
+    }
+
+    private func savedVoiceRow(_ voice: VoiceAsset) -> some View {
+        HStack {
+            VStack(alignment: .leading) {
+                Text(voice.name)
+                HStack(spacing: 4) {
+                    Text(sourceLocalizationKey(for: voice.sourceType))
+                    Text("·")
+                    Text(SavedVoiceLibrary.formattedDuration(voice.referenceAudio.duration))
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                HStack(spacing: 4) {
+                    Text("Saved")
+                    Text(voice.savedAt, format: .dateTime.month(.abbreviated).day().year().hour().minute())
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button("Play") { model.playVoiceReference(voice) }
+                .labelStyle(.iconOnly)
+                .accessibilityLabel("Play \(voice.name) reference")
+            Button("Stop") { model.stopPlayback() }
+                .labelStyle(.iconOnly)
+                .accessibilityLabel("Stop playback")
+            Button {
+                voiceToDelete = voice
+            } label: {
+                Image(systemName: "trash")
+            }
+            .labelStyle(.iconOnly)
+            .accessibilityLabel("Delete")
         }
     }
 
@@ -141,6 +232,27 @@ struct VoiceStudioHome: View {
         case .random: "Random"
         case .builtIn: "Built-in"
         }
+    }
+
+    private func filterLocalizationKey(for filter: SavedVoiceFilter) -> LocalizedStringKey {
+        switch filter {
+        case .time: "Time"
+        case .imported: "Imported"
+        case .recorded: "Recorded"
+        }
+    }
+
+    private func updateDefaultVoiceName() {
+        guard !voiceNameWasEdited, let reference = model.currentReference else { return }
+        let key: String
+        switch reference.source {
+        case .record: key = "Recorded Voice"
+        case .imported: key = "Imported Voice"
+        case .random, .builtIn: key = "My voice"
+        }
+        let value = String(localized: String.LocalizationValue(key), locale: locale)
+        defaultVoiceName = value
+        voiceName = value
     }
 }
 

@@ -32,6 +32,8 @@ final class VoiceStudioModel: ObservableObject {
     @Published private(set) var isSavingVoice = false
     @Published private(set) var currentReference: CurrentReferenceAudio?
     @Published private(set) var savedVoices: [VoiceAsset] = []
+    @Published private(set) var savedVoiceFilter: SavedVoiceFilter = .time
+    @Published private(set) var savedVoicePage = 0
     @Published var statusMessage = "Record or import a reference audio file to create a voice."
 
     var isReferenceReady: Bool { currentReference != nil }
@@ -41,6 +43,13 @@ final class VoiceStudioModel: ObservableObject {
                                         isRequestingPermission: isRequestingPermission,
                                         isSavingVoice: isSavingVoice)
     }
+    var filteredSavedVoices: [VoiceAsset] {
+        SavedVoiceLibrary.voices(savedVoices, matching: savedVoiceFilter)
+    }
+    var pagedSavedVoices: [VoiceAsset] {
+        SavedVoiceLibrary.page(filteredSavedVoices, index: savedVoicePage)
+    }
+    var savedVoicePageCount: Int { SavedVoiceLibrary.pageCount(for: filteredSavedVoices.count) }
 
     private let audioFileStore: AudioFileStore
 
@@ -68,7 +77,7 @@ final class VoiceStudioModel: ObservableObject {
         self.recorder = activeRecorder
         self.importer = audioImporter ?? AudioImporter(fileStore: fileStore)
         self.player = AudioPlayer(fileStore: fileStore)
-        self.savedVoices = fileStore.savedVoices()
+        self.savedVoices = SavedVoiceLibrary.voices(fileStore.savedVoices(), matching: .time)
         self.player.stateHandler = { [weak self] playing in self?.isPlaying = playing }
         activeRecorder.interruptionHandler = { [weak self] result in
             guard let self else { return }
@@ -142,17 +151,42 @@ final class VoiceStudioModel: ObservableObject {
 
     func saveVoice(name: String) {
         guard canSaveVoice, let currentReference else { return }
+        guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            statusMessage = "Voice name cannot be blank."
+            return
+        }
         isSavingVoice = true
         defer { isSavingVoice = false }
-        let voice = VoiceAsset(name: name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "My voice" : name,
+        let voice = VoiceAsset(name: name,
                                sourceType: currentReference.source, referenceAudio: currentReference.asset)
         do {
             let saved = try audioFileStore.saveVoice(voice)
-            savedVoices.insert(saved, at: 0)
+            savedVoices = SavedVoiceLibrary.voices([saved] + savedVoices, matching: .time)
+            savedVoicePage = 0
             self.currentReference = nil
             statusMessage = "Voice saved"
         } catch {
             statusMessage = error.localizedDescription
+        }
+    }
+
+    func setSavedVoiceFilter(_ filter: SavedVoiceFilter) {
+        savedVoiceFilter = filter
+        savedVoicePage = 0
+    }
+
+    func setSavedVoicePage(_ page: Int) {
+        savedVoicePage = SavedVoiceLibrary.validPage(page, voiceCount: filteredSavedVoices.count)
+    }
+
+    func deleteSavedVoice(id: UUID) {
+        do {
+            try audioFileStore.deleteVoice(id: id)
+            savedVoices = SavedVoiceLibrary.voices(audioFileStore.savedVoices(), matching: .time)
+            savedVoicePage = SavedVoiceLibrary.validPage(savedVoicePage, voiceCount: filteredSavedVoices.count)
+            statusMessage = "Voice deleted"
+        } catch {
+            statusMessage = "Could not delete voice. Please try again."
         }
     }
 

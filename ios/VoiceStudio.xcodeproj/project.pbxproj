@@ -13,7 +13,8 @@
 		B00000000000000000000007 = {isa = PBXBuildFile; productRef = P00000000000000000000002; };
 		B00000000000000000000008 = {isa = PBXBuildFile; fileRef = F00000000000000000000008; };
 		B00000000000000000000009 = {isa = PBXBuildFile; fileRef = F00000000000000000000009; };
-		C00000000000000000000001 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (B00000000000000000000001, B00000000000000000000002, B00000000000000000000003, B00000000000000000000004, B00000000000000000000008,); runOnlyForDeploymentPostprocessing = 0; };
+		B0000000000000000000000C = {isa = PBXBuildFile; fileRef = F0000000000000000000000C; };
+		C00000000000000000000001 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (B00000000000000000000001, B00000000000000000000002, B00000000000000000000003, B00000000000000000000004, B00000000000000000000008, B0000000000000000000000C,); runOnlyForDeploymentPostprocessing = 0; };
 		C00000000000000000000002 = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (B00000000000000000000006,); runOnlyForDeploymentPostprocessing = 0; };
 		C00000000000000000000003 = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (B00000000000000000000009,); runOnlyForDeploymentPostprocessing = 0; };
 		C00000000000000000000004 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (B00000000000000000000005,); runOnlyForDeploymentPostprocessing = 0; };
@@ -21,7 +22,7 @@
 		C00000000000000000000006 = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 		D00000000000000000000001 = {isa = PBXProject; attributes = {BuildIndependentTargetsInParallel = YES; LastUpgradeCheck = 2600; TargetAttributes = {A00000000000000000000001 = {CreatedOnToolsVersion = 26.0; }; A00000000000000000000002 = {CreatedOnToolsVersion = 26.0; TestTargetID = A00000000000000000000001; }; }; }; buildConfigurationList = L00000000000000000000001; compatibilityVersion = "Xcode 16.0"; developmentRegion = en; hasScannedForEncodings = 0; knownRegions = (en, "zh-Hans", Base); mainGroup = E00000000000000000000001; packageReferences = (Q00000000000000000000001,); productRefGroup = E00000000000000000000004; projectDirPath = ""; projectRoot = ""; targets = (A00000000000000000000001, A00000000000000000000002,); };
 		E00000000000000000000001 = {isa = PBXGroup; children = (E00000000000000000000002, E00000000000000000000003, E00000000000000000000004,); sourceTree = "<group>"; };
-		E00000000000000000000002 = {isa = PBXGroup; children = (F00000000000000000000001, F00000000000000000000002, F00000000000000000000003, F00000000000000000000004, F00000000000000000000008, F00000000000000000000009,); path = VoiceStudioApp; sourceTree = "<group>"; };
+		E00000000000000000000002 = {isa = PBXGroup; children = (F00000000000000000000001, F00000000000000000000002, F00000000000000000000003, F00000000000000000000004, F00000000000000000000008, F00000000000000000000009, F0000000000000000000000C,); path = VoiceStudioApp; sourceTree = "<group>"; };
 		E00000000000000000000003 = {isa = PBXGroup; children = (F00000000000000000000005,); path = VoiceStudioTests; sourceTree = "<group>"; };
 		E00000000000000000000004 = {isa = PBXGroup; children = (F00000000000000000000006, F00000000000000000000007,); name = Products; sourceTree = "<group>"; };
 		F00000000000000000000001 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceStudioApp.swift; sourceTree = "<group>"; };
@@ -35,6 +36,7 @@
 		F00000000000000000000009 = {isa = PBXVariantGroup; children = (F0000000000000000000000A, F0000000000000000000000B,); name = Localizable.strings; sourceTree = "<group>"; };
 		F0000000000000000000000A = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = en.lproj/Localizable.strings; sourceTree = "<group>"; };
 		F0000000000000000000000B = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "zh-Hans"; path = "zh-Hans.lproj/Localizable.strings"; sourceTree = "<group>"; };
+		F0000000000000000000000C = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SavedVoiceLibrary.swift; sourceTree = "<group>"; };
 		L00000000000000000000001 = {isa = XCConfigurationList; buildConfigurations = (X00000000000000000000001, X00000000000000000000002,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
 		L00000000000000000000002 = {isa = XCConfigurationList; buildConfigurations = (X00000000000000000000003, X00000000000000000000004,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
 		L00000000000000000000003 = {isa = XCConfigurationList; buildConfigurations = (X00000000000000000000005, X00000000000000000000006,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };

@@ -1,3 +1,4 @@
+import AVFoundation
 import XCTest
 import VoiceStudioCore
 @testable import VoiceStudio
@@ -26,7 +27,7 @@ final class VoiceStudioAppTests: XCTestCase {
         let asset = try makeStagedAsset(in: store)
         let model = try VoiceStudioModel(rootDirectory: root, audioImporter: StubAudioImporter(asset: asset))
         model.importAudio(from: root.appendingPathComponent("selected.wav"))
-        model.saveVoice(name: "My personal voice")
+        model.saveVoice(name: "Recorded Voice")
         let savedID = try XCTUnwrap(model.savedVoices.first?.id)
 
         let defaults = makeLanguageDefaults()
@@ -34,7 +35,104 @@ final class VoiceStudioAppTests: XCTestCase {
         preference.set(.simplifiedChinese)
 
         XCTAssertEqual(model.savedVoices.map(\.id), [savedID])
+        XCTAssertEqual(model.savedVoices.first?.name, "Recorded Voice")
         XCTAssertNil(model.currentReference)
+    }
+
+    func testSavedVoiceLibrarySortsFiltersAndPagesEightAtATime() throws {
+        let voices = (0..<17).map { index in
+            VoiceAsset(id: UUID(), name: "Voice \(index)",
+                       sourceType: index.isMultiple(of: 2) ? .record : .imported,
+                       referenceAudio: AudioAsset(fileName: "\(UUID().uuidString.lowercased()).wav",
+                                                  duration: 12.4, persistenceState: .persistent),
+                       createdAt: Date(timeIntervalSince1970: Double(index)),
+                       updatedAt: Date(timeIntervalSince1970: Double(index)))
+        }
+        let sorted = SavedVoiceLibrary.voices(voices, matching: .time)
+        XCTAssertEqual(sorted.first?.name, "Voice 16")
+        XCTAssertEqual(SavedVoiceLibrary.pageSize, 8)
+        XCTAssertEqual(SavedVoiceLibrary.page(sorted, index: 0).count, 8)
+        XCTAssertEqual(SavedVoiceLibrary.page(sorted, index: 1).count, 8)
+        XCTAssertEqual(SavedVoiceLibrary.page(sorted, index: 2).count, 1)
+        XCTAssertEqual(SavedVoiceLibrary.voices(voices, matching: .imported).count, 8)
+        XCTAssertEqual(SavedVoiceLibrary.voices(voices, matching: .recorded).count, 9)
+        XCTAssertTrue(SavedVoiceLibrary.voices(voices, matching: .recorded).allSatisfy { $0.sourceType == .record })
+        XCTAssertEqual(SavedVoiceLibrary.formattedDuration(125.9), "02:05")
+        XCTAssertEqual(SavedVoiceLibrary.formattedDuration(.infinity), "00:00")
+    }
+
+    @MainActor
+    func testImportedDurationComesFromAudioFileAndSurvivesVoiceSave() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try AudioFileStore(rootDirectory: root)
+        let source = root.appendingPathComponent("duration-check.wav")
+        try makeSilentWaveFile(at: source, duration: 0.5)
+
+        let imported = try AudioImporter(fileStore: store).importDocument(at: source)
+        XCTAssertEqual(imported.duration, 0.5, accuracy: 0.05)
+        let saved = try store.saveVoice(VoiceAsset(name: "Measured duration", sourceType: .imported,
+                                                   referenceAudio: imported))
+        let restored = try XCTUnwrap(AudioFileStore(rootDirectory: root).savedVoices().first)
+        XCTAssertEqual(restored.referenceAudio.duration, saved.referenceAudio.duration)
+    }
+
+    @MainActor
+    func testSavedVoiceFilterResetsPageAndDeletingLastPageClampsIt() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let voices = try makePersistedVoices(in: root, count: 9)
+        let model = try VoiceStudioModel(rootDirectory: root)
+        XCTAssertEqual(model.savedVoices.count, 9)
+        XCTAssertEqual(model.savedVoicePageCount, 2)
+        model.setSavedVoicePage(1)
+        XCTAssertEqual(model.pagedSavedVoices.count, 1)
+        model.setSavedVoiceFilter(.imported)
+        XCTAssertEqual(model.savedVoicePage, 0)
+
+        model.setSavedVoiceFilter(.time)
+        model.setSavedVoicePage(1)
+        let lastVoice = try XCTUnwrap(model.pagedSavedVoices.first)
+        model.deleteSavedVoice(id: lastVoice.id)
+
+        XCTAssertEqual(model.savedVoicePage, 0)
+        XCTAssertEqual(model.pagedSavedVoices.count, 8)
+        XCTAssertEqual(try AudioFileStore(rootDirectory: root).savedVoices().count, 8)
+        XCTAssertEqual(voices.count, 9)
+    }
+
+    @MainActor
+    func testSavingVoiceFromSecondPageReturnsToNewestOnFirstPage() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        _ = try makePersistedVoices(in: root, count: 9)
+        let store = try AudioFileStore(rootDirectory: root)
+        let staged = try makeStagedAsset(in: store)
+        let model = try VoiceStudioModel(rootDirectory: root, audioImporter: StubAudioImporter(asset: staged))
+        model.setSavedVoicePage(1)
+        model.importAudio(from: root.appendingPathComponent("selected.wav"))
+
+        model.saveVoice(name: "Newest custom voice")
+
+        XCTAssertEqual(model.savedVoicePage, 0)
+        XCTAssertEqual(model.pagedSavedVoices.first?.name, "Newest custom voice")
+        XCTAssertEqual(model.pagedSavedVoices.count, 8)
+    }
+
+    @MainActor
+    func testWhitespaceOnlyVoiceNameCannotBeSaved() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try AudioFileStore(rootDirectory: root)
+        let asset = try makeStagedAsset(in: store)
+        let model = try VoiceStudioModel(rootDirectory: root, audioImporter: StubAudioImporter(asset: asset))
+        model.importAudio(from: root.appendingPathComponent("selected.wav"))
+
+        model.saveVoice(name: " \n  ")
+
+        XCTAssertTrue(model.canSaveVoice)
+        XCTAssertEqual(model.currentReference?.asset.id, asset.id)
+        XCTAssertTrue(model.savedVoices.isEmpty)
     }
 
     func testRendererIsExplicitlyUnavailableInM1() async {
@@ -106,7 +204,10 @@ final class VoiceStudioAppTests: XCTestCase {
 
         model.saveVoice(name: "Imported reference")
         XCTAssertEqual(model.savedVoices.count, 1)
+        XCTAssertEqual(model.savedVoices.first?.name, "Imported reference")
         XCTAssertEqual(model.savedVoices.first?.sourceType.rawValue, VoiceSourceType.imported.rawValue)
+        XCTAssertEqual(model.savedVoices.first?.referenceAudio.duration, asset.duration)
+        XCTAssertEqual(model.savedVoices.first?.savedAt, model.savedVoices.first?.createdAt)
         XCTAssertNil(model.currentReference)
         XCTAssertFalse(model.canSaveVoice)
         model.saveVoice(name: "Duplicate")
@@ -136,6 +237,9 @@ final class VoiceStudioAppTests: XCTestCase {
         XCTAssertTrue(model.canSaveVoice)
         XCTAssertEqual(model.currentReference?.sourceLabel, "Recorded")
         XCTAssertEqual(importer.callCount, 0)
+        model.saveVoice(name: "Custom recorded name")
+        XCTAssertEqual(model.savedVoices.first?.name, "Custom recorded name")
+        XCTAssertEqual(model.savedVoices.first?.sourceType, .record)
     }
 
     func testSaveVoiceAvailabilityRequiresAReadyIdleReference() {
@@ -168,8 +272,12 @@ final class VoiceStudioAppTests: XCTestCase {
         let relaunched = try VoiceStudioModel(rootDirectory: root)
         let loaded = try XCTUnwrap(relaunched.savedVoices.first)
         XCTAssertEqual(loaded.id, saved.id)
+        XCTAssertEqual(loaded.name, saved.name)
         XCTAssertEqual(loaded.referenceAudio.id, saved.referenceAudio.id)
         XCTAssertEqual(loaded.referenceAudio.persistenceState, .persistent)
+        XCTAssertEqual(loaded.sourceType, saved.sourceType)
+        XCTAssertEqual(loaded.referenceAudio.duration, saved.referenceAudio.duration)
+        XCTAssertEqual(loaded.savedAt, saved.savedAt)
         XCTAssertEqual(try Data(contentsOf: store.managedURL(for: loaded.referenceAudio)),
                        Data([0x01, 0x02, 0x03]))
         XCTAssertNil(relaunched.currentReference)
@@ -268,6 +376,48 @@ final class VoiceStudioAppTests: XCTestCase {
         let destination = store.recordingDestination()
         try Data([0x01, 0x02, 0x03]).write(to: destination)
         return try store.registerRecording(at: destination, duration: 1)
+    }
+
+    private func makePersistedVoices(in root: URL, count: Int) throws -> [VoiceAsset] {
+        let store = try AudioFileStore(rootDirectory: root)
+        for index in 0..<count {
+            let source: VoiceSourceType = index.isMultiple(of: 2) ? .record : .imported
+            let staged = try makeStagedAsset(in: store)
+            _ = try store.saveVoice(VoiceAsset(name: "Saved \(index)", sourceType: source,
+                                               referenceAudio: staged))
+        }
+        return try store.savedVoices()
+    }
+
+    private func makeSilentWaveFile(at url: URL, duration: TimeInterval) throws {
+        let sampleRate: UInt32 = 8_000
+        let sampleCount = UInt32(Double(sampleRate) * duration)
+        let audioBytes = sampleCount * 2
+        var data = Data("RIFF".utf8)
+        appendLittleEndian(36 + audioBytes, to: &data)
+        data.append(Data("WAVEfmt ".utf8))
+        appendLittleEndian(16, to: &data)
+        appendLittleEndian(UInt16(1), to: &data)
+        appendLittleEndian(UInt16(1), to: &data)
+        appendLittleEndian(sampleRate, to: &data)
+        appendLittleEndian(sampleRate * 2, to: &data)
+        appendLittleEndian(UInt16(2), to: &data)
+        appendLittleEndian(UInt16(16), to: &data)
+        data.append(Data("data".utf8))
+        appendLittleEndian(audioBytes, to: &data)
+        data.append(Data(repeating: 0, count: Int(audioBytes)))
+        try data.write(to: url)
+    }
+
+    private func appendLittleEndian(_ value: UInt16, to data: inout Data) {
+        data.append(UInt8(value & 0x00ff))
+        data.append(UInt8(value >> 8))
+    }
+
+    private func appendLittleEndian(_ value: UInt32, to data: inout Data) {
+        for shift in stride(from: 0, through: 24, by: 8) {
+            data.append(UInt8((value >> UInt32(shift)) & 0x000000ff))
+        }
     }
 }
 

@@ -75,6 +75,22 @@ final class AudioLifecycleTests: XCTestCase {
         XCTAssertEqual(store.savedVoices(), [saved])
     }
 
+    func testVoiceSavedTimeCompatibilityDoesNotAddRequiredJSONFields() throws {
+        let saved = try store.saveVoice(VoiceAsset(name: "Older voice", sourceType: .imported,
+                                                   referenceAudio: makeStagedAsset()))
+        let metadataURL = temporaryRoot.appendingPathComponent(
+            "Metadata/voice-\(saved.id.uuidString.lowercased()).json")
+        let metadata = try Data(contentsOf: metadataURL)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: metadata) as? [String: Any])
+        XCTAssertNil(json["savedAt"])
+
+        let restored = try XCTUnwrap(store.savedVoices().first)
+        XCTAssertEqual(restored.name, "Older voice")
+        XCTAssertEqual(restored.sourceType, .imported)
+        XCTAssertEqual(restored.referenceAudio.duration, saved.referenceAudio.duration)
+        XCTAssertEqual(restored.savedAt, saved.createdAt)
+    }
+
     func testSavedVoiceReferenceResolvesAfterStoreIsRecreated() throws {
         let staged = try makeStagedAsset()
         let source = VoiceAsset(name: "Relaunch voice", sourceType: .record, referenceAudio: staged)
@@ -88,8 +104,45 @@ final class AudioLifecycleTests: XCTestCase {
 
         XCTAssertEqual(reloaded.referenceAudio.fileName, saved.referenceAudio.fileName)
         XCTAssertEqual(reloaded.referenceAudio.persistenceState, .persistent)
+        XCTAssertEqual(reloaded.sourceType, .record)
+        XCTAssertEqual(reloaded.referenceAudio.duration, staged.duration)
+        XCTAssertEqual(reloaded.savedAt, saved.createdAt)
         XCTAssertTrue(FileManager.default.fileExists(atPath: reloadedURL.path))
         XCTAssertEqual(try Data(contentsOf: reloadedURL), originalBytes)
+    }
+
+    func testDeletingVoiceRemovesMetadataAndItsExclusiveReferenceAudio() throws {
+        let saved = try store.saveVoice(VoiceAsset(name: "Delete me", sourceType: .imported,
+                                                   referenceAudio: makeStagedAsset()))
+        let audioURL = try store.managedURL(for: saved.referenceAudio)
+        let voiceMetadata = temporaryRoot.appendingPathComponent(
+            "Metadata/voice-\(saved.id.uuidString.lowercased()).json")
+        let audioMetadata = temporaryRoot.appendingPathComponent(
+            "Metadata/audio-\(saved.referenceAudio.id.uuidString.lowercased()).json")
+
+        try store.deleteVoice(id: saved.id)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: voiceMetadata.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: audioMetadata.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: audioURL.path))
+        XCTAssertTrue(try store.savedVoices().isEmpty)
+    }
+
+    func testDeletingVoicePreservesReferenceAudioSharedByAnotherVoice() throws {
+        let saved = try store.saveVoice(VoiceAsset(name: "Shared one", sourceType: .record,
+                                                   referenceAudio: makeStagedAsset()))
+        let shared = try store.saveVoice(VoiceAsset(name: "Shared two", sourceType: .imported,
+                                                    referenceAudio: saved.referenceAudio))
+        let audioURL = try store.managedURL(for: shared.referenceAudio)
+
+        try store.deleteVoice(id: saved.id)
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: audioURL.path))
+        XCTAssertEqual(try store.savedVoices().map(\.id), [shared.id])
+        XCTAssertNotNil(try store.managedURL(for: try XCTUnwrap(store.savedVoices().first?.referenceAudio)))
+
+        try store.deleteVoice(id: shared.id)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: audioURL.path))
     }
 
     func testRelaunchUnderNewRootUsesAudioMetadataInsteadOfEmbeddedCopy() throws {

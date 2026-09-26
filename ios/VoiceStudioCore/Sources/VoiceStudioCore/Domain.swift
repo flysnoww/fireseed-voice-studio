@@ -57,6 +57,9 @@ public struct VoiceAsset: Identifiable, Codable, Equatable, Sendable {
     public let createdAt: Date
     public let updatedAt: Date
 
+    /// Voices are created as part of the save action; keep this computed to preserve the stored schema.
+    public var savedAt: Date { createdAt }
+
     public init(id: UUID = UUID(), name: String, sourceType: VoiceSourceType, referenceAudio: AudioAsset,
                 languageHint: String? = nil, defaultAccent: String? = nil,
                 defaultAttributes: [String: String] = [:], createdAt: Date = Date(), updatedAt: Date = Date()) {

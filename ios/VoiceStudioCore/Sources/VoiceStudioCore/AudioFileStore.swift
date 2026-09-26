@@ -131,6 +131,54 @@ public final class AudioFileStore {
         }
     }
 
+    /// Deletes a voice and removes its reference audio only when no other saved voice uses it.
+    public func deleteVoice(id: UUID) throws {
+        let voiceURL = metadataDirectory.appendingPathComponent("voice-\(id.uuidString.lowercased()).json")
+        let voiceData = try Data(contentsOf: voiceURL)
+        let voice = try decoder.decode(VoiceAsset.self, from: voiceData)
+        let reference = voice.referenceAudio
+        let otherVoiceReferences = try fileManager.contentsOfDirectory(at: metadataDirectory,
+                                                                       includingPropertiesForKeys: nil)
+            .filter { $0.lastPathComponent.hasPrefix("voice-") && $0.pathExtension == "json" &&
+                $0.lastPathComponent != voiceURL.lastPathComponent }
+            .contains { url in
+                guard let data = try? Data(contentsOf: url),
+                      let record = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let referenceRecord = record["referenceAudio"] as? [String: Any],
+                      let rawID = referenceRecord["id"] as? String else { return false }
+                return UUID(uuidString: rawID) == reference.id
+            }
+
+        let audioMetadataURL = metadataDirectory.appendingPathComponent(
+            "audio-\(reference.id.uuidString.lowercased()).json")
+        let audioMetadata = otherVoiceReferences ? nil : try Data(contentsOf: audioMetadataURL)
+        let persistentReference: AudioAsset? = try audioMetadata.map { data in
+            let asset = try decoder.decode(AudioAsset.self, from: data)
+            guard asset.id == reference.id, asset.persistenceState == .persistent else {
+                throw VoiceStudioError.missingManagedAudio
+            }
+            return asset
+        }
+        let audioURL = try persistentReference.map { try managedURL(for: $0) }
+
+        if let audioMetadata { try fileManager.removeItem(at: audioMetadataURL) }
+        do {
+            try fileManager.removeItem(at: voiceURL)
+        } catch {
+            if let audioMetadata { try? audioMetadata.write(to: audioMetadataURL, options: .atomic) }
+            throw error
+        }
+        if let audioURL {
+            do {
+                try fileManager.removeItem(at: audioURL)
+            } catch {
+                try? voiceData.write(to: voiceURL, options: .atomic)
+                if let audioMetadata { try? audioMetadata.write(to: audioMetadataURL, options: .atomic) }
+                throw error
+            }
+        }
+    }
+
     private func registerStagedFile(at url: URL, duration: TimeInterval) throws -> AudioAsset {
         let ext = url.pathExtension.lowercased()
         guard Self.supportedAudioExtensions.contains(ext) else { throw VoiceStudioError.unsupportedAudioFormat(ext) }
