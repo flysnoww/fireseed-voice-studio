@@ -73,6 +73,12 @@ final class VoiceStudioAppTests: XCTestCase {
         model.saveVoice(name: "Imported reference")
         XCTAssertEqual(model.savedVoices.count, 1)
         XCTAssertEqual(model.savedVoices.first?.sourceType.rawValue, VoiceSourceType.imported.rawValue)
+        XCTAssertNil(model.currentReference)
+        XCTAssertFalse(model.canSaveVoice)
+        model.saveVoice(name: "Duplicate")
+        XCTAssertEqual(model.savedVoices.count, 1)
+        let savedURL = try store.managedURL(for: try XCTUnwrap(model.savedVoices.first?.referenceAudio))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: savedURL.path))
     }
 
     @MainActor
@@ -132,6 +138,26 @@ final class VoiceStudioAppTests: XCTestCase {
         XCTAssertEqual(loaded.referenceAudio.persistenceState, .persistent)
         XCTAssertEqual(try Data(contentsOf: store.managedURL(for: loaded.referenceAudio)),
                        Data([0x01, 0x02, 0x03]))
+        XCTAssertNil(relaunched.currentReference)
+        relaunched.playVoiceReference(loaded)
+    }
+
+    @MainActor
+    func testSaveFailurePreservesCurrentReferenceAndAllowsRetry() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try AudioFileStore(rootDirectory: root)
+        let asset = try makeStagedAsset(in: store)
+        let model = try VoiceStudioModel(rootDirectory: root, audioImporter: StubAudioImporter(asset: asset))
+        model.importAudio(from: root.appendingPathComponent("selected.wav"))
+
+        try FileManager.default.removeItem(at: store.managedURL(for: asset))
+        model.saveVoice(name: "Retry me")
+
+        XCTAssertEqual(model.currentReference?.asset.id, asset.id)
+        XCTAssertTrue(model.canSaveVoice)
+        XCTAssertTrue(model.savedVoices.isEmpty)
+        XCTAssertFalse(model.statusMessage.isEmpty)
     }
 
     @MainActor

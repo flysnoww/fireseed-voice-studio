@@ -17,8 +17,9 @@ struct CurrentReferenceAudio {
 }
 
 enum VoiceAvailabilityPolicy {
-    static func canSave(hasCurrentReference: Bool, isRecording: Bool, isRequestingPermission: Bool) -> Bool {
-        hasCurrentReference && !isRecording && !isRequestingPermission
+    static func canSave(hasCurrentReference: Bool, isRecording: Bool, isRequestingPermission: Bool,
+                        isSavingVoice: Bool = false) -> Bool {
+        hasCurrentReference && !isRecording && !isRequestingPermission && !isSavingVoice
     }
 }
 
@@ -28,6 +29,7 @@ final class VoiceStudioModel: ObservableObject {
     @Published private(set) var isRequestingPermission = false
     @Published private(set) var microphonePermissionDenied = false
     @Published private(set) var isPlaying = false
+    @Published private(set) var isSavingVoice = false
     @Published private(set) var currentReference: CurrentReferenceAudio?
     @Published private(set) var savedVoices: [VoiceAsset] = []
     @Published var statusMessage = "Record or import a reference audio file to create a voice."
@@ -36,7 +38,8 @@ final class VoiceStudioModel: ObservableObject {
     var canSaveVoice: Bool {
         VoiceAvailabilityPolicy.canSave(hasCurrentReference: isReferenceReady,
                                         isRecording: isRecording,
-                                        isRequestingPermission: isRequestingPermission)
+                                        isRequestingPermission: isRequestingPermission,
+                                        isSavingVoice: isSavingVoice)
     }
 
     private let audioFileStore: AudioFileStore
@@ -139,13 +142,15 @@ final class VoiceStudioModel: ObservableObject {
 
     func saveVoice(name: String) {
         guard canSaveVoice, let currentReference else { return }
+        isSavingVoice = true
+        defer { isSavingVoice = false }
         let voice = VoiceAsset(name: name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "My voice" : name,
                                sourceType: currentReference.source, referenceAudio: currentReference.asset)
         do {
             let saved = try audioFileStore.saveVoice(voice)
-            self.currentReference = CurrentReferenceAudio(asset: saved.referenceAudio, source: saved.sourceType)
             savedVoices.insert(saved, at: 0)
-            statusMessage = "\(saved.name) is saved on this device with its managed reference audio."
+            self.currentReference = nil
+            statusMessage = "Voice saved"
         } catch {
             statusMessage = error.localizedDescription
         }
