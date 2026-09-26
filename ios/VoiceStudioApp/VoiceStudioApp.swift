@@ -12,6 +12,7 @@ struct FireseedVoiceStudioApp: App {
 private struct VoiceStudioRootView: View {
     @State private var model: VoiceStudioModel?
     @State private var startupError: String?
+    @StateObject private var languagePreference = AppLanguagePreference()
 
     init() {
         do {
@@ -33,5 +34,7 @@ private struct VoiceStudioRootView: View {
                 ContentUnavailableView("Voice Studio could not start", systemImage: "waveform")
             }
         }
+        .environmentObject(languagePreference)
+        .environment(\.locale, Locale(identifier: languagePreference.language.localeIdentifier ?? Locale.autoupdatingCurrent.identifier))
     }
 }

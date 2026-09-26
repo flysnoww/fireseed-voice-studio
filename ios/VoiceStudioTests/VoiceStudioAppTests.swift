@@ -3,6 +3,40 @@ import VoiceStudioCore
 @testable import VoiceStudio
 
 final class VoiceStudioAppTests: XCTestCase {
+    @MainActor
+    func testAppLanguageDefaultsToSystemAndPersistsExplicitSelections() {
+        let defaults = makeLanguageDefaults()
+        let key = UUID().uuidString
+        let initial = AppLanguagePreference(defaults: defaults, key: key)
+        XCTAssertEqual(initial.language, .system)
+        XCTAssertTrue(initial.language.usesSystemLocale)
+
+        initial.set(.english)
+        XCTAssertFalse(initial.language.usesSystemLocale)
+        XCTAssertEqual(AppLanguagePreference(defaults: defaults, key: key).language, .english)
+        initial.set(.simplifiedChinese)
+        XCTAssertEqual(AppLanguagePreference(defaults: defaults, key: key).language, .simplifiedChinese)
+    }
+
+    @MainActor
+    func testLanguagePreferenceIsIndependentOfSavedVoiceState() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try AudioFileStore(rootDirectory: root)
+        let asset = try makeStagedAsset(in: store)
+        let model = try VoiceStudioModel(rootDirectory: root, audioImporter: StubAudioImporter(asset: asset))
+        model.importAudio(from: root.appendingPathComponent("selected.wav"))
+        model.saveVoice(name: "My personal voice")
+        let savedID = try XCTUnwrap(model.savedVoices.first?.id)
+
+        let defaults = makeLanguageDefaults()
+        let preference = AppLanguagePreference(defaults: defaults, key: UUID().uuidString)
+        preference.set(.simplifiedChinese)
+
+        XCTAssertEqual(model.savedVoices.map(\.id), [savedID])
+        XCTAssertNil(model.currentReference)
+    }
+
     func testRendererIsExplicitlyUnavailableInM1() async {
         let renderer = UnavailableRenderer()
         XCTAssertEqual(renderer.capabilities.support(for: .voiceClone), .unsupported)
@@ -221,6 +255,13 @@ final class VoiceStudioAppTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         return root
+    }
+
+    private func makeLanguageDefaults() -> UserDefaults {
+        let suite = "VoiceStudioTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        return defaults
     }
 
     private func makeStagedAsset(in store: AudioFileStore) throws -> AudioAsset {

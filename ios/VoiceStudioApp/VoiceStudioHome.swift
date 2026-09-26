@@ -33,7 +33,7 @@ struct VoiceStudioHome: View {
                         unavailableSource("Random")
                         unavailableSource("Built-in")
                     }
-                    Text(model.statusMessage)
+                    Text(LocalizedStringKey(model.statusMessage))
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .accessibilityIdentifier("voiceStatus")
@@ -54,7 +54,10 @@ struct VoiceStudioHome: View {
 
                 if let reference = model.currentReference {
                     Section("Current Reference") {
-                        Text("Ready · \(reference.sourceLabel)")
+                        HStack(spacing: 4) {
+                            Text("Ready ·")
+                            Text(sourceLocalizationKey(for: reference.source))
+                        }
                             .accessibilityIdentifier("currentReferenceState")
                         HStack {
                             Button("Play") { model.playCurrentAudio() }
@@ -89,7 +92,7 @@ struct VoiceStudioHome: View {
                             HStack {
                                 VStack(alignment: .leading) {
                                     Text(voice.name)
-                                    Text(voice.sourceType.rawValue.capitalized)
+                                    Text(sourceLocalizationKey(for: voice.sourceType))
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }
@@ -108,6 +111,15 @@ struct VoiceStudioHome: View {
             // Form rows can contain multiple actions; each button owns its tap.
             .buttonStyle(.borderless)
             .navigationTitle("Voice Studio")
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    NavigationLink(destination: SettingsView()) {
+                        Image(systemName: "person.circle")
+                    }
+                    .accessibilityLabel("Settings")
+                    .accessibilityIdentifier("settingsButton")
+                }
+            }
         }
     }
 
@@ -120,6 +132,58 @@ struct VoiceStudioHome: View {
             }
         }
         .disabled(true)
+    }
+
+    private func sourceLocalizationKey(for source: VoiceSourceType) -> LocalizedStringKey {
+        switch source {
+        case .record: "Recorded"
+        case .imported: "Imported"
+        case .random: "Random"
+        case .builtIn: "Built-in"
+        }
+    }
+}
+
+private struct SettingsView: View {
+    @EnvironmentObject private var languagePreference: AppLanguagePreference
+
+    var body: some View {
+        Form {
+            Section("Account") {
+                NavigationLink(destination: AccountPlaceholderView()) {
+                    Label("Account", systemImage: "person.circle")
+                    Text("Not signed in").foregroundStyle(.secondary)
+                }
+                .accessibilityIdentifier("accountPlaceholderLink")
+            }
+
+            Section("Language") {
+                Picker("App Language", selection: Binding(
+                    get: { languagePreference.language },
+                    set: { languagePreference.set($0) }
+                )) {
+                    ForEach(AppLanguage.allCases) { language in
+                        Text(language.displayName).tag(language)
+                    }
+                }
+                .accessibilityIdentifier("appLanguagePicker")
+            }
+        }
+        .navigationTitle("Settings")
+    }
+}
+
+private struct AccountPlaceholderView: View {
+    var body: some View {
+        VStack(spacing: 12) {
+            Label("Not signed in", systemImage: "person.circle")
+                .font(.headline)
+            Text("Sign in will be available after the shared Fireseed account system is integrated.")
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
+        }
+        .padding()
+        .navigationTitle("Account")
     }
 }
 
