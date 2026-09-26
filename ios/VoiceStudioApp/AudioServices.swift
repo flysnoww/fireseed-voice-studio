@@ -3,9 +3,54 @@ import Combine
 import Foundation
 import VoiceStudioCore
 
+enum MicrophonePermissionStatus {
+    case undetermined
+    case granted
+    case denied
+}
+
 @MainActor
-final class AudioRecorder: NSObject, AVAudioRecorderDelegate {
+protocol MicrophonePermissionClient {
+    var status: MicrophonePermissionStatus { get }
+    func requestAccess() async -> Bool
+}
+
+@MainActor
+protocol AudioRecording: AnyObject {
+    var interruptionHandler: (@MainActor (Result<AudioAsset, Error>) -> Void)? { get set }
+    func startRecording() async throws
+    func stopRecording() throws -> AudioAsset
+}
+
+@MainActor
+protocol AudioImporting {
+    func importDocument(at externalURL: URL) throws -> AudioAsset
+}
+
+@MainActor
+struct SystemMicrophonePermissionClient: MicrophonePermissionClient {
+    var status: MicrophonePermissionStatus {
+        switch AVAudioSession.sharedInstance().recordPermission {
+        case .granted: .granted
+        case .denied: .denied
+        case .undetermined: .undetermined
+        @unknown default: .denied
+        }
+    }
+
+    func requestAccess() async -> Bool {
+        await withCheckedContinuation { continuation in
+            AVAudioSession.sharedInstance().requestRecordPermission { granted in
+                continuation.resume(returning: granted)
+            }
+        }
+    }
+}
+
+@MainActor
+final class AudioRecorder: NSObject, AVAudioRecorderDelegate, AudioRecording {
     private let fileStore: AudioFileStore
+    private let microphonePermissionClient: any MicrophonePermissionClient
     private var recorder: AVAudioRecorder?
     private var isStarting = false
     private var recordingURL: URL?
@@ -13,8 +58,10 @@ final class AudioRecorder: NSObject, AVAudioRecorderDelegate {
     private var interruptionObserver: NSObjectProtocol?
     var interruptionHandler: (@MainActor (Result<AudioAsset, Error>) -> Void)?
 
-    init(fileStore: AudioFileStore) {
+    init(fileStore: AudioFileStore,
+         microphonePermissionClient: (any MicrophonePermissionClient)? = nil) {
         self.fileStore = fileStore
+        self.microphonePermissionClient = microphonePermissionClient ?? SystemMicrophonePermissionClient()
         super.init()
         interruptionObserver = NotificationCenter.default.addObserver(
             forName: AVAudioSession.interruptionNotification,
@@ -32,9 +79,19 @@ final class AudioRecorder: NSObject, AVAudioRecorderDelegate {
     }
 
     func startRecording() async throws {
-        guard recorder == nil else { return }
-        let granted = await AVAudioApplication.requestRecordPermission()
-        guard granted else { throw VoiceStudioError.microphonePermissionDenied }
+        guard recorder == nil, !isStarting else { throw VoiceStudioError.recordingFailed }
+        isStarting = true
+        defer { isStarting = false }
+        switch microphonePermissionClient.status {
+        case .denied:
+            throw VoiceStudioError.microphonePermissionDenied
+        case .granted:
+            break
+        case .undetermined:
+            guard await microphonePermissionClient.requestAccess() else {
+                throw VoiceStudioError.microphonePermissionDenied
+            }
+        }
 
         let session = AVAudioSession.sharedInstance()
         try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker])
@@ -98,7 +155,7 @@ final class AudioRecorder: NSObject, AVAudioRecorderDelegate {
 }
 
 @MainActor
-final class AudioImporter {
+final class AudioImporter: AudioImporting {
     private let fileStore: AudioFileStore
     init(fileStore: AudioFileStore) { self.fileStore = fileStore }
 

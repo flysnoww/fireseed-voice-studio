@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import UniformTypeIdentifiers
 import VoiceStudioCore
 
@@ -6,7 +7,7 @@ struct VoiceStudioHome: View {
     @StateObject private var model: VoiceStudioModel
     @State private var voiceName = "My voice"
     @State private var text = ""
-    @State private var showingImporter = false
+    @Environment(\.openURL) private var openURL
 
     init(model: VoiceStudioModel) { _model = StateObject(wrappedValue: model) }
 
@@ -24,28 +25,50 @@ struct VoiceStudioHome: View {
                         }
                         .tint(model.isRecording ? .red : .accentColor)
                         .disabled(model.isRequestingPermission && !model.isRecording)
+                        .accessibilityIdentifier("recordButton")
 
-                        Button("Import") { showingImporter = true }
-                            .disabled(model.isRecording || model.isRequestingPermission)
+                        ImportAudioButton(model: model)
                     }
                     HStack {
                         unavailableSource("Random")
                         unavailableSource("Built-in")
                     }
-                    if model.currentAudio != nil {
-                        HStack {
-                            Button("Play reference") { model.playCurrentAudio() }
-                            Button("Stop") { model.stopPlayback() }
-                                .disabled(!model.isPlaying)
-                        }
-                        TextField("Voice name", text: $voiceName)
-                        Button("Save Voice") { model.saveVoice(name: voiceName) }
-                            .disabled(model.isRecording || model.isRequestingPermission)
-                    }
                     Text(model.statusMessage)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .accessibilityIdentifier("voiceStatus")
+
+                    if model.isRecording {
+                        Label("Recording in progress", systemImage: "record.circle.fill")
+                            .foregroundStyle(.red)
+                            .accessibilityIdentifier("recordingState")
+                    }
+                    if model.microphonePermissionDenied {
+                        Button("Open Settings") {
+                            guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+                            openURL(url)
+                        }
+                        .accessibilityIdentifier("microphoneSettingsButton")
+                    }
+                }
+
+                if let reference = model.currentReference {
+                    Section("Current Reference") {
+                        Text("Ready · \(reference.sourceLabel)")
+                            .accessibilityIdentifier("currentReferenceState")
+                        HStack {
+                            Button("Play") { model.playCurrentAudio() }
+                                .accessibilityIdentifier("playReferenceButton")
+                            Button("Stop") { model.stopPlayback() }
+                                .disabled(!model.isPlaying)
+                                .accessibilityIdentifier("stopPlaybackButton")
+                        }
+                        TextField("Voice name", text: $voiceName)
+                            .accessibilityIdentifier("voiceNameField")
+                        Button("Save Voice") { model.saveVoice(name: voiceName) }
+                            .disabled(!model.canSaveVoice)
+                            .accessibilityIdentifier("saveVoiceButton")
+                    }
                 }
 
                 Section("Text") {
@@ -82,16 +105,9 @@ struct VoiceStudioHome: View {
                     }
                 }
             }
+            // Form rows can contain multiple actions; each button owns its tap.
+            .buttonStyle(.borderless)
             .navigationTitle("Voice Studio")
-            .fileImporter(isPresented: $showingImporter, allowedContentTypes: [.audio], allowsMultipleSelection: false) { result in
-                switch result {
-                case .success(let urls):
-                    guard let url = urls.first else { return }
-                    model.importAudio(from: url)
-                case .failure(let error):
-                    model.report(error)
-                }
-            }
         }
     }
 
@@ -104,5 +120,25 @@ struct VoiceStudioHome: View {
             }
         }
         .disabled(true)
+    }
+}
+
+private struct ImportAudioButton: View {
+    @ObservedObject var model: VoiceStudioModel
+    @State private var isImporterPresented = false
+
+    var body: some View {
+        Button("Import") { isImporterPresented = true }
+            .disabled(model.isRecording || model.isRequestingPermission)
+            .accessibilityIdentifier("importButton")
+            .fileImporter(isPresented: $isImporterPresented, allowedContentTypes: [.audio], allowsMultipleSelection: false) { result in
+                switch result {
+                case .success(let urls):
+                    guard let url = urls.first else { return }
+                    model.importAudio(from: url)
+                case .failure(let error):
+                    model.report(error)
+                }
+            }
     }
 }

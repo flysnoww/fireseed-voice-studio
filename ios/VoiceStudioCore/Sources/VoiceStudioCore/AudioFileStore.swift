@@ -116,8 +116,18 @@ public final class AudioFileStore {
     }
 
     public func savedVoices() -> [VoiceAsset] {
-        loadRecords(VoiceAsset.self, prefix: "voice-").filter {
-            $0.referenceAudio.persistenceState == .persistent && (try? managedURL(for: $0.referenceAudio)) != nil
+        return loadRecords(VoiceAsset.self, prefix: "voice-").compactMap { voice in
+            let id = voice.referenceAudio.id
+            let metadataURL = metadataDirectory.appendingPathComponent("audio-\(id.uuidString.lowercased()).json")
+            guard let data = try? Data(contentsOf: metadataURL),
+                  let reference = try? decoder.decode(AudioAsset.self, from: data),
+                  reference.id == id, reference.persistenceState == .persistent,
+                  let url = try? managedURL(for: reference),
+                  (try? validateFile(at: url, duration: reference.duration)) != nil else { return nil }
+            return VoiceAsset(id: voice.id, name: voice.name, sourceType: voice.sourceType,
+                              referenceAudio: reference, languageHint: voice.languageHint,
+                              defaultAccent: voice.defaultAccent, defaultAttributes: voice.defaultAttributes,
+                              createdAt: voice.createdAt, updatedAt: voice.updatedAt)
         }
     }
 

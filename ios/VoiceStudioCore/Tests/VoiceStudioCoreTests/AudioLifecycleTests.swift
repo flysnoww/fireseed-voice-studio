@@ -75,6 +75,68 @@ final class AudioLifecycleTests: XCTestCase {
         XCTAssertEqual(store.savedVoices(), [saved])
     }
 
+    func testSavedVoiceReferenceResolvesAfterStoreIsRecreated() throws {
+        let staged = try makeStagedAsset()
+        let source = VoiceAsset(name: "Relaunch voice", sourceType: .record, referenceAudio: staged)
+        let saved = try store.saveVoice(source)
+        let originalURL = try store.managedURL(for: saved.referenceAudio)
+        let originalBytes = try Data(contentsOf: originalURL)
+
+        let relaunchedStore = try AudioFileStore(rootDirectory: temporaryRoot)
+        let reloaded = try XCTUnwrap(relaunchedStore.savedVoices().first)
+        let reloadedURL = try relaunchedStore.managedURL(for: reloaded.referenceAudio)
+
+        XCTAssertEqual(reloaded.referenceAudio.fileName, saved.referenceAudio.fileName)
+        XCTAssertEqual(reloaded.referenceAudio.persistenceState, .persistent)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: reloadedURL.path))
+        XCTAssertEqual(try Data(contentsOf: reloadedURL), originalBytes)
+    }
+
+    func testRelaunchUnderNewRootUsesAudioMetadataInsteadOfEmbeddedCopy() throws {
+        let staged = try makeStagedAsset()
+        let voice = VoiceAsset(name: "Moved voice", sourceType: .record, referenceAudio: staged)
+        let saved = try store.saveVoice(voice)
+        // Simulate an old Voice record retaining the pre-promotion AudioAsset.
+        let voiceURL = temporaryRoot.appendingPathComponent("Metadata/voice-\(voice.id.uuidString.lowercased()).json")
+        try JSONEncoder().encode(voice).write(to: voiceURL)
+        let movedRoot = temporaryRoot.appendingPathComponent("RelaunchedContainer")
+        try FileManager.default.createDirectory(at: movedRoot, withIntermediateDirectories: true)
+        for directory in ["Metadata", "ManagedAudio"] {
+            try FileManager.default.moveItem(at: temporaryRoot.appendingPathComponent(directory),
+                                            to: movedRoot.appendingPathComponent(directory))
+        }
+        let relaunched = try AudioFileStore(rootDirectory: movedRoot)
+        let loaded = try XCTUnwrap(relaunched.savedVoices().first)
+        XCTAssertEqual(loaded.id, voice.id)
+        XCTAssertEqual(loaded.referenceAudio, saved.referenceAudio)
+        let resolved = try relaunched.managedURL(for: loaded.referenceAudio)
+        XCTAssertEqual(resolved.deletingLastPathComponent().standardizedFileURL,
+                       movedRoot.appendingPathComponent("ManagedAudio", isDirectory: true).standardizedFileURL)
+        XCTAssertEqual(try Data(contentsOf: resolved), Data([0x01, 0x02, 0x03]))
+        let metadata = try Data(contentsOf: movedRoot.appendingPathComponent("Metadata/audio-\(staged.id.uuidString.lowercased()).json"))
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: metadata) as? [String: Any])
+        XCTAssertEqual(json["fileName"] as? String, saved.referenceAudio.fileName)
+        XCTAssertFalse(String(decoding: metadata, as: UTF8.self).contains(temporaryRoot.path))
+    }
+
+    func testRelaunchRejectsMissingAudioMetadataEvenWhenEmbeddedCopyIsValid() throws {
+        let saved = try store.saveVoice(VoiceAsset(name: "Missing metadata", sourceType: .record,
+                                                   referenceAudio: makeStagedAsset()))
+        try FileManager.default.removeItem(at: temporaryRoot.appendingPathComponent(
+            "Metadata/audio-\(saved.referenceAudio.id.uuidString.lowercased()).json"))
+        XCTAssertTrue(try AudioFileStore(rootDirectory: temporaryRoot).savedVoices().isEmpty)
+    }
+
+    func testRelaunchRejectsEmptyOrMissingReferenceFile() throws {
+        let saved = try store.saveVoice(VoiceAsset(name: "Missing audio", sourceType: .record,
+                                                   referenceAudio: makeStagedAsset()))
+        let url = try store.managedURL(for: saved.referenceAudio)
+        try Data().write(to: url)
+        XCTAssertTrue(try AudioFileStore(rootDirectory: temporaryRoot).savedVoices().isEmpty)
+        try FileManager.default.removeItem(at: url)
+        XCTAssertTrue(try AudioFileStore(rootDirectory: temporaryRoot).savedVoices().isEmpty)
+    }
+
     func testImportCopiesFileIntoManagedStaging() throws {
         let source = temporaryRoot.appendingPathComponent("outside-source.wav")
         try Data([0x01, 0x02, 0x03]).write(to: source)
