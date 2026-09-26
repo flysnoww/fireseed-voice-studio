@@ -394,7 +394,7 @@ final class VoiceStudioAppTests: XCTestCase {
         let sampleCount = UInt32(Double(sampleRate) * duration)
         let audioBytes = sampleCount * 2
         var data = Data("RIFF".utf8)
-        appendLittleEndian(36 + audioBytes, to: &data)
+        appendLittleEndian(UInt32(36) + audioBytes, to: &data)
         data.append(Data("WAVEfmt ".utf8))
         appendLittleEndian(16, to: &data)
         appendLittleEndian(UInt16(1), to: &data)
