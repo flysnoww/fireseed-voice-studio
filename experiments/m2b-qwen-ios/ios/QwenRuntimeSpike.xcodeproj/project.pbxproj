@@ -1,0 +1,40 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 56;
+	objects = {
+		A00000000000000000000001 /* QwenRuntimeSpike.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = QwenRuntimeSpike.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A00000000000000000000002 /* QwenRuntimeSpikeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QwenRuntimeSpikeApp.swift; sourceTree = "<group>"; };
+		A00000000000000000000003 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		A00000000000000000000004 /* QwenRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QwenRuntime.swift; sourceTree = "<group>"; };
+		A00000000000000000000005 /* QwenRuntimeSpike-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "QwenRuntimeSpike-Bridging-Header.h"; sourceTree = "<group>"; };
+		A00000000000000000000006 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		A00000000000000000000007 /* Sources */ = {isa = PBXGroup; children = (A00000000000000000000002, A00000000000000000000003, A00000000000000000000004, A00000000000000000000005, A00000000000000000000006,); path = .; sourceTree = "<group>"; };
+		A00000000000000000000008 /* Products */ = {isa = PBXGroup; children = (A00000000000000000000001,); name = Products; sourceTree = "<group>"; };
+		A00000000000000000000009 /* Project group */ = {isa = PBXGroup; children = (A00000000000000000000007, A00000000000000000000008,); sourceTree = "<group>"; };
+		A0000000000000000000000A /* Sources phase */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000011, A00000000000000000000012, A00000000000000000000013,); runOnlyForDeploymentPostprocessing = 0; };
+		A0000000000000000000000B /* Frameworks phase */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000014, A00000000000000000000015, A00000000000000000000016, A00000000000000000000017,); runOnlyForDeploymentPostprocessing = 0; };
+		A0000000000000000000000C /* Resources phase */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		A0000000000000000000000D /* QwenRuntimeSpike */ = {isa = PBXNativeTarget; buildConfigurationList = A00000000000000000000021; buildPhases = (A0000000000000000000000A, A0000000000000000000000B, A0000000000000000000000C,); buildRules = (); dependencies = (); name = QwenRuntimeSpike; productName = QwenRuntimeSpike; productReference = A00000000000000000000001; productType = "com.apple.product-type.application"; };
+		A0000000000000000000000E /* Project object */ = {isa = PBXProject; attributes = {BuildIndependentTargetsInParallel = 1; LastUpgradeCheck = 1600; TargetAttributes = {A0000000000000000000000D = {CreatedOnToolsVersion = 16.0; }; }; }; buildConfigurationList = A00000000000000000000022; compatibilityVersion = "Xcode 14.0"; developmentRegion = en; mainGroup = A00000000000000000000009; productRefGroup = A00000000000000000000008; projectDirPath = ""; projectRoot = ""; targets = (A0000000000000000000000D,); };
+		A00000000000000000000011 /* App source */ = {isa = PBXBuildFile; fileRef = A00000000000000000000002; };
+		A00000000000000000000012 /* ContentView source */ = {isa = PBXBuildFile; fileRef = A00000000000000000000003; };
+		A00000000000000000000013 /* Runtime source */ = {isa = PBXBuildFile; fileRef = A00000000000000000000004; };
+		A00000000000000000000014 /* AVFoundation.framework */ = {isa = PBXBuildFile; fileRef = A00000000000000000000018; };
+		A00000000000000000000015 /* UIKit.framework */ = {isa = PBXBuildFile; fileRef = A00000000000000000000019; };
+		A00000000000000000000016 /* Foundation.framework */ = {isa = PBXBuildFile; fileRef = A0000000000000000000001A; };
+		A00000000000000000000017 /* SwiftUI.framework */ = {isa = PBXBuildFile; fileRef = A0000000000000000000001B; };
+		A00000000000000000000018 /* AVFoundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVFoundation.framework; path = System/Library/Frameworks/AVFoundation.framework; sourceTree = SDKROOT; };
+		A00000000000000000000019 /* UIKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = UIKit.framework; path = System/Library/Frameworks/UIKit.framework; sourceTree = SDKROOT; };
+		A0000000000000000000001A /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = System/Library/Frameworks/Foundation.framework; sourceTree = SDKROOT; };
+		A0000000000000000000001B /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftUI.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = SDKROOT; };
+		A0000000000000000000001C /* Project Debug */ = {isa = XCBuildConfiguration; buildSettings = {IPHONEOS_DEPLOYMENT_TARGET = 16.0; SDKROOT = iphoneos; SWIFT_VERSION = 5.0;}; name = Debug; };
+		A0000000000000000000001D /* Project Release */ = {isa = XCBuildConfiguration; buildSettings = {IPHONEOS_DEPLOYMENT_TARGET = 16.0; SDKROOT = iphoneos; SWIFT_VERSION = 5.0;}; name = Release; };
+		A0000000000000000000001E /* Target Debug */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = Info.plist; PRODUCT_BUNDLE_IDENTIFIER = org.fireseed.QwenRuntimeSpike; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_OBJC_BRIDGING_HEADER = "$(SRCROOT)/QwenRuntimeSpike-Bridging-Header.h"; SWIFT_VERSION = 5.0; IPHONEOS_DEPLOYMENT_TARGET = 16.0; TARGETED_DEVICE_FAMILY = 1; ARCHS = arm64; ONLY_ACTIVE_ARCH = YES; HEADER_SEARCH_PATHS = ("$(SRCROOT)/../../upstream/src", "$(SRCROOT)/../../upstream/ggml/include",); LIBRARY_SEARCH_PATHS = ("$(SRCROOT)/../../upstream/build-ios", "$(SRCROOT)/../../upstream/ggml/build/src", "$(SRCROOT)/../../upstream/ggml/build/src/ggml-metal",); OTHER_LDFLAGS = ("-lqwen3tts_ios", "-lqwen3_tts", "-laudio_tokenizer_decoder", "-laudio_tokenizer_encoder", "-ltts_transformer", "-ltext_tokenizer", "-lggml-metal", "-lggml-cpu", "-lggml", "-lggml-base", "-framework", Metal, "-framework", MetalKit, "-framework", Foundation, "-lobjc", "-lc++",);}; name = Debug; };
+		A0000000000000000000001F /* Target Release */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = Info.plist; PRODUCT_BUNDLE_IDENTIFIER = org.fireseed.QwenRuntimeSpike; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_OBJC_BRIDGING_HEADER = "$(SRCROOT)/QwenRuntimeSpike-Bridging-Header.h"; SWIFT_VERSION = 5.0; IPHONEOS_DEPLOYMENT_TARGET = 16.0; TARGETED_DEVICE_FAMILY = 1; ARCHS = arm64; ONLY_ACTIVE_ARCH = YES; HEADER_SEARCH_PATHS = ("$(SRCROOT)/../../upstream/src", "$(SRCROOT)/../../upstream/ggml/include",); LIBRARY_SEARCH_PATHS = ("$(SRCROOT)/../../upstream/build-ios", "$(SRCROOT)/../../upstream/ggml/build/src", "$(SRCROOT)/../../upstream/ggml/build/src/ggml-metal",); OTHER_LDFLAGS = ("-lqwen3tts_ios", "-lqwen3_tts", "-laudio_tokenizer_decoder", "-laudio_tokenizer_encoder", "-ltts_transformer", "-ltext_tokenizer", "-lggml-metal", "-lggml-cpu", "-lggml", "-lggml-base", "-framework", Metal, "-framework", MetalKit, "-framework", Foundation, "-lobjc", "-lc++",);}; name = Release; };
+		A00000000000000000000021 /* Target configs */ = {isa = XCConfigurationList; buildConfigurations = (A0000000000000000000001E, A0000000000000000000001F,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug; };
+		A00000000000000000000022 /* Project configs */ = {isa = XCConfigurationList; buildConfigurations = (A0000000000000000000001C, A0000000000000000000001D,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+	};
+	rootObject = A0000000000000000000000E;
+}

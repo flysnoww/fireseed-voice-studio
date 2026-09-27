@@ -1,0 +1,89 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -10,6 +10,10 @@
+ # Compiler flags
+ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -Wpedantic")
+-    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -march=native")
++    if(CMAKE_CROSSCOMPILING AND CMAKE_SYSTEM_NAME STREQUAL "iOS")
++        set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3")
++    else()
++        set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -march=native")
++    endif()
+     set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -O0")
+ endif()
+@@ -37,6 +37,7 @@
+ set(GGML_BUILD_DIR "${GGML_DIR}/build")
+ # Detect Metal backend availability
+-if(APPLE AND EXISTS "${GGML_BUILD_DIR}/src/ggml-metal/libggml-metal.dylib")
++if(APPLE AND (EXISTS "${GGML_BUILD_DIR}/src/ggml-metal/libggml-metal.dylib"
++              OR EXISTS "${GGML_BUILD_DIR}/src/ggml-metal/libggml-metal.a"))
+     set(GGML_HAS_METAL ON)
+     message(STATUS "GGML Metal backend found — GPU acceleration enabled")
+ else()
+@@ -149,6 +149,11 @@
+ if(WIN32)
+     target_link_libraries(qwen3_tts PUBLIC psapi)
+ endif()
++# Static C ABI for the isolated iOS spike. The product still has no renderer integration.
++add_library(qwen3tts_ios STATIC src/qwen3tts_c_api.cpp)
++target_include_directories(qwen3tts_ios PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
++target_link_libraries(qwen3tts_ios PUBLIC qwen3_tts "-framework Foundation" "-lobjc")
++
+ # Shared library with C API (for Nim FFI)
+ add_library(qwen3tts_shared SHARED
+     src/qwen3tts_c_api.cpp
+diff --git a/src/gguf_loader.h b/src/gguf_loader.h
+--- a/src/gguf_loader.h
++++ b/src/gguf_loader.h
+@@ -73,4 +73,5 @@
+ ggml_backend_t init_preferred_backend(const char * component_name, std::string * error_msg);
+ void release_preferred_backend(ggml_backend_t backend);
++const char * active_backend_name();
+ // Helper function to free model resources
+ void free_ggml_resources(struct ggml_context * ctx, ggml_backend_buffer_t buffer);
+diff --git a/src/gguf_loader.cpp b/src/gguf_loader.cpp
+--- a/src/gguf_loader.cpp
++++ b/src/gguf_loader.cpp
+@@ -205,4 +205,11 @@
+     ggml_backend_free(backend);
+ }
++const char * active_backend_name() {
++    const auto & shared = get_shared_backend_state();
++    if (!shared.backend) return "Not loaded";
++    ggml_backend_dev_t device = ggml_backend_get_device(shared.backend);
++    return device ? ggml_backend_dev_name(device) : "Unknown";
++}
++
+ bool GGUFLoader::open(const std::string & path) {
+     close();  // Close any previously opened file
+diff --git a/src/qwen3tts_c_api.h b/src/qwen3tts_c_api.h
+--- a/src/qwen3tts_c_api.h
++++ b/src/qwen3tts_c_api.h
+@@ -90,8 +90,11 @@
+ Qwen3TtsAudio* qwen3_tts_synthesize_with_embedding(
+     Qwen3Tts* tts,
+     const char* text,
+     const float* embedding,
+     int32_t embedding_size,
+     const Qwen3TtsParams* params);
++/* Spike instrumentation: actual device selected by GGML, if loaded. */
++const char* qwen3_tts_active_backend_name(const Qwen3Tts* tts);
++
+ /* Get last error message (or empty string) */
+ const char* qwen3_tts_get_error(const Qwen3Tts* tts);
+diff --git a/src/qwen3tts_c_api.cpp b/src/qwen3tts_c_api.cpp
+--- a/src/qwen3tts_c_api.cpp
++++ b/src/qwen3tts_c_api.cpp
+@@ -243,5 +243,10 @@
+     return out;
+ }
++const char * qwen3_tts_active_backend_name(const Qwen3Tts * tts) {
++    if (!tts || !tts->engine.is_loaded()) return "Not loaded";
++    return qwen3_tts::active_backend_name();
++}
++
+ const char * qwen3_tts_get_error(const Qwen3Tts * tts) {
+     if (!tts) return "";
+     return tts->last_error.c_str();

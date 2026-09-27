@@ -1,0 +1,15 @@
+# Large upstream source checkout, weights, generated GGUF/CoreML and device outputs.
+upstream/
+patchcheck/
+model/assets/
+model/cache/
+model/.venv/
+ios/Frameworks/*.a
+ios/build/
+build/
+output/
+*.wav
+*.mlpackage/
+*.gguf
+__pycache__/
+.DS_Store

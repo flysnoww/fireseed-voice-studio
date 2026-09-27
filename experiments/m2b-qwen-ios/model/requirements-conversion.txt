@@ -1,0 +1,7 @@
+# Direct preparation/conversion dependencies pinned to exact versions.
+# gguf is supplied by upstream/ggml/gguf-py at the exact submodule revision.
+huggingface_hub==0.36.2
+numpy==2.5.3
+safetensors==0.8.0
+torch==2.7.0
+tqdm==4.70.1
