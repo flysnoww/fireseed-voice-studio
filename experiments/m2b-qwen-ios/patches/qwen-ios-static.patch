@@ -87,14 +87,15 @@ diff --git a/src/qwen3tts_c_api.h b/src/qwen3tts_c_api.h
  /* Get last error message (or empty string) */
  const char* qwen3_tts_get_error(const Qwen3Tts* tts);
 
+diff --git a/src/qwen3_tts.h b/src/qwen3_tts.h
+--- a/src/qwen3_tts.h
++++ b/src/qwen3_tts.h
+@@ -13,1 +13,2 @@
+ namespace qwen3_tts {
++const char * active_backend_name();
 diff --git a/src/qwen3tts_c_api.cpp b/src/qwen3tts_c_api.cpp
 --- a/src/qwen3tts_c_api.cpp
 +++ b/src/qwen3tts_c_api.cpp
-@@ -7,2 +7,3 @@
- #include "qwen3_tts.h"
--
-+#include "gguf_loader.h"
-+
 @@ -238,6 +238,10 @@
      return out;
  }
