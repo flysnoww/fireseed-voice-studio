@@ -383,6 +383,7 @@ actor QwenRendererAdapter: InstallableSpeechProvider, VoicePreparingSpeechProvid
             while !reachedEndOfStream {
                 converted.frameLength = 0
                 var inputReadError: Error?
+                var retainedInputBuffers: [AVAudioPCMBuffer] = []
                 var conversionError: NSError?
                 let status = converter.convert(to: converted, error: &conversionError) { _, inputStatus in
                     guard inputReadError == nil,
@@ -401,11 +402,16 @@ actor QwenRendererAdapter: InstallableSpeechProvider, VoicePreparingSpeechProvid
                         inputStatus.pointee = .endOfStream
                         return nil
                     }
+                    retainedInputBuffers.append(input)
                     inputStatus.pointee = .haveData
                     return input
                 }
                 if let inputReadError { throw inputReadError }
-                if let conversionError { throw conversionError }
+                if let conversionError {
+                    throw NSError(domain: "VoiceStudio.AudioConversion", code: conversionError.code,
+                                  userInfo: [NSLocalizedDescriptionKey: conversionError.localizedDescription,
+                                             NSUnderlyingErrorKey: conversionError])
+                }
                 if converted.frameLength > 0 { try output.write(from: converted) }
                 switch status {
                 case .endOfStream:
