@@ -20,6 +20,23 @@ xcuserdata/
 *.ipa
 *.dSYM/
 *.mobileprovision
+
+# Local model packages and converted weights must stay on this machine.
+/local-models/
+
+# Local M2-A model experiments: never commit model weights, private audio,
+# generated samples, or per-model Python environments.
+experiments/m2a/**/.venv/
+experiments/m2a/**/__pycache__/
+experiments/m2a/**/venv/
+experiments/m2a/**/models/
+experiments/m2a/**/cache/
+experiments/m2a/runtime/
+experiments/m2a/.cache/
+experiments/m2a/input/private/
+experiments/m2a/input/public-samples/*.wav
+experiments/m2a/input/*.wav
+experiments/m2a/results/**/*.wav
 *.p12
 
 # Operating-system/editor noise

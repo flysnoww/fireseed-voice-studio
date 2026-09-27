@@ -38,6 +38,7 @@ def main() -> None:
             "CMakeLists.txt",
             "src/gguf_loader.h",
             "src/gguf_loader.cpp",
+            "src/qwen3_tts.h",
             "src/qwen3tts_c_api.h",
             "src/qwen3tts_c_api.cpp",
         }

@@ -20,6 +20,30 @@ final class VoiceStudioAppTests: XCTestCase {
     }
 
     @MainActor
+    func testAppearanceDefaultsAndPersistsSkinAndBackgroundIndependently() throws {
+        let defaults = makeLanguageDefaults()
+        let skinKey = UUID().uuidString
+        let backgroundKey = UUID().uuidString
+        let folder = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: folder) }
+
+        let initial = AppAppearancePreference(defaults: defaults, skinKey: skinKey,
+                                               backgroundKey: backgroundKey, appearanceDirectory: folder)
+        XCTAssertEqual(initial.skin, .frost)
+        XCTAssertNil(initial.backgroundImageURL)
+        initial.setSkin(.warm)
+        try initial.saveBackgroundImage(Data([0xFF, 0xD8, 0xFF, 0xD9]))
+
+        let restored = AppAppearancePreference(defaults: defaults, skinKey: skinKey,
+                                               backgroundKey: backgroundKey, appearanceDirectory: folder)
+        XCTAssertEqual(restored.skin, .warm)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: try XCTUnwrap(restored.backgroundImageURL).path))
+        restored.clearBackgroundImage()
+        XCTAssertEqual(restored.skin, .warm)
+        XCTAssertNil(restored.backgroundImageURL)
+    }
+
+    @MainActor
     func testLanguagePreferenceIsIndependentOfSavedVoiceState() throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -135,12 +159,58 @@ final class VoiceStudioAppTests: XCTestCase {
         XCTAssertTrue(model.savedVoices.isEmpty)
     }
 
-    func testRendererIsExplicitlyUnavailableInM1() async {
-        let renderer = UnavailableRenderer()
-        XCTAssertEqual(renderer.capabilities.support(for: .voiceClone), .unsupported)
-        let request = VoiceRequest(text: "Hello", voiceID: UUID(), renderMode: .preview)
-        let result = await renderer.synthesize(request)
-        XCTAssertEqual(result, .unsupported(.voiceClone))
+    func testUnavailableSpeechProviderDoesNotClaimGenerationSupport() async {
+        let provider = UnavailableSpeechProvider()
+        XCTAssertEqual(provider.capabilities.status(for: .speechGeneration), .unsupported)
+        let request = VoiceRequest(text: "Hello", voice: .systemDefault, renderMode: .preview)
+        let result = await provider.generate(request, voice: nil, referenceAudioURL: nil)
+        XCTAssertEqual(result, .unsupported(.speechGeneration))
+    }
+
+    @MainActor
+    func testShapingAndExpressionStayUnavailableUntilProviderSupportsThem() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = try VoiceStudioModel(rootDirectory: root)
+        let capabilities = model.capabilities(for: .systemDefault)
+
+        XCTAssertTrue(capabilities.shaping.isEmpty)
+        XCTAssertTrue(capabilities.expressions.isEmpty)
+        XCTAssertEqual(capabilities.status(for: .speed), .supported)
+        XCTAssertEqual(capabilities.status(for: .pitch), .supported)
+    }
+
+    func testAppleSystemSpeechProviderProducesPlayableAudioForSharedRequest() async throws {
+        let provider = AppleSystemSpeechProvider()
+        guard let language = provider.capabilities.languages.first(where: { $0.hasPrefix("en") }),
+              let accent = provider.capabilities.accents(for: language).first else {
+            throw XCTSkip("This simulator has no English system speech voice.")
+        }
+        let request = VoiceRequest(text: "Hello from Voice Studio", voice: .systemDefault,
+                                   language: language, accent: accent, renderMode: .generate)
+
+        let result = await provider.generate(request, voice: nil, referenceAudioURL: nil)
+
+        guard case .renderedFile(let url, let duration, _) = result else {
+            XCTFail("Expected system speech to produce an audio file, got \(result)")
+            return
+        }
+        defer { try? FileManager.default.removeItem(at: url) }
+        let file = try AVAudioFile(forReading: url)
+        XCTAssertGreaterThan(file.length, 0)
+        XCTAssertGreaterThan(duration, 0)
+    }
+
+    func testAppleTimePitchProcessorRendersAdjustedAudioFile() throws {
+        let source = FileManager.default.temporaryDirectory.appendingPathComponent("time-pitch-\(UUID()).wav")
+        defer { try? FileManager.default.removeItem(at: source) }
+        try makeSilentWaveFile(at: source, duration: 0.25)
+
+        let rendered = try AudioTimePitchProcessor().process(source, speed: 1.1, pitch: 100)
+
+        defer { if rendered != source { try? FileManager.default.removeItem(at: rendered) } }
+        XCTAssertNotEqual(rendered, source)
+        XCTAssertGreaterThan(try AVAudioFile(forReading: rendered).length, 0)
     }
 
     @MainActor
@@ -205,6 +275,7 @@ final class VoiceStudioAppTests: XCTestCase {
         model.saveVoice(name: "Imported reference")
         XCTAssertEqual(model.savedVoices.count, 1)
         XCTAssertEqual(model.savedVoices.first?.name, "Imported reference")
+        XCTAssertEqual(model.mostRecentlySavedVoiceID, model.savedVoices.first?.id)
         XCTAssertEqual(model.savedVoices.first?.sourceType.rawValue, VoiceSourceType.imported.rawValue)
         XCTAssertEqual(model.savedVoices.first?.referenceAudio.duration, asset.duration)
         XCTAssertEqual(model.savedVoices.first?.savedAt, model.savedVoices.first?.createdAt)

@@ -34,23 +34,20 @@ private struct QwenPackManifest: Decodable {
 }
 
 /// Product-facing adapter for a replaceable local renderer pack. Runtime details stay here.
-actor QwenRendererAdapter: RendererAdapter {
+actor QwenRendererAdapter: InstallableSpeechProvider {
     nonisolated static let installedPackURL = FileManager.default.urls(
         for: .applicationSupportDirectory, in: .userDomainMask)[0]
         .appendingPathComponent("RendererPacks/LocalVoice", isDirectory: true)
 
-    nonisolated let capabilities = RendererCapabilities([
-        .local: .supported, .referenceVoice: .supported, .voiceClone: .supported,
-        .languageSelection: .supported, .voiceDesign: .unsupported, .timbreControl: .unsupported,
-        .emotionControl: .unsupported, .accentControl: .unsupported, .speedControl: .unsupported,
-        .instructionControl: .unsupported, .dialectControl: .unsupported,
-        .referenceTranscriptConditioning: .unsupported
-    ])
+    nonisolated let id: SpeechProviderID = .local
+    nonisolated let capabilities = CapabilityProfile(
+        support: [.speechGeneration: .supported, .voiceCloning: .supported,
+                  .languageSelection: .supported], languages: ["en", "zh"])
+    nonisolated var installedResourceURL: URL { Self.installedPackURL }
 
     private let installURL: URL
     private var runtime: OpaquePointer?
     private var manifest: QwenPackManifest?
-    private var embeddings: [UUID: [Float]] = [:]
     private let supportedModelRevision = "dab70521e0956e3db91fb887d36c9a07d21ebc0b"
     private let supportedRuntimeRevision = "b3ba14077cf1b3e11b86e5f84aa9184605c89b28"
     private let supportedGGMLRevision = "3af5f5760e19a96427f5f7a93b79cbdf3d4b265b"
@@ -63,7 +60,7 @@ actor QwenRendererAdapter: RendererAdapter {
         if let runtime { qwen3_tts_destroy(runtime) }
     }
 
-    func installPack(at folder: URL) async throws -> RendererCapabilityManifest {
+    func installPack(at folder: URL) async throws -> CapabilityProfile {
         let securityScoped = folder.startAccessingSecurityScopedResource()
         defer { if securityScoped { folder.stopAccessingSecurityScopedResource() } }
         let source = try validate(folder)
@@ -81,38 +78,31 @@ actor QwenRendererAdapter: RendererAdapter {
         }
         if let backup { try? FileManager.default.removeItem(at: backup) }
         manifest = source
-        return capabilityManifest(source)
+        return capabilities
     }
 
-    func loadVoice(_ voice: VoiceAsset, referenceAudioURL: URL) async -> CapabilitySupport {
-        guard let runtime else { return .unsupported }
-        let normalized: URL
-        do {
-            normalized = try normalizeReferenceAudio(referenceAudioURL)
-        } catch {
-            return .unsupported
+    func generate(_ request: VoiceRequest, voice: VoiceAsset?, referenceAudioURL: URL?) async -> SpeechResult {
+        guard let runtime else { return .failure("Speech provider is not ready.") }
+        guard case .saved(let voiceID) = request.voice,
+              let voice, voice.id == voiceID, let referenceAudioURL else {
+            return .unsupported(.voiceCloning)
         }
-        defer { try? FileManager.default.removeItem(at: normalized) }
-        var values = [Float](repeating: 0, count: 4096)
-        let count = normalized.path.withCString { path in
-            values.withUnsafeMutableBufferPointer { buffer in
-                qwen3_tts_extract_embedding_file(runtime, path, buffer.baseAddress, Int32(buffer.count))
-            }
-        }
-        guard count > 0 else { return .unsupported }
-        values.removeSubrange(Int(count)..<values.count)
-        embeddings[voice.id] = values
-        return .supported
-    }
-
-    func synthesize(_ request: VoiceRequest) async -> RendererResult {
-        guard let runtime, let embedding = embeddings[request.voiceID] else {
-            return .failure("Prepare this saved voice before generating speech.")
-        }
-        guard request.renderMode == .generate else { return .unsupported(.streaming) }
+        guard request.renderMode == .generate else { return .unsupported(.speechGeneration) }
         guard let languageID = Self.languageID(for: request.language) else {
             return .failure("Choose a supported speech language.")
         }
+        let normalized: URL
+        do { normalized = try normalizeReferenceAudio(referenceAudioURL) }
+        catch { return .failure("This saved voice could not be prepared for speech generation.") }
+        defer { try? FileManager.default.removeItem(at: normalized) }
+        var embedding = [Float](repeating: 0, count: 4096)
+        let embeddingSize = normalized.path.withCString { path in
+            embedding.withUnsafeMutableBufferPointer { buffer in
+                qwen3_tts_extract_embedding_file(runtime, path, buffer.baseAddress, Int32(buffer.count))
+            }
+        }
+        guard embeddingSize > 0 else { return .failure("This saved voice could not be prepared for speech generation.") }
+        embedding.removeSubrange(Int(embeddingSize)..<embedding.count)
         var params = Qwen3TtsParams()
         qwen3_tts_default_params(&params)
         params.n_threads = 4
@@ -211,19 +201,6 @@ actor QwenRendererAdapter: RendererAdapter {
         let next = installURL.path.withCString { qwen3_tts_create($0, 4) }
         guard let next else { throw VoiceStudioError.rendererUnavailable }
         runtime = next
-        embeddings.removeAll(keepingCapacity: true)
-    }
-
-    private func capabilityManifest(_ pack: QwenPackManifest) -> RendererCapabilityManifest {
-        var support: [RendererCapability: CapabilitySupport] = [:]
-        for capability in RendererCapability.allCases {
-            if let rawValue = pack.capabilities[capability.rawValue],
-               let value = CapabilitySupport(rawValue: rawValue) {
-                support[capability] = value
-            }
-        }
-        return RendererCapabilityManifest(support: support, supportedLanguages: pack.supported_languages,
-                                          supportedDialects: pack.supported_dialects)
     }
 
     private static let expectedPackCapabilities: [String: String] = [
@@ -288,9 +265,11 @@ actor QwenRendererAdapter: RendererAdapter {
     }
 
     private static func languageID(for language: String?) -> Int32? {
-        switch language?.lowercased() {
-        case "en", "english": 2050
-        case "zh", "zh-hans", "chinese", "简体中文": 2055
+        guard let language else { return nil }
+        let primary = language.lowercased().split(separator: "-").first.map(String.init)
+        switch primary {
+        case "en": 2050
+        case "zh": 2055
         default: nil
         }
     }

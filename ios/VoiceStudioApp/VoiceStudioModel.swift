@@ -1,4 +1,5 @@
 import Combine
+import AVFoundation
 import Foundation
 import VoiceStudioCore
 
@@ -30,15 +31,16 @@ final class VoiceStudioModel: ObservableObject {
     @Published private(set) var microphonePermissionDenied = false
     @Published private(set) var isPlaying = false
     @Published private(set) var isSavingVoice = false
-    @Published private(set) var isInstallingRenderer = false
+    @Published private(set) var isInstallingLocalSpeech = false
     @Published private(set) var isGeneratingSpeech = false
-    @Published private(set) var isRendererReady = false
+    @Published private(set) var isLocalSpeechReady = false
     @Published private(set) var generatedAudio: AudioAsset?
     @Published private(set) var currentReference: CurrentReferenceAudio?
     @Published private(set) var savedVoices: [VoiceAsset] = []
+    @Published private(set) var mostRecentlySavedVoiceID: UUID?
     @Published private(set) var savedVoiceFilter: SavedVoiceFilter = .time
     @Published private(set) var savedVoicePage = 0
-    @Published var statusMessage = "Record or import a reference audio file to create a voice."
+    @Published var statusMessage = "Choose a voice and enter text to generate speech."
 
     var isReferenceReady: Bool { currentReference != nil }
     var canSaveVoice: Bool {
@@ -57,7 +59,9 @@ final class VoiceStudioModel: ObservableObject {
 
     private let audioFileStore: AudioFileStore
     private let audioLifecycle: AudioLifecycle
-    private let renderer: QwenRendererAdapter
+    private let providers: [SpeechProviderID: any SpeechProvider]
+    private let localPackProvider: any InstallableSpeechProvider
+    private let timePitchProcessor = AudioTimePitchProcessor()
 
     private let recorder: any AudioRecording
     private let importer: any AudioImporting
@@ -66,7 +70,8 @@ final class VoiceStudioModel: ObservableObject {
     init(rootDirectory: URL? = nil,
          microphonePermissionClient: (any MicrophonePermissionClient)? = nil,
          audioRecorder: (any AudioRecording)? = nil,
-         audioImporter: (any AudioImporting)? = nil) throws {
+         audioImporter: (any AudioImporting)? = nil,
+         providerAssembly: SpeechProviderAssembly = .production()) throws {
         let storeRoot: URL
         if let rootDirectory {
             storeRoot = rootDirectory
@@ -78,7 +83,8 @@ final class VoiceStudioModel: ObservableObject {
         let fileStore = try AudioFileStore(rootDirectory: storeRoot)
         self.audioFileStore = fileStore
         self.audioLifecycle = AudioLifecycle(fileStore: fileStore)
-        self.renderer = QwenRendererAdapter()
+        self.providers = providerAssembly.providers
+        self.localPackProvider = providerAssembly.localPackProvider
 
         let activeRecorder = audioRecorder ?? AudioRecorder(fileStore: fileStore,
                                                             microphonePermissionClient: microphonePermissionClient)
@@ -152,57 +158,98 @@ final class VoiceStudioModel: ObservableObject {
 
     func playVoiceReference(_ voice: VoiceAsset) { play(voice.referenceAudio) }
 
-    var generationCapabilities: RendererCapabilities { renderer.capabilities }
-
-    func restoreLocalRenderer() async {
-        guard !isRendererReady, !isInstallingRenderer else { return }
-        let installed = QwenRendererAdapter.installedPackURL
-        guard FileManager.default.fileExists(atPath: installed.appendingPathComponent("manifest.json").path) else { return }
-        await installRendererPack(from: installed)
+    func capabilities(for selection: VoiceSelection) -> CapabilityProfile {
+        let providerID: SpeechProviderID = selection == .systemDefault ? .system : .local
+        guard let provider = providers[providerID] else { return CapabilityProfile() }
+        var support = provider.capabilities.support
+        support[.speed] = .supported
+        support[.pitch] = .supported
+        return CapabilityProfile(support: support, shaping: provider.capabilities.shaping,
+                                 expressions: provider.capabilities.expressions,
+                                 languages: provider.capabilities.languages,
+                                 accentsByLanguage: provider.capabilities.accentsByLanguage)
     }
 
-    func installRendererPack(from folder: URL) async {
-        guard !isInstallingRenderer, !isGeneratingSpeech else { return }
-        isInstallingRenderer = true
-        defer { isInstallingRenderer = false }
+    func availableLanguages(for selection: VoiceSelection) -> [String] {
+        capabilities(for: selection).languages
+    }
+
+    func availableAccents(for selection: VoiceSelection, language: String?) -> [String] {
+        capabilities(for: selection).accents(for: language)
+    }
+
+    func canGenerate(text: String, voice: VoiceSelection, language: String) -> Bool {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        return SpeechProviderSelection.select(voice: voice, language: language,
+                                              system: providers[.system]?.capabilities ?? CapabilityProfile(),
+                                              local: providers[.local]?.capabilities,
+                                              localIsReady: isLocalSpeechReady) != nil
+    }
+
+    func restoreLocalSpeechProvider() async {
+        guard !isLocalSpeechReady, !isInstallingLocalSpeech else { return }
+        let installed = localPackProvider.installedResourceURL
+        guard FileManager.default.fileExists(atPath: installed.appendingPathComponent("manifest.json").path) else { return }
+        await installLocalSpeechResource(from: installed)
+    }
+
+    func installLocalSpeechResource(from folder: URL) async {
+        guard !isInstallingLocalSpeech, !isGeneratingSpeech else { return }
+        isInstallingLocalSpeech = true
+        defer { isInstallingLocalSpeech = false }
         do {
-            _ = try await renderer.installPack(at: folder)
-            isRendererReady = true
-            statusMessage = "Local voice renderer ready."
+            _ = try await localPackProvider.installPack(at: folder)
+            isLocalSpeechReady = true
+            statusMessage = "Local speech is ready."
         } catch {
-            isRendererReady = false
-            statusMessage = "Could not load local voice renderer. Please try again."
+            isLocalSpeechReady = false
+            statusMessage = "Could not load local speech. Please try again."
         }
     }
 
-    func generateSpeech(text: String, voiceID: UUID, language: String) async {
-        guard isRendererReady, !isGeneratingSpeech,
-              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              let voice = savedVoices.first(where: { $0.id == voiceID }),
-              generationCapabilities.support(for: .voiceClone) == .supported else { return }
+    func generateSpeech(text: String, voice selection: VoiceSelection, language: String,
+                        accent: String?, shaping: VoiceShaping = VoiceShaping(),
+                        expression: VoiceExpression? = nil, speed: Double = 1,
+                        pitch: Double = 0) async {
+        guard !isGeneratingSpeech, canGenerate(text: text, voice: selection, language: language) else { return }
+        let effectiveCapabilities = capabilities(for: selection)
+        guard shaping.values.keys.allSatisfy({ effectiveCapabilities.shaping[$0] != nil && effectiveCapabilities.shaping[$0] != .unsupported }),
+              expression.map({ effectiveCapabilities.expressions[$0] != nil && effectiveCapabilities.expressions[$0] != .unsupported }) ?? true,
+              effectiveCapabilities.status(for: .speed) == .supported,
+              effectiveCapabilities.status(for: .pitch) == .supported else {
+            statusMessage = "Some selected voice controls are not available."
+            return
+        }
+        guard let providerID = SpeechProviderSelection.select(
+            voice: selection, language: language,
+            system: providers[.system]?.capabilities ?? CapabilityProfile(),
+            local: providers[.local]?.capabilities, localIsReady: isLocalSpeechReady),
+              let provider = providers[providerID] else { return }
+        let voice = selection.savedVoiceID.flatMap { id in savedVoices.first(where: { $0.id == id }) }
         isGeneratingSpeech = true
         defer { isGeneratingSpeech = false }
         stopPlayback()
         do {
-            let referenceURL = try audioFileStore.managedURL(for: voice.referenceAudio)
-            guard await renderer.loadVoice(voice, referenceAudioURL: referenceURL) == .supported else {
-                statusMessage = "This saved voice could not be prepared for local generation."
-                return
-            }
-            let request = VoiceRequest(text: text, voiceID: voice.id, language: language,
-                                      renderMode: .generate)
-            switch await renderer.synthesize(request) {
-            case .renderedFile(let url, let duration, _):
-                defer { try? FileManager.default.removeItem(at: url) }
-                let asset = try audioFileStore.registerGeneratedAudio(from: url, duration: duration,
-                                                                     sourceVoiceID: voice.id, text: text)
+            let referenceURL = try voice.map { try audioFileStore.managedURL(for: $0.referenceAudio) }
+            let request = VoiceRequest(text: text, voice: selection, language: language,
+                                       accent: accent, shaping: shaping, expression: expression,
+                                       speed: speed, pitch: pitch, renderMode: .generate)
+            switch await provider.generate(request, voice: voice, referenceAudioURL: referenceURL) {
+            case .renderedFile(let rawURL, _, _):
+                defer { try? FileManager.default.removeItem(at: rawURL) }
+                let shapedURL = try timePitchProcessor.process(rawURL, speed: speed, pitch: pitch)
+                defer { if shapedURL != rawURL { try? FileManager.default.removeItem(at: shapedURL) } }
+                let outputFile = try AVAudioFile(forReading: shapedURL)
+                let duration = Double(outputFile.length) / outputFile.processingFormat.sampleRate
+                let asset = try audioFileStore.registerGeneratedAudio(from: shapedURL, duration: duration,
+                                                                     sourceVoiceID: voice?.id, text: text)
                 try audioLifecycle.cache(asset, as: .generated)
                 generatedAudio = asset
                 statusMessage = "Speech generated."
             case .failure:
                 statusMessage = "Speech generation failed. Please try again."
             case .unsupported:
-                statusMessage = "This renderer does not support the requested capability."
+                statusMessage = "This voice does not support the selected controls."
             case .audio:
                 statusMessage = "Generated audio could not be saved. Please try again."
             }
@@ -245,6 +292,7 @@ final class VoiceStudioModel: ObservableObject {
             let saved = try audioFileStore.saveVoice(voice)
             savedVoices = SavedVoiceLibrary.voices([saved] + savedVoices, matching: .time)
             savedVoicePage = 0
+            mostRecentlySavedVoiceID = saved.id
             self.currentReference = nil
             statusMessage = "Voice saved"
         } catch {

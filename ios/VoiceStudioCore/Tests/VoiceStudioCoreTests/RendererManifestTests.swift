@@ -1,36 +1,65 @@
 import XCTest
 @testable import VoiceStudioCore
 
-final class RendererManifestTests: XCTestCase {
-    func testCapabilityManifestRoundTripsCanonicalStatesAndLanguageList() throws {
-        let manifest = RendererCapabilityManifest(
-            support: [.voiceClone: .supported, .timbreControl: .unsupported,
-                      .instructionControl: .approximate],
-            supportedLanguages: ["en", "zh"])
+final class SpeechCapabilityTests: XCTestCase {
+    func testCapabilityProfileRoundTripsStatesLanguagesAndAccents() throws {
+        let profile = CapabilityProfile(
+            support: [.speechGeneration: .supported, .voiceCloning: .unsupported,
+                      .pitch: .approximate],
+            shaping: [.bright: .unsupported],
+            expressions: [.gentle: .unsupported],
+            languages: ["en-US", "zh-CN"],
+            accentsByLanguage: ["en": ["en-US", "en-GB"]])
 
-        let restored = try JSONDecoder().decode(RendererCapabilityManifest.self,
-                                                from: JSONEncoder().encode(manifest))
+        let restored = try JSONDecoder().decode(CapabilityProfile.self,
+                                                from: JSONEncoder().encode(profile))
 
-        XCTAssertEqual(restored, manifest)
-        XCTAssertEqual(restored.status(for: .voiceClone), .supported)
-        XCTAssertEqual(restored.status(for: .instructionControl), .approximate)
-        XCTAssertEqual(restored.status(for: .timbreControl), .unsupported)
-        XCTAssertEqual(restored.status(for: .accentControl), .unsupported)
+        XCTAssertEqual(restored, profile)
+        XCTAssertEqual(restored.status(for: .speechGeneration), .supported)
+        XCTAssertEqual(restored.status(for: .pitch), .approximate)
+        XCTAssertEqual(restored.status(for: .voiceCloning), .unsupported)
+        XCTAssertTrue(restored.supports(language: "zh"))
+        XCTAssertTrue(restored.supports(language: "en-GB"))
+        XCTAssertFalse(restored.supports(language: "ja"))
+        XCTAssertEqual(restored.accents(for: "en-GB"), ["en-US", "en-GB"])
     }
 
-    func testRendererPackContractRejectsUnsafeOrIncompleteInventory() throws {
-        let valid = RendererPackManifest(
-            packID: "local.voice.standard", rendererID: "local.voice",
-            variant: "standard", version: "1", requiredFiles: [
-                RendererPackFile(path: "weights/model.gguf", bytes: 10, sha256: String(repeating: "a", count: 64))
-            ], capabilities: RendererCapabilityManifest(support: [.voiceClone: .supported]))
-        XCTAssertTrue(valid.isStructurallyValid())
+    func testProviderSelectionIsDeterministicAndHonorsVoiceIntent() {
+        let system = CapabilityProfile(support: [.speechGeneration: .supported], languages: ["en", "zh"])
+        let local = CapabilityProfile(support: [.speechGeneration: .supported,
+                                                .voiceCloning: .supported], languages: ["en", "zh"])
 
-        let unsafe = RendererPackManifest(
-            packID: "local.voice.standard", rendererID: "local.voice",
-            variant: "standard", version: "1", requiredFiles: [
-                RendererPackFile(path: "../model.gguf", bytes: 10, sha256: String(repeating: "a", count: 64))
-            ], capabilities: RendererCapabilityManifest(support: [:]))
-        XCTAssertFalse(unsafe.isStructurallyValid())
+        XCTAssertEqual(SpeechProviderSelection.select(voice: .systemDefault, language: "zh-CN",
+                                                       system: system, local: local, localIsReady: true), .system)
+        XCTAssertEqual(SpeechProviderSelection.select(voice: .saved(UUID()), language: "en-US",
+                                                       system: system, local: local, localIsReady: true), .local)
+        XCTAssertNil(SpeechProviderSelection.select(voice: .saved(UUID()), language: "en",
+                                                    system: system, local: local, localIsReady: false))
+        XCTAssertNil(SpeechProviderSelection.select(voice: .systemDefault, language: "ja",
+                                                    system: system, local: local, localIsReady: true))
+    }
+
+    func testVoiceRequestCarriesOnlyCanonicalUserIntent() throws {
+        let request = VoiceRequest(text: "Hello", voice: .systemDefault, language: "en-US",
+                                   accent: "en-GB", shaping: VoiceShaping(values: [.bright: 0.4]),
+                                   expression: .gentle, speed: 1.15, pitch: 100, renderMode: .generate)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(request)) as? [String: Any])
+
+        XCTAssertEqual(Set(json.keys), Set(["text", "voice", "language", "accent", "shaping",
+                                            "expression", "speed", "pitch", "renderMode"]))
+        XCTAssertNil(json["provider"])
+        XCTAssertNil(json["model"])
+        XCTAssertNil(json["temperature"])
+        XCTAssertNil(json["seed"])
+    }
+
+    func testVoiceAssetSchemaDoesNotDependOnProvider() throws {
+        let voice = VoiceAsset(name: "Independent", sourceType: .record,
+                               referenceAudio: AudioAsset(fileName: "reference.wav", duration: 1,
+                                                          persistenceState: .persistent))
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(voice)) as? [String: Any])
+        XCTAssertNil(json["provider"])
+        XCTAssertNil(json["renderer"])
+        XCTAssertEqual(try JSONDecoder().decode(VoiceAsset.self, from: JSONEncoder().encode(voice)), voice)
     }
 }

@@ -13,6 +13,7 @@ private struct VoiceStudioRootView: View {
     @State private var model: VoiceStudioModel?
     @State private var startupError: String?
     @StateObject private var languagePreference = AppLanguagePreference()
+    @StateObject private var appearancePreference = AppAppearancePreference()
 
     init() {
         do {
@@ -35,6 +36,7 @@ private struct VoiceStudioRootView: View {
             }
         }
         .environmentObject(languagePreference)
+        .environmentObject(appearancePreference)
         .environment(\.locale, Locale(identifier: languagePreference.language.localeIdentifier ?? Locale.autoupdatingCurrent.identifier))
     }
 }

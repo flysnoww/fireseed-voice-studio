@@ -234,3 +234,160 @@ final class AudioPlayer: NSObject, ObservableObject, AVAudioPlayerDelegate {
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 }
+
+struct SpeechProviderAssembly {
+    let providers: [SpeechProviderID: any SpeechProvider]
+    let localPackProvider: any InstallableSpeechProvider
+
+    static func production() -> SpeechProviderAssembly {
+        let local = QwenRendererAdapter()
+        let system = AppleSystemSpeechProvider()
+        return SpeechProviderAssembly(providers: [.system: system, .local: local],
+                                      localPackProvider: local)
+    }
+}
+
+actor AppleSystemSpeechProvider: SpeechProvider {
+    nonisolated let id: SpeechProviderID = .system
+    nonisolated let capabilities: CapabilityProfile
+    private let availableVoiceTags: Set<String>
+
+    init(voices: [AVSpeechSynthesisVoice] = AVSpeechSynthesisVoice.speechVoices()) {
+        let tags = Set(voices.map(\.language))
+        let groups = Dictionary(grouping: tags) { $0.split(separator: "-").first.map(String.init) ?? $0 }
+        availableVoiceTags = tags
+        capabilities = CapabilityProfile(
+            support: [.speechGeneration: .supported, .languageSelection: .supported,
+                      .accentSelection: .supported],
+            languages: groups.keys.sorted(),
+            accentsByLanguage: groups.mapValues { $0.sorted() })
+    }
+
+    func generate(_ request: VoiceRequest, voice: VoiceAsset?, referenceAudioURL: URL?) async -> SpeechResult {
+        guard case .systemDefault = request.voice else { return .unsupported(.voiceCloning) }
+        guard request.renderMode == .generate else { return .unsupported(.speechGeneration) }
+        let tag = request.accent ?? request.language
+        guard let tag, availableVoiceTags.contains(tag), let speechVoice = AVSpeechSynthesisVoice(language: tag) else {
+            return .unsupported(.accentSelection)
+        }
+        let utterance = AVSpeechUtterance(string: request.text)
+        utterance.voice = speechVoice
+        utterance.rate = AVSpeechUtteranceDefaultSpeechRate
+        let synthesizer = AVSpeechSynthesizer()
+        let outputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("system-speech-\(UUID().uuidString).wav")
+        return await withCheckedContinuation { continuation in
+            let writer = SpeechBufferWriter(destination: outputURL, continuation: continuation)
+            synthesizer.write(utterance) { buffer in writer.append(buffer) }
+        }
+    }
+}
+
+private final class SpeechBufferWriter: @unchecked Sendable {
+    private let lock = NSLock()
+    private let destination: URL
+    private let continuation: CheckedContinuation<SpeechResult, Never>
+    private var file: AVAudioFile?
+    private var frameCount: AVAudioFramePosition = 0
+    private var finished = false
+
+    init(destination: URL, continuation: CheckedContinuation<SpeechResult, Never>) {
+        self.destination = destination
+        self.continuation = continuation
+    }
+
+    func append(_ buffer: AVAudioBuffer) {
+        guard let pcm = buffer as? AVAudioPCMBuffer else {
+            finish(.failure("System speech could not produce playable audio."))
+            return
+        }
+        lock.lock()
+        guard !finished else { lock.unlock(); return }
+        if pcm.frameLength == 0 {
+            let result: SpeechResult
+            if frameCount > 0, pcm.format.sampleRate > 0 {
+                result = .renderedFile(destination,
+                                       duration: Double(frameCount) / pcm.format.sampleRate,
+                                       approximation: nil)
+            } else {
+                result = .failure("System speech returned no audio.")
+            }
+            file = nil
+            finished = true
+            lock.unlock()
+            continuation.resume(returning: result)
+            return
+        }
+        do {
+            if file == nil { file = try AVAudioFile(forWriting: destination, settings: pcm.format.settings) }
+            try file?.write(from: pcm)
+            frameCount += AVAudioFramePosition(pcm.frameLength)
+            lock.unlock()
+        } catch {
+            finished = true
+            try? FileManager.default.removeItem(at: destination)
+            lock.unlock()
+            continuation.resume(returning: .failure("System speech audio could not be written."))
+        }
+    }
+
+    private func finish(_ result: SpeechResult) {
+        lock.lock()
+        guard !finished else { lock.unlock(); return }
+        finished = true
+        try? FileManager.default.removeItem(at: destination)
+        lock.unlock()
+        continuation.resume(returning: result)
+    }
+}
+
+struct AudioTimePitchProcessor {
+    func process(_ sourceURL: URL, speed: Double, pitch: Double) throws -> URL {
+        guard speed.isFinite, (0.5...2).contains(speed), pitch.isFinite, (-2400...2400).contains(pitch) else {
+            throw VoiceStudioError.invalidAudioFile
+        }
+        guard abs(speed - 1) > 0.001 || abs(pitch) > 0.5 else { return sourceURL }
+        let input = try AVAudioFile(forReading: sourceURL)
+        let format = input.processingFormat
+        let engine = AVAudioEngine()
+        let player = AVAudioPlayerNode()
+        let timePitch = AVAudioUnitTimePitch()
+        timePitch.rate = Float(speed)
+        timePitch.pitch = Float(pitch)
+        engine.attach(player)
+        engine.attach(timePitch)
+        engine.connect(player, to: timePitch, format: format)
+        engine.connect(timePitch, to: engine.mainMixerNode, format: format)
+        try engine.enableManualRenderingMode(.offline, format: format, maximumFrameCount: 4096)
+        let outputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("shaped-speech-\(UUID().uuidString).wav")
+        do {
+            let output = try AVAudioFile(forWriting: outputURL, settings: input.fileFormat.settings)
+            let renderBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4096)!
+            engine.prepare()
+            try engine.start()
+            player.scheduleFile(input, at: nil, completionCallbackType: .dataPlayedBack) { _ in }
+            player.play()
+            var attempts = 0
+            while attempts < 100_000 {
+                attempts += 1
+                switch try engine.renderOffline(4096, to: renderBuffer) {
+                case .success:
+                    try output.write(from: renderBuffer)
+                case .endOfStream:
+                    engine.stop()
+                    return outputURL
+                case .insufficientDataFromInputNode, .cannotDoInCurrentContext:
+                    continue
+                @unknown default:
+                    throw VoiceStudioError.invalidAudioFile
+                }
+            }
+            throw VoiceStudioError.invalidAudioFile
+        } catch {
+            engine.stop()
+            try? FileManager.default.removeItem(at: outputURL)
+            throw error
+        }
+    }
+}

@@ -75,40 +75,61 @@ public struct VoiceAsset: Identifiable, Codable, Equatable, Sendable {
     }
 }
 
-public struct VoiceRequest: Codable, Equatable, Sendable {
-    public let text: String
-    public let voiceID: UUID
-    public let language: String?
-    public let accent: String?
-    public let attributes: [String: String]
-    public let renderMode: AudioRenderMode
+public enum VoiceSelection: Codable, Equatable, Hashable, Sendable {
+    case saved(UUID)
+    case systemDefault
 
-    public init(text: String, voiceID: UUID, language: String? = nil, accent: String? = nil,
-                attributes: [String: String] = [:], renderMode: AudioRenderMode) {
-        self.text = text
-        self.voiceID = voiceID
-        self.language = language
-        self.accent = accent
-        self.attributes = attributes
-        self.renderMode = renderMode
+    public var savedVoiceID: UUID? {
+        guard case .saved(let id) = self else { return nil }
+        return id
     }
 }
 
-public enum RendererCapability: String, Codable, CaseIterable, Sendable {
-    case local
-    case streaming
-    case referenceVoice
-    case voiceClone = "voice_clone"
-    case voiceDesign = "voice_design"
-    case timbreControl = "timbre_control"
-    case emotionControl = "emotion_control"
-    case accentControl = "accent_control"
-    case speedControl = "speed_control"
-    case instructionControl = "instruction_control"
-    case languageSelection = "language_selection"
-    case dialectControl = "dialect_control"
-    case referenceTranscriptConditioning = "reference_transcript_conditioning"
-    case attributeControl = "attribute_control"
+public enum VoiceShape: String, Codable, CaseIterable, Sendable {
+    case bright, deep, soft, powerful, youthful, mature, thin, clear, rough
+}
+
+public struct VoiceShaping: Codable, Equatable, Sendable {
+    public let values: [VoiceShape: Double]
+    public init(values: [VoiceShape: Double] = [:]) { self.values = values }
+}
+
+public enum VoiceExpression: String, Codable, CaseIterable, Sendable {
+    case lively, melancholic, serious, gentle, excited, calm, angry, whisper
+}
+
+public struct VoiceRequest: Codable, Equatable, Sendable {
+    public let text: String
+    public let voice: VoiceSelection
+    public let language: String?
+    public let accent: String?
+    public let shaping: VoiceShaping
+    public let expression: VoiceExpression?
+    /// Playback rate multiplier. 1.0 is unchanged.
+    public let speed: Double
+    /// Pitch shift in cents. 0 is unchanged.
+    public let pitch: Double
+    public let renderMode: AudioRenderMode
+
+    public init(text: String, voice: VoiceSelection, language: String? = nil, accent: String? = nil,
+                shaping: VoiceShaping = VoiceShaping(), expression: VoiceExpression? = nil,
+                speed: Double = 1, pitch: Double = 0, renderMode: AudioRenderMode) {
+        self.text = text
+        self.voice = voice
+        self.language = language
+        self.accent = accent
+        self.shaping = shaping
+        self.expression = expression
+        self.speed = speed
+        self.pitch = pitch
+        self.renderMode = renderMode
+    }
+
+    public init(text: String, voiceID: UUID, language: String? = nil, accent: String? = nil,
+                renderMode: AudioRenderMode) {
+        self.init(text: text, voice: .saved(voiceID), language: language,
+                  accent: accent, renderMode: renderMode)
+    }
 }
 
 public enum CapabilitySupport: String, Codable, Sendable {
@@ -117,117 +138,105 @@ public enum CapabilitySupport: String, Codable, Sendable {
     case unsupported
 }
 
-/// Model-neutral, serializable capability claims for one installed renderer pack.
-public struct RendererCapabilityManifest: Codable, Equatable, Sendable {
-    public let support: [RendererCapability: CapabilitySupport]
-    public let supportedLanguages: [String]
-    public let supportedDialects: [String]
+public enum VoiceCapability: String, Codable, CaseIterable, Sendable {
+    case speechGeneration
+    case voiceCloning
+    case languageSelection
+    case accentSelection
+    case speed
+    case pitch
+}
 
-    public init(support: [RendererCapability: CapabilitySupport],
-                supportedLanguages: [String] = [], supportedDialects: [String] = []) {
+public struct CapabilityProfile: Codable, Equatable, Sendable {
+    public let support: [VoiceCapability: CapabilitySupport]
+    public let shaping: [VoiceShape: CapabilitySupport]
+    public let expressions: [VoiceExpression: CapabilitySupport]
+    public let languages: [String]
+    public let accentsByLanguage: [String: [String]]
+
+    public init(support: [VoiceCapability: CapabilitySupport] = [:],
+                shaping: [VoiceShape: CapabilitySupport] = [:],
+                expressions: [VoiceExpression: CapabilitySupport] = [:],
+                languages: [String] = [], accentsByLanguage: [String: [String]] = [:]) {
         self.support = support
-        self.supportedLanguages = supportedLanguages
-        self.supportedDialects = supportedDialects
+        self.shaping = shaping
+        self.expressions = expressions
+        self.languages = languages
+        self.accentsByLanguage = accentsByLanguage
     }
 
-    public func status(for capability: RendererCapability) -> CapabilitySupport {
+    public func status(for capability: VoiceCapability) -> CapabilitySupport {
         support[capability] ?? .unsupported
     }
-}
 
-public struct RendererPackFile: Codable, Equatable, Sendable {
-    public let path: String
-    public let bytes: Int64
-    public let sha256: String
+    public func supports(language: String?) -> Bool {
+        guard let language else { return !languages.isEmpty }
+        let requested = language.lowercased().replacingOccurrences(of: "_", with: "-")
+        return languages.contains { available in
+            let candidate = available.lowercased().replacingOccurrences(of: "_", with: "-")
+            return candidate == requested || candidate.split(separator: "-").first == requested.split(separator: "-").first
+        }
+    }
 
-    public init(path: String, bytes: Int64, sha256: String) {
-        self.path = path
-        self.bytes = bytes
-        self.sha256 = sha256
+    public func accents(for language: String?) -> [String] {
+        guard let language else { return [] }
+        return accentsByLanguage[language] ?? accentsByLanguage.first {
+            $0.key.split(separator: "-").first == language.split(separator: "-").first
+        }?.value ?? []
     }
 }
 
-/// Small pack identity and inventory contract; implementation metadata stays inside the pack.
-public struct RendererPackManifest: Codable, Equatable, Sendable {
-    public let schemaVersion: Int
-    public let packID: String
-    public let rendererID: String
-    public let variant: String
-    public let version: String
-    public let requiredFiles: [RendererPackFile]
-    public let capabilities: RendererCapabilityManifest
-    public let compatibilityVersion: Int
+public enum SpeechProviderID: String, Codable, Sendable {
+    case system
+    case local
+}
 
-    public init(schemaVersion: Int = 1, packID: String, rendererID: String, variant: String,
-                version: String, requiredFiles: [RendererPackFile],
-                capabilities: RendererCapabilityManifest, compatibilityVersion: Int = 1) {
-        self.schemaVersion = schemaVersion
-        self.packID = packID
-        self.rendererID = rendererID
-        self.variant = variant
-        self.version = version
-        self.requiredFiles = requiredFiles
-        self.capabilities = capabilities
-        self.compatibilityVersion = compatibilityVersion
-    }
-
-    public func isStructurallyValid() -> Bool {
-        schemaVersion == 1 && compatibilityVersion > 0 && !packID.isEmpty && !rendererID.isEmpty &&
-        !variant.isEmpty && !version.isEmpty && !requiredFiles.isEmpty &&
-        requiredFiles.allSatisfy { file in
-            file.bytes > 0 && file.sha256.count == 64 &&
-            file.sha256.allSatisfy({ $0.isHexDigit }) && !file.path.isEmpty &&
-            !file.path.hasPrefix("/") && !file.path.contains("..") && !file.path.contains("\\")
+public enum SpeechProviderSelection {
+    public static func select(voice: VoiceSelection, language: String?,
+                              system: CapabilityProfile, local: CapabilityProfile?,
+                              localIsReady: Bool) -> SpeechProviderID? {
+        switch voice {
+        case .systemDefault:
+            guard system.status(for: .speechGeneration) == .supported,
+                  system.supports(language: language) else { return nil }
+            return .system
+        case .saved:
+            guard localIsReady, let local,
+                  local.status(for: .speechGeneration) == .supported,
+                  local.status(for: .voiceCloning) == .supported,
+                  local.supports(language: language) else { return nil }
+            return .local
         }
     }
 }
 
-public struct RendererCapabilities: Equatable, Sendable {
-    private let values: [RendererCapability: CapabilitySupport]
-
-    public init(_ values: [RendererCapability: CapabilitySupport] = [:]) {
-        self.values = values
-    }
-
-    public func support(for capability: RendererCapability) -> CapabilitySupport {
-        values[capability] ?? .unsupported
-    }
-
-    public init(manifest: RendererCapabilityManifest) {
-        self.values = manifest.support
-    }
-}
-
-public enum RendererResult: Equatable, Sendable {
-    case unsupported(RendererCapability)
+public enum SpeechResult: Equatable, Sendable {
+    case unsupported(VoiceCapability)
     case audio(AudioAsset, approximation: String?)
     case renderedFile(URL, duration: TimeInterval, approximation: String?)
     case failure(String)
 }
 
-public protocol RendererAdapter: Sendable {
-    var capabilities: RendererCapabilities { get }
-    func installPack(at folder: URL) async throws -> RendererCapabilityManifest
-    func loadVoice(_ voice: VoiceAsset, referenceAudioURL: URL) async -> CapabilitySupport
-    func synthesize(_ request: VoiceRequest) async -> RendererResult
+public protocol SpeechProvider: Sendable {
+    var id: SpeechProviderID { get }
+    var capabilities: CapabilityProfile { get }
+    func generate(_ request: VoiceRequest, voice: VoiceAsset?, referenceAudioURL: URL?) async -> SpeechResult
 }
 
-/// Used until a real renderer is selected. It reports absence instead of simulating audio.
-public struct UnavailableRenderer: RendererAdapter {
-    public let capabilities = RendererCapabilities()
+/// The install seam is local to the app shell; provider installation is not part of a speech request.
+public protocol InstallableSpeechProvider: SpeechProvider {
+    var installedResourceURL: URL { get }
+    func installPack(at folder: URL) async throws -> CapabilityProfile
+}
 
-    public init() {}
+public struct UnavailableSpeechProvider: SpeechProvider {
+    public let id: SpeechProviderID = .local
+    public let capabilities = CapabilityProfile()
 
-    public func installPack(at folder: URL) async throws -> RendererCapabilityManifest {
-        throw VoiceStudioError.rendererUnavailable
-    }
+    public init() { }
 
-    public func loadVoice(_ voice: VoiceAsset, referenceAudioURL: URL) async -> CapabilitySupport {
-        .unsupported
-    }
-
-    public func synthesize(_ request: VoiceRequest) async -> RendererResult {
-        .unsupported(.voiceClone)
+    public func generate(_ request: VoiceRequest, voice: VoiceAsset?, referenceAudioURL: URL?) async -> SpeechResult {
+        .unsupported(.speechGeneration)
     }
 }
 
@@ -256,9 +265,9 @@ public enum VoiceStudioError: Error, LocalizedError, Equatable {
         case .recordingFailed:
             return "Recording stopped before a valid audio file was created."
         case .rendererUnavailable:
-            return "No local voice renderer is available."
+            return "Local speech is not available right now."
         case .invalidRendererPack:
-            return "This local voice pack is invalid or incompatible."
+            return "This local speech component is invalid or incompatible."
         }
     }
 }

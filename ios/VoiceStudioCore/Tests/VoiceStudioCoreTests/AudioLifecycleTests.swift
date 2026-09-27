@@ -235,18 +235,20 @@ final class AudioLifecycleTests: XCTestCase {
     }
 
     func testUnavailableRendererReportsUnsupportedVoiceClone() async {
-        let renderer = UnavailableRenderer()
-        XCTAssertEqual(renderer.capabilities.support(for: .voiceClone), .unsupported)
+        let provider = UnavailableSpeechProvider()
+        XCTAssertEqual(provider.capabilities.status(for: .voiceCloning), .unsupported)
         let request = VoiceRequest(text: "Hello", voiceID: UUID(), renderMode: .preview)
-        let result = await renderer.synthesize(request)
-        XCTAssertEqual(result, .unsupported(.voiceClone))
+        let result = await provider.generate(request, voice: nil, referenceAudioURL: nil)
+        XCTAssertEqual(result, .unsupported(.speechGeneration))
     }
 
     func testCanonicalVoiceRequestHasNoRendererSpecificKnobs() throws {
-        let request = VoiceRequest(text: "Hello", voiceID: UUID(), language: "en",
-                                   accent: "US", attributes: ["style": "calm"], renderMode: .generate)
+        let request = VoiceRequest(text: "Hello", voice: .systemDefault, language: "en-US",
+                                   accent: "en-US", shaping: VoiceShaping(values: [.bright: 0.4]),
+                                   expression: .gentle, speed: 1.15, pitch: 100, renderMode: .generate)
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(request)) as? [String: Any])
-        XCTAssertEqual(Set(json.keys), Set(["text", "voiceID", "language", "accent", "attributes", "renderMode"]))
+        XCTAssertEqual(Set(json.keys), Set(["text", "voice", "language", "accent", "shaping",
+                                            "expression", "speed", "pitch", "renderMode"]))
         XCTAssertNil(json["temperature"])
         XCTAssertNil(json["cfg"])
         XCTAssertNil(json["seed"])

@@ -60,7 +60,7 @@ public final class AudioFileStore {
 
     /// Copies renderer output into managed staging so it follows the generated-audio cache policy.
     public func registerGeneratedAudio(from source: URL, duration: TimeInterval,
-                                      sourceVoiceID: UUID, text: String) throws -> AudioAsset {
+                                       sourceVoiceID: UUID? = nil, text: String) throws -> AudioAsset {
         try validateFile(at: source, duration: duration)
         let id = UUID()
         let fileName = "\(id.uuidString.lowercased()).wav"
