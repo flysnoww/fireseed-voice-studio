@@ -341,6 +341,23 @@ private final class SpeechBufferWriter: @unchecked Sendable {
     }
 }
 
+private final class AudioRenderCompletion: @unchecked Sendable {
+    private let lock = NSLock()
+    private var didFinish = false
+
+    func finish() {
+        lock.lock()
+        didFinish = true
+        lock.unlock()
+    }
+
+    var isFinished: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return didFinish
+    }
+}
+
 struct AudioTimePitchProcessor {
     func process(_ sourceURL: URL, speed: Double, pitch: Double) throws -> URL {
         guard speed.isFinite, (0.5...2).contains(speed), pitch.isFinite, (-2400...2400).contains(pitch) else {
@@ -364,20 +381,29 @@ struct AudioTimePitchProcessor {
         do {
             let output = try AVAudioFile(forWriting: outputURL, settings: input.fileFormat.settings)
             let renderBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4096)!
+            let completion = AudioRenderCompletion()
             engine.prepare()
             try engine.start()
-            player.scheduleFile(input, at: nil, completionCallbackType: .dataPlayedBack) { _ in }
+            player.scheduleFile(input, at: nil, completionCallbackType: .dataRendered) { _ in
+                completion.finish()
+            }
             player.play()
             var attempts = 0
             while attempts < 100_000 {
                 attempts += 1
                 switch try engine.renderOffline(4096, to: renderBuffer) {
                 case .success:
-                    try output.write(from: renderBuffer)
-                case .endOfStream:
-                    engine.stop()
-                    return outputURL
+                    if renderBuffer.frameLength > 0 {
+                        try output.write(from: renderBuffer)
+                    } else if completion.isFinished {
+                        engine.stop()
+                        return outputURL
+                    }
                 case .insufficientDataFromInputNode, .cannotDoInCurrentContext:
+                    if completion.isFinished {
+                        engine.stop()
+                        return outputURL
+                    }
                     continue
                 @unknown default:
                     throw VoiceStudioError.invalidAudioFile
