@@ -23,7 +23,7 @@ diff --git a/CMakeLists.txt b/CMakeLists.txt
  else()
      set(GGML_HAS_METAL OFF)
  endif()
-@@ -172,6 +172,10 @@
+@@ -172,8 +172,12 @@
  if(WIN32)
      target_link_libraries(qwen3_tts PUBLIC psapi)
  endif()
@@ -36,6 +36,11 @@ diff --git a/CMakeLists.txt b/CMakeLists.txt
  # Shared library with C API (for Nim FFI)
  add_library(qwen3tts_shared SHARED
      src/qwen3tts_c_api.cpp
+ )
+@@ -240,2 +240,3 @@
+     RUNTIME DESTINATION bin
++    BUNDLE DESTINATION bin
+ )
 diff --git a/src/gguf_loader.h b/src/gguf_loader.h
 --- a/src/gguf_loader.h
 +++ b/src/gguf_loader.h
