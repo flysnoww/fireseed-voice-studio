@@ -63,8 +63,8 @@ final class VoiceStudioAppTests: XCTestCase {
         let normalizedCGImage = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
         XCTAssertEqual(try XCTUnwrap(normalizedCGImage.colorSpace).name as String?, CGColorSpace.sRGB as String)
         let properties = try XCTUnwrap(CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any])
-        XCTAssertEqual(properties[kCGImagePropertyPixelWidth] as? Int, 120)
-        XCTAssertEqual(properties[kCGImagePropertyPixelHeight] as? Int, 80)
+        XCTAssertEqual(properties[kCGImagePropertyPixelWidth] as? Int, 360)
+        XCTAssertEqual(properties[kCGImagePropertyPixelHeight] as? Int, 240)
 
         try appearance.saveBackgroundImage(makeBackgroundImage(orientation: 1, color: .systemRed))
         XCTAssertEqual(appearance.backgroundImageURL, firstURL)
