@@ -180,6 +180,6 @@ struct ContentView: View {
         do {
             let player = try AVAudioPlayer(contentsOf: url); player.prepareToPlay(); player.play()
             if output { outputPlayer = player } else { referencePlayer = player }
-        } catch { error = error.localizedDescription }
+        } catch { self.error = error.localizedDescription }
     }
 }
