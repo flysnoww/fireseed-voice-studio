@@ -403,8 +403,8 @@ actor QwenRendererAdapter: InstallableSpeechProvider, VoicePreparingSpeechProvid
                         try source.read(into: input)
                     } catch {
                         let detail = error as NSError
-                        inputReadError = providerError(code: 28,
-                                                      "Could not read reference audio buffer (\(detail.domain) \(detail.code)): \(detail.localizedDescription)")
+                        inputReadError = self.providerError(code: 28,
+                                                           "Could not read reference audio buffer (\(detail.domain) \(detail.code)): \(detail.localizedDescription)")
                         inputStatus.pointee = .endOfStream
                         return nil
                     }
