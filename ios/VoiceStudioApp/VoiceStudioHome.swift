@@ -190,6 +190,17 @@ struct VoiceStudioHome: View {
     @ViewBuilder
     private var prepareVoiceButton: some View {
         let state = model.preparationState(for: generationVoice)
+        let buttonTitle: LocalizedStringKey = switch state {
+        case .none: "Confirm Voice"
+        case .preparing: "Recognizing voice…"
+        case .ready: "Voice Ready"
+        case .failed: "Preparation failed · Retry"
+        }
+        let buttonTint: Color = switch state {
+        case .ready: .green
+        case .failed: .orange
+        case .none, .preparing: appearance.skin.accent
+        }
         Button {
             focusedInput = nil
             Task { await model.prepareVoice(generationVoice, language: generationLanguage) }
@@ -197,23 +208,14 @@ struct VoiceStudioHome: View {
             HStack {
                 if state == .preparing { ProgressView().controlSize(.small) }
                 if state == .ready { Image(systemName: "checkmark.circle.fill") }
-                Text(switch state {
-                case .none: "Confirm Voice"
-                case .preparing: "Recognizing voice…"
-                case .ready: "Voice Ready"
-                case .failed: "Preparation failed · Retry"
-                })
+                Text(buttonTitle)
                 Spacer()
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
         }
         .buttonStyle(.bordered)
-        .tint(switch state {
-        case .ready: .green
-        case .failed: .orange
-        case .none, .preparing: appearance.skin.accent
-        })
+        .tint(buttonTint)
         .disabled(!model.isLocalSpeechReady || state == .preparing || model.isGeneratingSpeech)
         .accessibilityIdentifier("prepareVoiceButton")
     }
