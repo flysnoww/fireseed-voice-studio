@@ -5,6 +5,8 @@ import UniformTypeIdentifiers
 import VoiceStudioCore
 
 struct VoiceStudioHome: View {
+    private enum InputField: Hashable { case speechText, voiceName }
+
     @StateObject private var model: VoiceStudioModel
     @State private var voiceName = "My voice"
     @State private var voiceNameWasEdited = false
@@ -15,6 +17,8 @@ struct VoiceStudioHome: View {
     @State private var speed = 1.0
     @State private var pitch = 0.0
     @State private var voiceToDelete: VoiceAsset?
+    @State private var textInputFrames: [String: CGRect] = [:]
+    @FocusState private var focusedInput: InputField?
     @Environment(\.locale) private var locale
     @Environment(\.openURL) private var openURL
     @EnvironmentObject private var appearance: AppAppearancePreference
@@ -25,6 +29,7 @@ struct VoiceStudioHome: View {
         NavigationStack {
             ZStack {
                 StudioBackdrop(skin: appearance.skin, imageURL: appearance.backgroundImageURL)
+                    .onTapGesture { focusedInput = nil }
                 ScrollViewReader { scrollProxy in
                     ScrollView {
                         VStack(spacing: 16) {
@@ -34,21 +39,30 @@ struct VoiceStudioHome: View {
                             expressionCard
                             languageCard
                             generateCard
+                            developerDiagnosticsCard
                             if !model.savedVoices.isEmpty { savedVoiceLibrarySection }
-                            sourceActions
                         }
                         .padding(.horizontal, 18)
                         .padding(.top, 12)
-                        .padding(.bottom, 28)
-                        .frame(maxWidth: 680)
-                        .frame(maxWidth: .infinity)
+                    .padding(.bottom, 28)
+                    .frame(maxWidth: 680)
+                    .frame(maxWidth: .infinity)
                     }
+                    .scrollDismissesKeyboard(.interactively)
                     .onChange(of: model.mostRecentlySavedVoiceID) { _, voiceID in
                         guard let voiceID else { return }
                         withAnimation(.easeInOut(duration: 0.3)) { scrollProxy.scrollTo(voiceID, anchor: .center) }
                     }
                 }
             }
+            .coordinateSpace(name: "voiceStudioRoot")
+            .onPreferenceChange(VoiceInputFramesKey.self) { textInputFrames = $0 }
+            .simultaneousGesture(SpatialTapGesture(coordinateSpace: .named("voiceStudioRoot")).onEnded { tap in
+                guard focusedInput != nil,
+                      KeyboardDismissalPolicy.shouldDismiss(tapLocation: tap.location,
+                                                           inputFrames: Array(textInputFrames.values)) else { return }
+                focusedInput = nil
+            })
             .tint(appearance.skin.accent)
             .navigationTitle("Voice Studio")
             .navigationBarTitleDisplayMode(.inline)
@@ -60,10 +74,15 @@ struct VoiceStudioHome: View {
                     .accessibilityLabel("Settings")
                     .accessibilityIdentifier("settingsButton")
                 }
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("Done") { focusedInput = nil }
+                }
             }
             .onAppear {
                 updateDefaultVoiceName()
                 syncGenerationOptions()
+                updateDiagnosticContext()
             }
             .task { await model.restoreLocalSpeechProvider() }
             .onChange(of: model.currentReference?.asset.id) { _, newID in
@@ -72,8 +91,16 @@ struct VoiceStudioHome: View {
                 updateDefaultVoiceName()
             }
             .onChange(of: locale.identifier) { _, _ in updateDefaultVoiceName() }
-            .onChange(of: model.savedVoices.map(\.id)) { _, _ in syncGenerationOptions() }
-            .onChange(of: generationVoice) { _, _ in syncGenerationOptions() }
+            .onChange(of: model.savedVoices.map(\.id)) { _, _ in syncGenerationOptions(); updateDiagnosticContext() }
+            .onChange(of: generationVoice) { _, _ in
+                focusedInput = nil
+                syncGenerationOptions()
+                updateDiagnosticContext()
+            }
+            .onChange(of: generationLanguage) { _, _ in focusedInput = nil; updateDiagnosticContext() }
+            .onChange(of: generationAccent) { _, _ in updateDiagnosticContext() }
+            .onChange(of: generationText) { _, _ in updateDiagnosticContext() }
+            .onChange(of: model.currentReference?.asset.id) { _, _ in updateDiagnosticContext() }
             .confirmationDialog("Delete Voice?", isPresented: Binding(
                 get: { voiceToDelete != nil }, set: { if !$0 { voiceToDelete = nil } }
             ), titleVisibility: .visible) {
@@ -97,6 +124,62 @@ struct VoiceStudioHome: View {
                 }
             }
             .accessibilityIdentifier("generationVoicePicker")
+            HStack {
+                Button("Record") {
+                    focusedInput = nil
+                    if model.isRecording { model.stopRecording() }
+                    else { Task { await model.startRecording() } }
+                }
+                .tint(model.isRecording ? .red : appearance.skin.accent)
+                .disabled(model.isRequestingPermission && !model.isRecording)
+                .accessibilityIdentifier("recordButton")
+                Spacer()
+                ImportAudioButton(model: model, onChoose: { focusedInput = nil })
+            }
+            if model.isRecording {
+                Label("Recording in progress", systemImage: "record.circle.fill")
+                    .foregroundStyle(.red).accessibilityIdentifier("recordingState")
+            }
+            if model.microphonePermissionDenied {
+                Button("Open Settings") {
+                    focusedInput = nil
+                    guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+                    openURL(url)
+                }.accessibilityIdentifier("microphoneSettingsButton")
+            }
+            if let reference = model.currentReference {
+                Divider()
+                Label("Current Reference", systemImage: "waveform")
+                    .font(.headline).accessibilityIdentifier("currentReferenceState")
+                HStack(spacing: 4) {
+                    Text("Ready ·")
+                    Text(sourceLocalizationKey(for: reference.source))
+                }.font(.footnote).foregroundStyle(.secondary)
+                HStack {
+                    Button("Play") { model.playCurrentAudio() }.accessibilityIdentifier("playReferenceButton")
+                    Button("Stop") { model.stopPlayback() }.disabled(!model.isPlaying)
+                        .accessibilityIdentifier("stopPlaybackButton")
+                }
+                TextField("Voice Name", text: $voiceName, onEditingChanged: { editing in
+                    if editing { voiceNameWasEdited = true }
+                })
+                .focused($focusedInput, equals: .voiceName)
+                .background(GeometryReader { geometry in
+                    Color.clear.preference(key: VoiceInputFramesKey.self,
+                                           value: ["voiceName": geometry.frame(in: .named("voiceStudioRoot"))])
+                })
+                .accessibilityIdentifier("voiceNameField")
+                Button("Save Voice") {
+                    focusedInput = nil
+                    model.saveVoice(name: voiceName)
+                    if let id = model.mostRecentlySavedVoiceID { generationVoice = .saved(id) }
+                }
+                .disabled(!model.canSaveVoice || voiceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .accessibilityIdentifier("saveVoiceButton")
+            }
+            if case .saved = generationVoice {
+                prepareVoiceButton
+            }
             if case .saved = generationVoice, !model.isLocalSpeechReady {
                 Label("Local voice generation is not ready.", systemImage: "info.circle")
                     .font(.footnote).foregroundStyle(.secondary)
@@ -104,10 +187,46 @@ struct VoiceStudioHome: View {
         }
     }
 
+    @ViewBuilder
+    private var prepareVoiceButton: some View {
+        let state = model.preparationState(for: generationVoice)
+        Button {
+            focusedInput = nil
+            Task { await model.prepareVoice(generationVoice, language: generationLanguage) }
+        } label: {
+            HStack {
+                if state == .preparing { ProgressView().controlSize(.small) }
+                if state == .ready { Image(systemName: "checkmark.circle.fill") }
+                Text(switch state {
+                case .none: "Confirm Voice"
+                case .preparing: "Recognizing voice…"
+                case .ready: "Voice Ready"
+                case .failed: "Preparation failed · Retry"
+                })
+                Spacer()
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.bordered)
+        .tint(switch state {
+        case .ready: .green
+        case .failed: .orange
+        case .none, .preparing: appearance.skin.accent
+        })
+        .disabled(!model.isLocalSpeechReady || state == .preparing || model.isGeneratingSpeech)
+        .accessibilityIdentifier("prepareVoiceButton")
+    }
+
     private var textCard: some View {
         StudioCard(title: "Text", symbol: "text.alignleft") {
             TextField("Enter text for your voice", text: $generationText, axis: .vertical)
                 .lineLimit(3...7)
+                .focused($focusedInput, equals: .speechText)
+                .background(GeometryReader { geometry in
+                    Color.clear.preference(key: VoiceInputFramesKey.self,
+                                           value: ["speechText": geometry.frame(in: .named("voiceStudioRoot"))])
+                })
                 .accessibilityIdentifier("generationTextField")
         }
     }
@@ -118,7 +237,7 @@ struct VoiceStudioHome: View {
             VStack(spacing: 14) {
                 if capabilities.status(for: .pitch) == .supported {
                     LabeledContent("Pitch", value: "\(Int(pitch)) cents")
-                    Slider(value: $pitch, in: -1200...1200, step: 50)
+                    Slider(value: $pitch, in: -1200...1200, step: 50, onEditingChanged: { _ in focusedInput = nil })
                         .accessibilityIdentifier("pitchSlider")
                 }
                 Text("Voice character controls will appear when a supported capability is available.")
@@ -144,7 +263,7 @@ struct VoiceStudioHome: View {
             let supported = VoiceExpression.allCases.filter { capabilities.expressions[$0] == .supported || capabilities.expressions[$0] == .approximate }
             if capabilities.status(for: .speed) == .supported {
                 LabeledContent("Pace", value: speed.formatted(.number.precision(.fractionLength(2))) + "×")
-                Slider(value: $speed, in: 0.5...2, step: 0.05)
+                Slider(value: $speed, in: 0.5...2, step: 0.05, onEditingChanged: { _ in focusedInput = nil })
                     .accessibilityIdentifier("speedSlider")
             }
             if supported.isEmpty {
@@ -182,6 +301,7 @@ struct VoiceStudioHome: View {
     private var generateCard: some View {
         StudioCard(title: "Preview", symbol: "play.circle") {
             Button {
+                focusedInput = nil
                 Task {
                     await model.generateSpeech(text: generationText, voice: generationVoice,
                                                language: generationLanguage, accent: generationAccent,
@@ -214,50 +334,70 @@ struct VoiceStudioHome: View {
         }
     }
 
-    private var sourceActions: some View {
-        StudioCard(title: "Create Voice", symbol: "mic") {
-            HStack {
-                Button(model.isRecording ? "Stop recording" : (model.isRequestingPermission ? "Requesting microphone…" : "Record")) {
-                    if model.isRecording { model.stopRecording() }
-                    else { Task { await model.startRecording() } }
+    private var developerDiagnosticsCard: some View {
+        #if DEBUG || VOICE_STUDIO_DEVELOPER_DIAGNOSTICS
+        StudioCard(title: "Developer Diagnostics", symbol: "stethoscope") {
+            DisclosureGroup("调试状态 / Developer Diagnostics") {
+                let snapshot = model.diagnostics.snapshot
+                VStack(alignment: .leading, spacing: 6) {
+                    diagnosticLine("Provider", snapshot.provider)
+                    diagnosticLine("Pack", snapshot.pack + (snapshot.packID.map { " · \($0)" } ?? ""))
+                    diagnosticLine("Required files", snapshot.packFilesFound.joined(separator: ", ").isEmpty ? "--" : snapshot.packFilesFound.joined(separator: ", "))
+                    diagnosticLine("Runtime", snapshot.runtime)
+                    diagnosticLine("Model folder", snapshot.runtimeModelLocation ?? "--")
+                    diagnosticLine("Backend", snapshot.backend)
+                    diagnosticLine("Voice", snapshot.voice)
+                    diagnosticLine("Reference", snapshot.reference)
+                    diagnosticLine("Language", snapshot.language)
+                    diagnosticLine("Accent", snapshot.accent ?? "--")
+                    diagnosticLine("Request", snapshot.request)
+                    diagnosticLine("Generate", snapshot.generation)
+                    diagnosticLine("Output", snapshot.outputFileName.map { "\($0) · \(snapshot.outputDuration.map { String(format: "%.2f s", $0) } ?? "--")" } ?? "none")
+                    Divider()
+                    ForEach(model.diagnostics.stages, id: \.stage) { stage in
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack {
+                                Text(stage.stage.rawValue)
+                                Spacer()
+                                Text(stage.state.rawValue)
+                                if let duration = stage.durationMilliseconds { Text("\(duration) ms") }
+                            }.font(.caption.monospaced())
+                            if let friendly = stage.friendlyError { Text("Friendly: \(friendly)").font(.caption) }
+                            if let domain = stage.errorDomain, let code = stage.errorCode {
+                                Text("Code: \(domain) / \(code)").font(.caption.monospaced())
+                            }
+                            if let raw = stage.underlyingError { Text("Raw: \(raw)").font(.caption).textSelection(.enabled) }
+                        }
+                    }
+                    HStack {
+                        Button("Copy Diagnostics") { UIPasteboard.general.string = model.diagnostics.exportText() }
+                        Spacer()
+                        Button("Clear") { model.diagnostics.clear() }
+                    }
+                    .font(.caption)
                 }
-                .tint(model.isRecording ? .red : appearance.skin.accent)
-                .disabled(model.isRequestingPermission && !model.isRecording)
-                .accessibilityIdentifier("recordButton")
-                Spacer()
-                ImportAudioButton(model: model)
+                .padding(.top, 8)
             }
-            if model.isRecording {
-                Label("Recording in progress", systemImage: "record.circle.fill")
-                    .foregroundStyle(.red).accessibilityIdentifier("recordingState")
-            }
-            if model.microphonePermissionDenied {
-                Button("Open Settings") {
-                    guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
-                    openURL(url)
-                }.accessibilityIdentifier("microphoneSettingsButton")
-            }
-            if let reference = model.currentReference {
-                Divider()
-                Label("Current Reference", systemImage: "waveform")
-                    .font(.headline).accessibilityIdentifier("currentReferenceState")
-                HStack(spacing: 4) {
-                    Text("Ready ·")
-                    Text(sourceLocalizationKey(for: reference.source))
-                }.font(.footnote).foregroundStyle(.secondary)
-                HStack {
-                    Button("Play") { model.playCurrentAudio() }.accessibilityIdentifier("playReferenceButton")
-                    Button("Stop") { model.stopPlayback() }.disabled(!model.isPlaying)
-                        .accessibilityIdentifier("stopPlaybackButton")
-                }
-                TextField("Voice Name", text: $voiceName, onEditingChanged: { editing in
-                    if editing { voiceNameWasEdited = true }
-                }).accessibilityIdentifier("voiceNameField")
-                Button("Save Voice") { model.saveVoice(name: voiceName) }
-                    .disabled(!model.canSaveVoice || voiceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    .accessibilityIdentifier("saveVoiceButton")
-            }
+            .accessibilityIdentifier("developerDiagnosticsDisclosure")
         }
+        #else
+        EmptyView()
+        #endif
+    }
+
+    private func diagnosticLine(_ title: LocalizedStringKey, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(title).foregroundStyle(.secondary)
+            Spacer(minLength: 8)
+            Text(value).multilineTextAlignment(.trailing).textSelection(.enabled)
+        }.font(.caption.monospaced())
+    }
+
+    private func updateDiagnosticContext() {
+        model.updateDiagnosticContext(voice: generationVoice, language: generationLanguage,
+                                      accent: generationAccent,
+                                      hasText: !generationText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                                      hasCurrentReference: model.currentReference != nil)
     }
 
     private var savedVoiceLibrarySection: some View {
@@ -453,7 +593,7 @@ private struct SettingsView: View {
             case .success(let urls):
                 guard let folder = urls.first else { return }
                 Task { await model.installLocalSpeechResource(from: folder) }
-            case .failure(let error): model.report(error)
+            case .failure(let error): model.reportLocalSpeechImportError(error)
             }
         }
         .task(id: selectedBackground) {
@@ -485,10 +625,11 @@ private struct AccountPlaceholderView: View {
 
 private struct ImportAudioButton: View {
     @ObservedObject var model: VoiceStudioModel
+    var onChoose: () -> Void = {}
     @State private var isImporterPresented = false
 
     var body: some View {
-        Button("Import") { isImporterPresented = true }
+        Button("Import") { onChoose(); isImporterPresented = true }
             .disabled(model.isRecording || model.isRequestingPermission)
             .accessibilityIdentifier("importButton")
             .fileImporter(isPresented: $isImporterPresented, allowedContentTypes: [.audio], allowsMultipleSelection: false) { result in
@@ -497,5 +638,19 @@ private struct ImportAudioButton: View {
                 case .failure(let error): model.report(error)
                 }
             }
+    }
+}
+
+enum KeyboardDismissalPolicy {
+    static func shouldDismiss(tapLocation: CGPoint, inputFrames: [CGRect]) -> Bool {
+        !inputFrames.contains { $0.insetBy(dx: -6, dy: -6).contains(tapLocation) }
+    }
+}
+
+private struct VoiceInputFramesKey: PreferenceKey {
+    static let defaultValue: [String: CGRect] = [:]
+
+    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, latest in latest })
     }
 }

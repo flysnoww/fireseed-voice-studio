@@ -34,7 +34,7 @@ private struct QwenPackManifest: Decodable {
 }
 
 /// Product-facing adapter for a replaceable local renderer pack. Runtime details stay here.
-actor QwenRendererAdapter: InstallableSpeechProvider {
+actor QwenRendererAdapter: InstallableSpeechProvider, VoicePreparingSpeechProvider {
     nonisolated static let installedPackURL = FileManager.default.urls(
         for: .applicationSupportDirectory, in: .userDomainMask)[0]
         .appendingPathComponent("RendererPacks/LocalVoice", isDirectory: true)
@@ -46,13 +46,16 @@ actor QwenRendererAdapter: InstallableSpeechProvider {
     nonisolated var installedResourceURL: URL { Self.installedPackURL }
 
     private let installURL: URL
+    private let diagnostics: VoiceStudioDiagnostics
     private var runtime: OpaquePointer?
     private var manifest: QwenPackManifest?
+    private var preparedEmbeddings: [UUID: [Float]] = [:]
     private let supportedModelRevision = "dab70521e0956e3db91fb887d36c9a07d21ebc0b"
     private let supportedRuntimeRevision = "b3ba14077cf1b3e11b86e5f84aa9184605c89b28"
     private let supportedGGMLRevision = "3af5f5760e19a96427f5f7a93b79cbdf3d4b265b"
 
-    init() {
+    init(diagnostics: VoiceStudioDiagnostics) {
+        self.diagnostics = diagnostics
         installURL = Self.installedPackURL
     }
 
@@ -63,12 +66,53 @@ actor QwenRendererAdapter: InstallableSpeechProvider {
     func installPack(at folder: URL) async throws -> CapabilityProfile {
         let securityScoped = folder.startAccessingSecurityScopedResource()
         defer { if securityScoped { folder.stopAccessingSecurityScopedResource() } }
-        let source = try validate(folder)
+        let validationStarted = ProcessInfo.processInfo.systemUptime
+        await diagnostics.start(.packValidation)
+        let source: QwenPackManifest
+        do {
+            source = try validate(folder)
+            await diagnostics.finish(.packValidation, startedAt: validationStarted)
+            await diagnostics.update {
+                $0.pack = "valid"
+                $0.packID = source.pack_id
+                $0.packFilesFound = ["manifest.json"] + source.files.map(\.path)
+            }
+        } catch {
+            await diagnostics.finish(.packValidation, startedAt: validationStarted, error: error,
+                                     friendlyError: "This local speech component is invalid or incompatible.")
+            await diagnostics.update { $0.pack = "invalid"; $0.runtime = "not loaded" }
+            throw error
+        }
         let replacing = folder.standardizedFileURL != installURL.standardizedFileURL
-        let backup = replacing ? try replaceInstalledPack(from: folder, files: source.files) : nil
+        let importStarted = ProcessInfo.processInfo.systemUptime
+        await diagnostics.start(.packImport)
+        await diagnostics.update { $0.pack = "importing" }
+        let backup: URL?
+        do {
+            backup = replacing ? try replaceInstalledPack(from: folder, files: source.files) : nil
+            await diagnostics.finish(.packImport, startedAt: importStarted)
+            await diagnostics.update { $0.pack = "imported" }
+        } catch {
+            await diagnostics.finish(.packImport, startedAt: importStarted, error: error,
+                                     friendlyError: "Could not import the local speech component.")
+            throw error
+        }
+        let loadStarted = ProcessInfo.processInfo.systemUptime
+        await diagnostics.start(.runtimeLoad)
+        await diagnostics.update {
+            $0.runtime = "loading"
+            $0.backend = "CPU"
+            $0.runtimeModelLocation = "Application Support/RendererPacks/LocalVoice"
+        }
         do {
             try loadRuntime()
+            await diagnostics.finish(.runtimeLoad, startedAt: loadStarted)
+            let backend = runtime.map { String(cString: qwen3_tts_active_backend_name($0)) } ?? "unknown"
+            await diagnostics.update { $0.runtime = "loaded"; $0.backend = backend }
         } catch {
+            await diagnostics.finish(.runtimeLoad, startedAt: loadStarted, error: error,
+                                     friendlyError: "Could not load local speech. Please try again.")
+            await diagnostics.update { $0.runtime = "failed"; $0.backend = "CPU" }
             if replacing {
                 try? FileManager.default.removeItem(at: installURL)
                 if let backup { try? FileManager.default.moveItem(at: backup, to: installURL) }
@@ -78,6 +122,7 @@ actor QwenRendererAdapter: InstallableSpeechProvider {
         }
         if let backup { try? FileManager.default.removeItem(at: backup) }
         manifest = source
+        preparedEmbeddings.removeAll()
         return capabilities
     }
 
@@ -91,18 +136,9 @@ actor QwenRendererAdapter: InstallableSpeechProvider {
         guard let languageID = Self.languageID(for: request.language) else {
             return .failure("Choose a supported speech language.")
         }
-        let normalized: URL
-        do { normalized = try normalizeReferenceAudio(referenceAudioURL) }
-        catch { return .failure("This saved voice could not be prepared for speech generation.") }
-        defer { try? FileManager.default.removeItem(at: normalized) }
-        var embedding = [Float](repeating: 0, count: 4096)
-        let embeddingSize = normalized.path.withCString { path in
-            embedding.withUnsafeMutableBufferPointer { buffer in
-                qwen3_tts_extract_embedding_file(runtime, path, buffer.baseAddress, Int32(buffer.count))
-            }
+        guard let embedding = preparedEmbeddings[voiceID] else {
+            return .failure("Confirm this voice before generating.")
         }
-        guard embeddingSize > 0 else { return .failure("This saved voice could not be prepared for speech generation.") }
-        embedding.removeSubrange(Int(embeddingSize)..<embedding.count)
         var params = Qwen3TtsParams()
         qwen3_tts_default_params(&params)
         params.n_threads = 4
@@ -115,7 +151,7 @@ actor QwenRendererAdapter: InstallableSpeechProvider {
             }
         }
         guard let result else {
-            return .failure("Speech generation failed. Please try again.")
+            return .failure(runtimeError(runtime, fallback: "Synthesis failed."))
         }
         defer { qwen3_tts_free_audio(result) }
         guard result.pointee.n_samples > 0, result.pointee.sample_rate > 0 else {
@@ -129,6 +165,23 @@ actor QwenRendererAdapter: InstallableSpeechProvider {
         }
         return .renderedFile(wav, duration: Double(samples.count) / Double(result.pointee.sample_rate),
                              approximation: nil)
+    }
+
+    func prepareVoice(_ voice: VoiceAsset, referenceAudioURL: URL) async throws {
+        guard let runtime else { throw providerError(code: 20, "Local runtime is not loaded.") }
+        let normalized = try normalizeReferenceAudio(referenceAudioURL)
+        defer { try? FileManager.default.removeItem(at: normalized) }
+        var embedding = [Float](repeating: 0, count: 4096)
+        let count = normalized.path.withCString { path in
+            embedding.withUnsafeMutableBufferPointer { buffer in
+                qwen3_tts_extract_embedding_file(runtime, path, buffer.baseAddress, Int32(buffer.count))
+            }
+        }
+        guard count > 0 else {
+            throw providerError(code: 21, runtimeError(runtime, fallback: "Reference preparation failed."))
+        }
+        embedding.removeSubrange(Int(count)..<embedding.count)
+        preparedEmbeddings[voice.id] = embedding
     }
 
     private func validate(_ folder: URL) throws -> QwenPackManifest {
@@ -149,21 +202,26 @@ actor QwenRendererAdapter: InstallableSpeechProvider {
               pack.supported_languages.contains("en"), pack.supported_languages.contains("zh"),
               !pack.pack_id.isEmpty, !pack.renderer_id.isEmpty,
               !pack.variant.isEmpty, !pack.version.isEmpty else {
-            throw VoiceStudioError.invalidRendererPack
+            throw providerError(code: 10, "Manifest does not match the pinned local speech package contract.")
         }
         let expectedModel = pack.quantization == "Q8_0" ? "qwen3-tts-0.6b-q8_0.gguf" : "qwen3-tts-0.6b-f16.gguf"
         let expectedNames = [expectedModel, "qwen3-tts-tokenizer-f16.gguf"]
-        guard Set(pack.files.map(\.path)) == Set(expectedNames),
-              expectedNames.allSatisfy({ name in
-                  guard let file = pack.files.first(where: { $0.path == name }), file.bytes > 0,
-                        file.sha256.count == 64, file.sha256.allSatisfy({ $0.isHexDigit }) else { return false }
-                  let url = folder.appendingPathComponent(name)
-                  guard let values = try? url.resourceValues(forKeys: [.fileSizeKey]),
-                        Int64(values.fileSize ?? -1) == file.bytes,
-                        let hash = try? Self.sha256(of: url) else { return false }
-                  return hash == file.sha256.lowercased()
-              }) else {
-            throw VoiceStudioError.invalidRendererPack
+        guard Set(pack.files.map(\.path)) == Set(expectedNames) else {
+            throw providerError(code: 11, "Manifest file list does not match the pinned model variant.")
+        }
+        for name in expectedNames {
+            guard let file = pack.files.first(where: { $0.path == name }), file.bytes > 0,
+                  file.sha256.count == 64, file.sha256.allSatisfy({ $0.isHexDigit }) else {
+                throw providerError(code: 12, "Manifest entry is invalid for required file: \(name).")
+            }
+            let url = folder.appendingPathComponent(name)
+            guard let values = try? url.resourceValues(forKeys: [.fileSizeKey]),
+                  Int64(values.fileSize ?? -1) == file.bytes else {
+                throw providerError(code: 13, "Required model file is missing or truncated: \(name).")
+            }
+            guard let hash = try? Self.sha256(of: url), hash == file.sha256.lowercased() else {
+                throw providerError(code: 14, "SHA-256 validation failed for required file: \(name).")
+            }
         }
         return pack
     }
@@ -199,7 +257,10 @@ actor QwenRendererAdapter: InstallableSpeechProvider {
         if let runtime { qwen3_tts_destroy(runtime); self.runtime = nil }
         setenv("QWEN3_TTS_BACKEND", "cpu", 1)
         let next = installURL.path.withCString { qwen3_tts_create($0, 4) }
-        guard let next else { throw VoiceStudioError.rendererUnavailable }
+        guard let next else {
+            let raw = String(cString: qwen3_tts_last_create_error())
+            throw providerError(code: 22, raw.isEmpty ? "Qwen runtime returned no initialization detail." : raw)
+        }
         runtime = next
     }
 
@@ -212,7 +273,8 @@ actor QwenRendererAdapter: InstallableSpeechProvider {
 
     private func normalizeReferenceAudio(_ sourceURL: URL) throws -> URL {
         let source = try AVAudioFile(forReading: sourceURL)
-        let target = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 24_000,
+        // Match the true-device Spike's known-good 24 kHz mono 16-bit PCM input.
+        let target = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 24_000,
                                    channels: 1, interleaved: false)!
         guard let converter = AVAudioConverter(from: source.processingFormat, to: target) else {
             throw VoiceStudioError.invalidAudioFile
@@ -238,6 +300,16 @@ actor QwenRendererAdapter: InstallableSpeechProvider {
             if status == .error { throw VoiceStudioError.invalidAudioFile }
         }
         return destination
+    }
+
+    private func runtimeError(_ runtime: OpaquePointer, fallback: String) -> String {
+        let detail = String(cString: qwen3_tts_get_error(runtime))
+        return detail.isEmpty ? fallback : detail
+    }
+
+    private func providerError(code: Int, _ message: String) -> NSError {
+        NSError(domain: "VoiceStudio.LocalSpeech", code: code,
+                userInfo: [NSLocalizedDescriptionKey: message])
     }
 
     private func writeWave(samples: [Float], sampleRate: Int) throws -> URL {

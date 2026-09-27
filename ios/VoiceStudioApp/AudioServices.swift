@@ -239,12 +239,16 @@ struct SpeechProviderAssembly {
     let providers: [SpeechProviderID: any SpeechProvider]
     let localPackProvider: any InstallableSpeechProvider
 
-    static func production() -> SpeechProviderAssembly {
-        let local = QwenRendererAdapter()
+    static func production(diagnostics: VoiceStudioDiagnostics) -> SpeechProviderAssembly {
+        let local = QwenRendererAdapter(diagnostics: diagnostics)
         let system = AppleSystemSpeechProvider()
         return SpeechProviderAssembly(providers: [.system: system, .local: local],
                                       localPackProvider: local)
     }
+}
+
+protocol VoicePreparingSpeechProvider: SpeechProvider {
+    func prepareVoice(_ voice: VoiceAsset, referenceAudioURL: URL) async throws
 }
 
 actor AppleSystemSpeechProvider: SpeechProvider {

@@ -180,6 +180,83 @@ final class VoiceStudioAppTests: XCTestCase {
         XCTAssertEqual(capabilities.status(for: .pitch), .supported)
     }
 
+    @MainActor
+    func testDiagnosticsKeepStageOrderAndRedactPrivatePathsWithoutCopyingInputText() {
+        let diagnostics = VoiceStudioDiagnostics()
+        diagnostics.update {
+            $0.provider = "Local"
+            $0.pack = "valid"
+            $0.runtime = "loaded"
+            $0.language = "zh"
+            $0.request = "ready"
+        }
+        let packStarted = ProcessInfo.processInfo.systemUptime
+        diagnostics.start(.packValidation)
+        diagnostics.finish(.packValidation, startedAt: packStarted)
+        let loadStarted = ProcessInfo.processInfo.systemUptime
+        diagnostics.start(.runtimeLoad)
+        diagnostics.finish(.runtimeLoad, startedAt: loadStarted,
+                           error: NSError(domain: "QwenRuntime", code: 42,
+                                          userInfo: [NSLocalizedDescriptionKey: "Cannot open /Users/private/Model/secret.gguf"]),
+                           friendlyError: "Could not load local speech.")
+
+        XCTAssertEqual(diagnostics.stages.map(\.stage), [.packValidation, .runtimeLoad])
+        XCTAssertEqual(diagnostics.stages.map(\.state), [.success, .failed])
+        let exported = diagnostics.exportText()
+        XCTAssertTrue(exported.contains("Friendly error: Could not load local speech."))
+        XCTAssertTrue(exported.contains("Error domain: QwenRuntime"))
+        XCTAssertTrue(exported.contains("Error code: 42"))
+        XCTAssertTrue(exported.contains("[private path]"))
+        XCTAssertFalse(exported.contains("/Users/private"))
+        XCTAssertFalse(exported.contains("private user text"))
+
+        diagnostics.finish(.output, startedAt: ProcessInfo.processInfo.systemUptime,
+                           error: NSError(domain: "LocalFile", code: 9,
+                                          userInfo: [NSLocalizedDescriptionKey: "Cannot read C:\\Users\\Private\\AppData\\reference.wav"]),
+                           friendlyError: "Output failed.")
+        let windowsPathExport = diagnostics.exportText()
+        XCTAssertTrue(windowsPathExport.contains("[private path]"))
+        XCTAssertFalse(windowsPathExport.contains("C:\\Users\\Private"))
+    }
+
+    func testKeyboardDismissalIgnoresTapsInsideTextInputsAndDismissesOutside() {
+        let frame = CGRect(x: 20, y: 40, width: 280, height: 90)
+
+        XCTAssertFalse(KeyboardDismissalPolicy.shouldDismiss(tapLocation: CGPoint(x: 100, y: 70),
+                                                              inputFrames: [frame]))
+        XCTAssertTrue(KeyboardDismissalPolicy.shouldDismiss(tapLocation: CGPoint(x: 340, y: 70),
+                                                             inputFrames: [frame]))
+    }
+
+    @MainActor
+    func testLocalSavedVoiceRequiresExplicitPrepareAndKeepsCanonicalAudioDurableOnFailure() async throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try AudioFileStore(rootDirectory: root)
+        let staged = try makeStagedAsset(in: store)
+        let saved = try store.saveVoice(VoiceAsset(name: "Prepare test", sourceType: .record,
+                                                   referenceAudio: staged))
+        let local = StubLocalSpeechProvider(failFirstPrepare: true)
+        let system = UnavailableSpeechProvider()
+        let assembly = SpeechProviderAssembly(providers: [.system: system, .local: local],
+                                              localPackProvider: local)
+        let model = try VoiceStudioModel(rootDirectory: root, providerAssembly: assembly)
+        await model.installLocalSpeechResource(from: root)
+        let selection = VoiceSelection.saved(saved.id)
+        XCTAssertFalse(model.canGenerate(text: "hello", voice: selection, language: "en"))
+
+        await model.prepareVoice(selection, language: "en")
+        XCTAssertEqual(model.voicePreparationState, .failed)
+        XCTAssertFalse(model.canGenerate(text: "hello", voice: selection, language: "en"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: try store.managedURL(for: saved.referenceAudio).path))
+
+        await model.prepareVoice(selection, language: "en")
+        XCTAssertEqual(model.preparationState(for: selection), .ready)
+        XCTAssertTrue(model.canGenerate(text: "hello", voice: selection, language: "en"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: try store.managedURL(for: saved.referenceAudio).path))
+        XCTAssertEqual(model.savedVoices.first?.referenceAudio.id, saved.referenceAudio.id)
+    }
+
     func testAppleSystemSpeechProviderProducesPlayableAudioForSharedRequest() async throws {
         let provider = AppleSystemSpeechProvider()
         guard let language = provider.capabilities.languages.first(where: { $0.hasPrefix("en") }),
@@ -555,5 +632,36 @@ private final class PendingMicrophonePermissionClient: MicrophonePermissionClien
         status = .denied
         continuation?.resume(returning: false)
         continuation = nil
+    }
+}
+
+private actor StubLocalSpeechProvider: InstallableSpeechProvider, VoicePreparingSpeechProvider {
+    nonisolated let id: SpeechProviderID = .local
+    nonisolated let capabilities = CapabilityProfile(
+        support: [.speechGeneration: .supported, .voiceCloning: .supported,
+                  .languageSelection: .supported], languages: ["en", "zh"])
+    nonisolated var installedResourceURL: URL {
+        FileManager.default.temporaryDirectory.appendingPathComponent("stub-local-pack", isDirectory: true)
+    }
+
+    private var shouldFailFirstPrepare: Bool
+
+    init(failFirstPrepare: Bool = false) { shouldFailFirstPrepare = failFirstPrepare }
+
+    func installPack(at folder: URL) async throws -> CapabilityProfile { capabilities }
+
+    func prepareVoice(_ voice: VoiceAsset, referenceAudioURL: URL) async throws {
+        if shouldFailFirstPrepare {
+            shouldFailFirstPrepare = false
+            throw NSError(domain: "StubLocalProvider", code: 7,
+                          userInfo: [NSLocalizedDescriptionKey: "Reference prepare test failure."])
+        }
+        guard FileManager.default.fileExists(atPath: referenceAudioURL.path) else {
+            throw VoiceStudioError.missingManagedAudio
+        }
+    }
+
+    func generate(_ request: VoiceRequest, voice: VoiceAsset?, referenceAudioURL: URL?) async -> SpeechResult {
+        .unsupported(.speechGeneration)
     }
 }

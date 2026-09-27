@@ -74,7 +74,7 @@ diff --git a/src/gguf_loader.cpp b/src/gguf_loader.cpp
 diff --git a/src/qwen3tts_c_api.h b/src/qwen3tts_c_api.h
 --- a/src/qwen3tts_c_api.h
 +++ b/src/qwen3tts_c_api.h
-@@ -93,9 +93,11 @@
+@@ -93,9 +93,14 @@
  Qwen3TtsAudio* qwen3_tts_synthesize_with_embedding(
      Qwen3Tts* tts,
      const char* text,
@@ -85,9 +85,34 @@ diff --git a/src/qwen3tts_c_api.h b/src/qwen3tts_c_api.h
 +/* Spike instrumentation: actual device selected by GGML, if loaded. */
 +const char* qwen3_tts_active_backend_name(const Qwen3Tts* tts);
 +
++/* Error from the most recent failed qwen3_tts_create call on this thread. */
++const char* qwen3_tts_last_create_error(void);
++
  /* Get last error message (or empty string) */
  const char* qwen3_tts_get_error(const Qwen3Tts* tts);
 
+diff --git a/src/qwen3tts_c_api.cpp b/src/qwen3tts_c_api.cpp
+--- a/src/qwen3tts_c_api.cpp
++++ b/src/qwen3tts_c_api.cpp
+@@ -32,2 +32,4 @@
+ // Match the C API header types (qwen3tts_c_api.h)
++#include <string>
++static thread_local std::string last_create_error;
+ struct Qwen3TtsParams {
+@@ -101,11 +101,13 @@
+ Qwen3Tts * qwen3_tts_create(const char * model_dir, int32_t n_threads) {
+     if (!model_dir) return nullptr;
++    last_create_error.clear();
+     auto * tts = new Qwen3Tts;
+     (void)n_threads; // thread count is set per-call via params
+     if (!tts->engine.load_models(model_dir)) {
+         tts->last_error = tts->engine.get_error();
++        last_create_error = tts->last_error;
+         delete tts;
+         return nullptr;
+     }
+     return tts;
+ }
 diff --git a/src/qwen3_tts.h b/src/qwen3_tts.h
 --- a/src/qwen3_tts.h
 +++ b/src/qwen3_tts.h
@@ -101,13 +126,17 @@ diff --git a/src/qwen3_tts.h b/src/qwen3_tts.h
 diff --git a/src/qwen3tts_c_api.cpp b/src/qwen3tts_c_api.cpp
 --- a/src/qwen3tts_c_api.cpp
 +++ b/src/qwen3tts_c_api.cpp
-@@ -238,6 +238,10 @@
+@@ -238,6 +238,14 @@
      return out;
  }
 -
 +const char * qwen3_tts_active_backend_name(const Qwen3Tts * tts) {
 +    if (!tts || !tts->engine.is_loaded()) return "Not loaded";
 +    return qwen3_tts::active_backend_name();
++}
++
++const char * qwen3_tts_last_create_error(void) {
++    return last_create_error.c_str();
 +}
 +
  const char * qwen3_tts_get_error(const Qwen3Tts * tts) {
