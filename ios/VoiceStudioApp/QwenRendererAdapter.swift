@@ -268,9 +268,9 @@ actor QwenRendererAdapter: InstallableSpeechProvider {
         guard let language else { return nil }
         let primary = language.lowercased().split(separator: "-").first.map(String.init)
         switch primary {
-        case "en": 2050
-        case "zh": 2055
-        default: nil
+        case "en": return 2050
+        case "zh": return 2055
+        default: return nil
         }
     }
 }
