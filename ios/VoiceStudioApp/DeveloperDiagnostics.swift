@@ -27,6 +27,10 @@ struct DiagnosticStageResult: Sendable {
     let errorCode: Int?
     let friendlyError: String?
     let underlyingError: String?
+    let operation: String?
+    let file: String?
+    let expected: String?
+    let actual: String?
 }
 
 struct VoiceStudioDiagnosticSnapshot: Sendable {
@@ -34,7 +38,10 @@ struct VoiceStudioDiagnosticSnapshot: Sendable {
     var pack = "none"
     var packID: String?
     var packFilesFound: [String] = []
+    var rendererID: String?
     var runtime = "not loaded"
+    var rendererLoadDurationMilliseconds: Int?
+    var rendererGenerationDurationMilliseconds: Int?
     var runtimeModelLocation: String?
     var backend = "System"
     var voice = "system"
@@ -45,6 +52,8 @@ struct VoiceStudioDiagnosticSnapshot: Sendable {
     var generation = "idle"
     var outputFileName: String?
     var outputDuration: Double?
+    var generationDurationMilliseconds: Int?
+    var realTimeFactor: Double?
 }
 
 @MainActor
@@ -59,17 +68,22 @@ final class VoiceStudioDiagnostics: ObservableObject {
     func start(_ stage: DiagnosticStage) {
         set(DiagnosticStageResult(stage: stage, state: .running, durationMilliseconds: nil,
                                   errorDomain: nil, errorCode: nil,
-                                  friendlyError: nil, underlyingError: nil))
+                                  friendlyError: nil, underlyingError: nil,
+                                  operation: nil, file: nil, expected: nil, actual: nil))
     }
 
     func finish(_ stage: DiagnosticStage, startedAt: TimeInterval,
-                error: Error? = nil, friendlyError: String? = nil) {
+                error: Error? = nil, friendlyError: String? = nil,
+                operation: String? = nil, file: String? = nil,
+                expected: String? = nil, actual: String? = nil) {
         let nsError = error as NSError?
         let safeUnderlying = nsError.map { Self.redact($0.localizedDescription) }
         set(DiagnosticStageResult(stage: stage, state: error == nil ? .success : .failed,
                                   durationMilliseconds: max(0, Int((ProcessInfo.processInfo.systemUptime - startedAt) * 1000)),
                                   errorDomain: nsError?.domain, errorCode: nsError?.code,
-                                  friendlyError: friendlyError, underlyingError: safeUnderlying))
+                                  friendlyError: friendlyError, underlyingError: safeUnderlying,
+                                  operation: operation, file: file.map(Self.safePackPath),
+                                  expected: expected.map(Self.redact), actual: actual.map(Self.redact)))
     }
 
     func clear() {
@@ -78,6 +92,10 @@ final class VoiceStudioDiagnostics: ObservableObject {
         snapshot.request = "invalid"
         snapshot.outputFileName = nil
         snapshot.outputDuration = nil
+        snapshot.rendererLoadDurationMilliseconds = nil
+        snapshot.rendererGenerationDurationMilliseconds = nil
+        snapshot.generationDurationMilliseconds = nil
+        snapshot.realTimeFactor = nil
     }
 
     func exportText() -> String {
@@ -92,8 +110,10 @@ final class VoiceStudioDiagnostics: ObservableObject {
             "Provider: \(snapshot.provider)",
             "Pack: \(snapshot.pack)",
             "Pack ID: \(snapshot.packID ?? "--")",
+            "Renderer ID: \(snapshot.rendererID ?? "--")",
             "Required files: \(snapshot.packFilesFound.isEmpty ? "--" : snapshot.packFilesFound.joined(separator: ", "))",
             "Runtime: \(snapshot.runtime)",
+            "Renderer load: \(snapshot.rendererLoadDurationMilliseconds.map { "\($0) ms" } ?? "--")",
             "Model folder: \(snapshot.runtimeModelLocation ?? "--")",
             "Backend: \(snapshot.backend)",
             "Voice: \(snapshot.voice)",
@@ -102,7 +122,10 @@ final class VoiceStudioDiagnostics: ObservableObject {
             "Accent: \(snapshot.accent ?? "--")",
             "Request: \(snapshot.request)",
             "Generate: \(snapshot.generation)",
+            "Generate time: \(snapshot.generationDurationMilliseconds.map { "\($0) ms" } ?? "--")",
+            "Renderer inference: \(snapshot.rendererGenerationDurationMilliseconds.map { "\($0) ms" } ?? "--")",
             "Output: \(snapshot.outputFileName.map { "\($0) · \(snapshot.outputDuration.map { String(format: "%.2f s", $0) } ?? "duration unknown")" } ?? "none")",
+            "RTF: \(snapshot.realTimeFactor.map { String(format: "%.2f", $0) } ?? "--")",
             "Pipeline:"
         ]
         for stage in stages {
@@ -112,6 +135,10 @@ final class VoiceStudioDiagnostics: ObservableObject {
             if let domain = stage.errorDomain { lines.append("  Error domain: \(domain)") }
             if let code = stage.errorCode { lines.append("  Error code: \(code)") }
             if let raw = stage.underlyingError { lines.append("  Raw error: \(Self.redact(raw))") }
+            if let operation = stage.operation { lines.append("  Operation: \(operation)") }
+            if let file = stage.file { lines.append("  File: \(file)") }
+            if let expected = stage.expected { lines.append("  Expected: \(expected)") }
+            if let actual = stage.actual { lines.append("  Actual: \(actual)") }
         }
         return lines.joined(separator: "\n")
     }
@@ -133,5 +160,14 @@ final class VoiceStudioDiagnostics: ObservableObject {
         return patterns.reduce(text) { result, pattern in
             result.replacingOccurrences(of: pattern, with: "[private path]", options: .regularExpression)
         }
+    }
+
+    private static func safePackPath(_ value: String) -> String {
+        let normalized = value.replacingOccurrences(of: "\\", with: "/")
+        guard !normalized.hasPrefix("/"), !normalized.contains(":"),
+              !normalized.split(separator: "/").contains("..") else {
+            return normalized.split(separator: "/").last.map(String.init) ?? "unknown"
+        }
+        return normalized
     }
 }

@@ -1,6 +1,8 @@
 import Combine
 import Foundation
+import ImageIO
 import SwiftUI
+import UniformTypeIdentifiers
 
 enum AppLanguage: String, CaseIterable, Identifiable {
     case system
@@ -113,9 +115,10 @@ final class AppAppearancePreference: ObservableObject {
     }
 
     func saveBackgroundImage(_ data: Data) throws {
+        let normalized = try BackgroundImageNormalizer.normalize(data)
         try FileManager.default.createDirectory(at: appearanceDirectory, withIntermediateDirectories: true)
         let destination = appearanceDirectory.appendingPathComponent("background.jpg")
-        try data.write(to: destination, options: .atomic)
+        try normalized.write(to: destination, options: .atomic)
         defaults.set(destination.path, forKey: backgroundKey)
         backgroundImageURL = destination
     }
@@ -127,5 +130,52 @@ final class AppAppearancePreference: ObservableObject {
         }
         defaults.removeObject(forKey: backgroundKey)
         backgroundImageURL = nil
+    }
+}
+
+enum BackgroundImageNormalizer {
+    enum Failure: Error {
+        case decode(String)
+        case normalize(String)
+        case encode
+
+        var stage: String {
+            switch self {
+            case .decode(_): return "decode"
+            case .normalize(_): return "normalize"
+            case .encode: return "encode"
+            }
+        }
+    }
+
+    static func normalize(_ data: Data, maxPixelSize: Int = 2560) throws -> Data {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
+              ] as CFDictionary) else {
+            throw Failure.decode("ImageIO could not decode source image")
+        }
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = CGContext(data: nil, width: image.width, height: image.height,
+                                      bitsPerComponent: 8, bytesPerRow: 0, space: colorSpace,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+              let normalized = draw(image, in: context) else {
+            throw Failure.normalize("Could not normalize orientation or color space")
+        }
+        let output = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(output, UTType.jpeg.identifier as CFString, 1, nil) else {
+            throw Failure.encode
+        }
+        CGImageDestinationAddImage(destination, normalized,
+                                   [kCGImageDestinationLossyCompressionQuality: 0.92] as CFDictionary)
+        guard CGImageDestinationFinalize(destination) else { throw Failure.encode }
+        return output as Data
+    }
+
+    private static func draw(_ image: CGImage, in context: CGContext) -> CGImage? {
+        context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        return context.makeImage()
     }
 }

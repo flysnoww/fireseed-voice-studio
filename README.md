@@ -20,6 +20,13 @@ Open http://127.0.0.1:4173. The harness uses Node.js built-ins and browser modul
 - SwiftUI app and AVFoundation audio services: ios/VoiceStudioApp.
 - macOS CI and internal IPA packaging: .github/workflows/ios-ci.yml and .github/workflows/ios-test-package.yml.
 
-Recording, managed audio import, playback, and saving a voice reference are implemented natively. Preview and Generate remain disabled because no renderer is integrated. The package produces an unsigned IPA for Sideloadly; no Apple signing credentials are stored in GitHub.
+Recording, managed audio import, playback, and durable voice references are implemented natively. Speech generation uses Apple system voices, an English tiny local renderer candidate, or the optional Qwen local reference-cloning pack. The package produces an unsigned IPA for Sideloadly; no Apple signing credentials are stored in GitHub.
+
+## Mobile product principles
+
+- Fun first, local first, low cost, easy to use, and easy to share; Voice Studio is a short-form voice creation playground, not a professional audio workstation.
+- Learn proven consumer features from products such as ElevenLabs and Fish Audio without competing on long-form production complexity.
+- Prefer system capabilities, then DSP, then the smallest sufficient local model; advanced large renderers remain optional.
+- Keep providers and models replaceable. User-owned Voice assets and durable reference audio survive renderer replacement.
 
 The Windows workspace cannot run Xcode. Treat GitHub Actions macOS results as the authoritative Apple build and test results.

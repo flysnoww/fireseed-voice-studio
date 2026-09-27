@@ -81,6 +81,11 @@
 "Audio saved." = "Audio saved.";
 "Could not save audio. Please try again." = "Could not save audio. Please try again.";
 "System Voice" = "System Voice";
+"Local Voice" = "Local Voice";
+"Local voice is ready" = "Local voice is ready";
+"Local voice data downloads the first time you generate with Local Voice." = "Local voice data downloads the first time you generate with Local Voice.";
+"Remove Local Voice Data" = "Remove Local Voice Data";
+"Removing…" = "Removing…";
 "Shaping" = "Shaping";
 "Expression" = "Expression";
 "Language & Accent" = "Language & Accent";

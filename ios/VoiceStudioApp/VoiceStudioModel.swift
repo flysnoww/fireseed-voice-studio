@@ -41,6 +41,8 @@ final class VoiceStudioModel: ObservableObject {
     @Published private(set) var isInstallingLocalSpeech = false
     @Published private(set) var isGeneratingSpeech = false
     @Published private(set) var isLocalSpeechReady = false
+    @Published private(set) var isTinyLocalModelReady = false
+    @Published private(set) var isDeletingTinyLocalModel = false
     @Published private(set) var voicePreparationState: VoicePreparationState = .none
     @Published private(set) var preparedVoiceID: UUID?
     @Published private(set) var preparationVoiceID: UUID?
@@ -181,7 +183,12 @@ final class VoiceStudioModel: ObservableObject {
     func playVoiceReference(_ voice: VoiceAsset) { play(voice.referenceAudio) }
 
     func capabilities(for selection: VoiceSelection) -> CapabilityProfile {
-        let providerID: SpeechProviderID = selection == .systemDefault ? .system : .local
+        let providerID: SpeechProviderID
+        switch selection {
+        case .systemDefault: providerID = .system
+        case .tinyLocal: providerID = .tinyLocal
+        case .saved: providerID = .local
+        }
         guard let provider = providers[providerID] else { return CapabilityProfile() }
         var support = provider.capabilities.support
         support[.speed] = .supported
@@ -206,7 +213,9 @@ final class VoiceStudioModel: ObservableObject {
         return SpeechProviderSelection.select(voice: voice, language: language,
                                               system: providers[.system]?.capabilities ?? CapabilityProfile(),
                                               local: providers[.local]?.capabilities,
-                                              localIsReady: isLocalSpeechReady) != nil
+                                              localIsReady: isLocalSpeechReady,
+                                              tinyLocal: providers[.tinyLocal]?.capabilities,
+                                              tinyLocalIsReady: providers[.tinyLocal] != nil) != nil
     }
 
     func restoreLocalSpeechProvider() async {
@@ -214,6 +223,30 @@ final class VoiceStudioModel: ObservableObject {
         let installed = localPackProvider.installedResourceURL
         guard FileManager.default.fileExists(atPath: installed.appendingPathComponent("manifest.json").path) else { return }
         await installLocalSpeechResource(from: installed)
+    }
+
+    func refreshTinyLocalModelState() async {
+        guard let tinyProvider = providers[.tinyLocal] as? KittenLocalSpeechProvider else { return }
+        isTinyLocalModelReady = await tinyProvider.isInstalled()
+    }
+
+    func deleteTinyLocalModel() async {
+        guard !isDeletingTinyLocalModel, !isGeneratingSpeech,
+              let tinyProvider = providers[.tinyLocal] as? KittenLocalSpeechProvider else { return }
+        isDeletingTinyLocalModel = true
+        defer { isDeletingTinyLocalModel = false }
+        do {
+            try await tinyProvider.deleteInstalledPack()
+            isTinyLocalModelReady = false
+            diagnostics.update {
+                $0.runtime = "not loaded"
+                $0.rendererLoadDurationMilliseconds = nil
+                $0.rendererGenerationDurationMilliseconds = nil
+            }
+            statusMessage = "Local voice data removed."
+        } catch {
+            statusMessage = "Could not remove local voice data. Please try again."
+        }
     }
 
     func installLocalSpeechResource(from folder: URL) async {
@@ -273,9 +306,18 @@ final class VoiceStudioModel: ObservableObject {
     func updateDiagnosticContext(voice: VoiceSelection, language: String, accent: String?,
                                  hasText: Bool, hasCurrentReference: Bool) {
         diagnostics.update {
-            $0.provider = voice == .systemDefault ? "System" : "Local"
-            $0.backend = voice == .systemDefault ? "System" : "CPU"
-            $0.voice = voice.savedVoiceID.map { "saved voice · \($0.uuidString.prefix(8))" } ?? "system"
+            switch voice {
+            case .systemDefault:
+                $0.provider = "System"; $0.rendererID = nil; $0.backend = "System"; $0.voice = "system"
+                $0.rendererLoadDurationMilliseconds = nil; $0.rendererGenerationDurationMilliseconds = nil
+            case .tinyLocal:
+                $0.provider = "Tiny local"; $0.rendererID = "KittenTTS-Nano-int8"
+                $0.backend = "ONNX Runtime · CPU"; $0.voice = "built-in"
+            case .saved(let id):
+                $0.provider = "Advanced local"; $0.rendererID = "Qwen3-TTS"
+                $0.backend = "CPU"; $0.voice = "saved voice · \(id.uuidString.prefix(8))"
+                $0.rendererLoadDurationMilliseconds = nil; $0.rendererGenerationDurationMilliseconds = nil
+            }
             $0.language = language
             $0.accent = accent
             $0.reference = hasCurrentReference ? "selected" : (voice.savedVoiceID == nil ? "none" : (preparedVoiceID == voice.savedVoiceID ? "ready" : "not prepared"))
@@ -320,11 +362,17 @@ final class VoiceStudioModel: ObservableObject {
         guard let providerID = SpeechProviderSelection.select(
             voice: selection, language: language,
             system: providers[.system]?.capabilities ?? CapabilityProfile(),
-            local: providers[.local]?.capabilities, localIsReady: isLocalSpeechReady),
+            local: providers[.local]?.capabilities, localIsReady: isLocalSpeechReady,
+            tinyLocal: providers[.tinyLocal]?.capabilities,
+            tinyLocalIsReady: providers[.tinyLocal] != nil),
               let provider = providers[providerID] else { return }
         let voice = selection.savedVoiceID.flatMap { id in savedVoices.first(where: { $0.id == id }) }
         isGeneratingSpeech = true
-        diagnostics.update { $0.generation = "running"; $0.outputFileName = nil; $0.outputDuration = nil }
+        diagnostics.update {
+            $0.generation = "running"; $0.outputFileName = nil; $0.outputDuration = nil
+            $0.generationDurationMilliseconds = nil; $0.rendererGenerationDurationMilliseconds = nil
+            $0.realTimeFactor = nil
+        }
         defer { isGeneratingSpeech = false }
         stopPlayback()
         var activeStage: DiagnosticStage?
@@ -344,9 +392,13 @@ final class VoiceStudioModel: ObservableObject {
             activeStage = .synthesis
             activeStageStartedAt = synthesisStarted
             diagnostics.start(.synthesis)
-            switch await provider.generate(request, voice: voice, referenceAudioURL: referenceURL) {
+            let speechResult = await provider.generate(request, voice: voice, referenceAudioURL: referenceURL)
+            if providerID == .tinyLocal { await refreshTinyLocalModelState() }
+            switch speechResult {
             case .renderedFile(let rawURL, _, _):
                 diagnostics.finish(.synthesis, startedAt: synthesisStarted)
+                let synthesisMilliseconds = max(0, Int((ProcessInfo.processInfo.systemUptime - synthesisStarted) * 1000))
+                diagnostics.update { $0.generationDurationMilliseconds = synthesisMilliseconds }
                 activeStage = nil
                 defer { try? FileManager.default.removeItem(at: rawURL) }
                 let dspStarted = ProcessInfo.processInfo.systemUptime
@@ -370,6 +422,10 @@ final class VoiceStudioModel: ObservableObject {
                 diagnostics.finish(.output, startedAt: outputStarted)
                 activeStage = nil
                 diagnostics.update { $0.generation = "success"; $0.outputFileName = asset.fileName; $0.outputDuration = duration }
+                let measuredGeneration = providerID == .tinyLocal
+                    ? diagnostics.snapshot.rendererGenerationDurationMilliseconds ?? synthesisMilliseconds
+                    : synthesisMilliseconds
+                diagnostics.update { $0.realTimeFactor = Double(measuredGeneration) / 1000 / max(duration, 0.001) }
                 statusMessage = "Speech generated."
             case .failure(let reason):
                 let error = NSError(domain: "SpeechProvider.\(providerID.rawValue)", code: 1,

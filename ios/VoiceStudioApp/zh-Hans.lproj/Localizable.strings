@@ -81,6 +81,11 @@
 "Audio saved." = "音频已保存。";
 "Could not save audio. Please try again." = "无法保存音频，请重试。";
 "System Voice" = "系统声音";
+"Local Voice" = "本地声音";
+"Local voice is ready" = "本地声音已就绪";
+"Local voice data downloads the first time you generate with Local Voice." = "首次使用本地声音生成时将下载模型数据。";
+"Remove Local Voice Data" = "移除本地声音数据";
+"Removing…" = "正在移除…";
 "Shaping" = "声音塑形";
 "Expression" = "表达方式";
 "Language & Accent" = "语言和口音";

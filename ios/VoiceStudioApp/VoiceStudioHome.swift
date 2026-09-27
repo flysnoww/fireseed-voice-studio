@@ -1,4 +1,5 @@
 import PhotosUI
+import OSLog
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
@@ -84,7 +85,10 @@ struct VoiceStudioHome: View {
                 syncGenerationOptions()
                 updateDiagnosticContext()
             }
-            .task { await model.restoreLocalSpeechProvider() }
+            .task {
+                await model.restoreLocalSpeechProvider()
+                await model.refreshTinyLocalModelState()
+            }
             .onChange(of: model.currentReference?.asset.id) { _, newID in
                 guard newID != nil else { return }
                 voiceNameWasEdited = false
@@ -119,6 +123,7 @@ struct VoiceStudioHome: View {
         StudioCard(title: "Voice", symbol: "person.wave.2") {
             Picker("Voice", selection: $generationVoice) {
                 Text("System Voice").tag(VoiceSelection.systemDefault)
+                Text("Local Voice").tag(VoiceSelection.tinyLocal)
                 ForEach(model.savedVoices) { voice in
                     Text(voice.name).tag(VoiceSelection.saved(voice.id))
                 }
@@ -343,9 +348,11 @@ struct VoiceStudioHome: View {
                 let snapshot = model.diagnostics.snapshot
                 VStack(alignment: .leading, spacing: 6) {
                     diagnosticLine("Provider", snapshot.provider)
+                    diagnosticLine("Renderer", snapshot.rendererID ?? "--")
                     diagnosticLine("Pack", snapshot.pack + (snapshot.packID.map { " · \($0)" } ?? ""))
                     diagnosticLine("Required files", snapshot.packFilesFound.joined(separator: ", ").isEmpty ? "--" : snapshot.packFilesFound.joined(separator: ", "))
                     diagnosticLine("Runtime", snapshot.runtime)
+                    diagnosticLine("Renderer load", snapshot.rendererLoadDurationMilliseconds.map { "\($0) ms" } ?? "--")
                     diagnosticLine("Model folder", snapshot.runtimeModelLocation ?? "--")
                     diagnosticLine("Backend", snapshot.backend)
                     diagnosticLine("Voice", snapshot.voice)
@@ -354,6 +361,9 @@ struct VoiceStudioHome: View {
                     diagnosticLine("Accent", snapshot.accent ?? "--")
                     diagnosticLine("Request", snapshot.request)
                     diagnosticLine("Generate", snapshot.generation)
+                    diagnosticLine("Generate time", snapshot.generationDurationMilliseconds.map { "\($0) ms" } ?? "--")
+                    diagnosticLine("Renderer inference", snapshot.rendererGenerationDurationMilliseconds.map { "\($0) ms" } ?? "--")
+                    diagnosticLine("RTF", snapshot.realTimeFactor.map { String(format: "%.2f", $0) } ?? "--")
                     diagnosticLine("Output", snapshot.outputFileName.map { "\($0) · \(snapshot.outputDuration.map { String(format: "%.2f s", $0) } ?? "--")" } ?? "none")
                     Divider()
                     ForEach(model.diagnostics.stages, id: \.stage) { stage in
@@ -369,6 +379,10 @@ struct VoiceStudioHome: View {
                                 Text("Code: \(domain) / \(code)").font(.caption.monospaced())
                             }
                             if let raw = stage.underlyingError { Text("Raw: \(raw)").font(.caption).textSelection(.enabled) }
+                            if let operation = stage.operation { Text("Operation: \(operation)").font(.caption.monospaced()) }
+                            if let file = stage.file { Text("File: \(file)").font(.caption.monospaced()) }
+                            if let expected = stage.expected { Text("Expected: \(expected)").font(.caption).textSelection(.enabled) }
+                            if let actual = stage.actual { Text("Actual: \(actual)").font(.caption).textSelection(.enabled) }
                         }
                     }
                     HStack {
@@ -481,7 +495,7 @@ struct VoiceStudioHome: View {
     }
 
     private func syncGenerationOptions() {
-        let choices = [VoiceSelection.systemDefault] + model.savedVoices.map { VoiceSelection.saved($0.id) }
+        let choices = [VoiceSelection.systemDefault, .tinyLocal] + model.savedVoices.map { VoiceSelection.saved($0.id) }
         if !choices.contains(generationVoice) { generationVoice = .systemDefault }
         let languages = model.availableLanguages(for: generationVoice)
         if !languages.contains(generationLanguage) { generationLanguage = languages.first ?? "en" }
@@ -528,7 +542,6 @@ private struct StudioBackdrop: View {
                 if let imageURL, let image = UIImage(contentsOfFile: imageURL.path) {
                     Image(uiImage: image).resizable().scaledToFill()
                         .frame(width: proxy.size.width, height: proxy.size.height).clipped()
-                    LinearGradient(colors: [.white.opacity(0.42), .white.opacity(0.24)], startPoint: .top, endPoint: .bottom)
                 }
             }
             .ignoresSafeArea()
@@ -537,6 +550,7 @@ private struct StudioBackdrop: View {
 }
 
 private struct SettingsView: View {
+    private let backgroundLogger = Logger(subsystem: "com.fireseed.voicestudio", category: "background-import")
     @ObservedObject var model: VoiceStudioModel
     @EnvironmentObject private var languagePreference: AppLanguagePreference
     @EnvironmentObject private var appearance: AppAppearancePreference
@@ -575,6 +589,19 @@ private struct SettingsView: View {
                     }
                     if let backgroundError { Text(backgroundError).font(.footnote).foregroundStyle(.red) }
                 }.listRowBackground(Rectangle().fill(appearance.skin.material))
+                Section("Local Voice") {
+                    if model.isTinyLocalModelReady {
+                        Label("Local voice is ready", systemImage: "checkmark.circle")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    } else {
+                        Text("Local voice data downloads the first time you generate with Local Voice.")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
+                    Button(model.isDeletingTinyLocalModel ? "Removing…" : "Remove Local Voice Data", role: .destructive) {
+                        Task { await model.deleteTinyLocalModel() }
+                    }
+                    .disabled(!model.isTinyLocalModelReady || model.isDeletingTinyLocalModel || model.isGeneratingSpeech)
+                }.listRowBackground(Rectangle().fill(appearance.skin.material))
                 Section("Developer Tools") {
                     Button(model.isInstallingLocalSpeech ? "Loading…" :
                            (model.isLocalSpeechReady ? "Local speech is ready." : "Import local speech component")) {
@@ -600,16 +627,21 @@ private struct SettingsView: View {
         }
         .task(id: selectedBackground) {
             guard let selectedBackground else { return }
+            let sourceTypes = selectedBackground.supportedContentTypes.map(\.identifier).joined(separator: ", ")
+            backgroundLogger.info("Background import source content type: \(sourceTypes, privacy: .public)")
             do {
-                guard let data = try await selectedBackground.loadTransferable(type: Data.self),
-                      let image = UIImage(data: data),
-                      let jpeg = image.jpegData(compressionQuality: 0.9) else {
+                guard let data = try await selectedBackground.loadTransferable(type: Data.self), !data.isEmpty else {
                     backgroundError = "Could not use this image. Please choose another."
+                    backgroundLogger.error("Background import failed at transfer: no image data")
                     return
                 }
-                try appearance.saveBackgroundImage(jpeg)
+                try appearance.saveBackgroundImage(data)
                 backgroundError = nil
-            } catch { backgroundError = "Could not use this image. Please choose another." }
+            } catch {
+                backgroundError = "Could not use this image. Please choose another."
+                let failure = error as? BackgroundImageNormalizer.Failure
+                backgroundLogger.error("Background import failed at \(failure?.stage ?? "persistence", privacy: .public): \(error.localizedDescription, privacy: .private)")
+            }
         }
     }
 }

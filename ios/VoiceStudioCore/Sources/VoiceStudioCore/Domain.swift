@@ -78,6 +78,7 @@ public struct VoiceAsset: Identifiable, Codable, Equatable, Sendable {
 public enum VoiceSelection: Codable, Equatable, Hashable, Sendable {
     case saved(UUID)
     case systemDefault
+    case tinyLocal
 
     public var savedVoiceID: UUID? {
         guard case .saved(let id) = self else { return nil }
@@ -188,18 +189,25 @@ public struct CapabilityProfile: Codable, Equatable, Sendable {
 
 public enum SpeechProviderID: String, Codable, Sendable {
     case system
+    case tinyLocal
     case local
 }
 
 public enum SpeechProviderSelection {
     public static func select(voice: VoiceSelection, language: String?,
                               system: CapabilityProfile, local: CapabilityProfile?,
-                              localIsReady: Bool) -> SpeechProviderID? {
+                              localIsReady: Bool, tinyLocal: CapabilityProfile? = nil,
+                              tinyLocalIsReady: Bool = true) -> SpeechProviderID? {
         switch voice {
         case .systemDefault:
             guard system.status(for: .speechGeneration) == .supported,
                   system.supports(language: language) else { return nil }
             return .system
+        case .tinyLocal:
+            guard tinyLocalIsReady, let tinyLocal,
+                  tinyLocal.status(for: .speechGeneration) == .supported,
+                  tinyLocal.supports(language: language) else { return nil }
+            return .tinyLocal
         case .saved:
             guard localIsReady, let local,
                   local.status(for: .speechGeneration) == .supported,

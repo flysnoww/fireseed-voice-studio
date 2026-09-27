@@ -1,6 +1,7 @@
 import AVFoundation
 import Combine
 import Foundation
+import KittenTTS
 import VoiceStudioCore
 
 enum MicrophonePermissionStatus {
@@ -242,8 +243,87 @@ struct SpeechProviderAssembly {
     static func production(diagnostics: VoiceStudioDiagnostics) -> SpeechProviderAssembly {
         let local = QwenRendererAdapter(diagnostics: diagnostics)
         let system = AppleSystemSpeechProvider()
-        return SpeechProviderAssembly(providers: [.system: system, .local: local],
+        let tiny = KittenLocalSpeechProvider(diagnostics: diagnostics)
+        return SpeechProviderAssembly(providers: [.system: system, .tinyLocal: tiny, .local: local],
                                       localPackProvider: local)
+    }
+}
+
+/// A fixed English local voice; its model cache is managed by the upstream SDK in Application Support.
+actor KittenLocalSpeechProvider: SpeechProvider {
+    nonisolated static let installedPackURL = FileManager.default.urls(
+        for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("RendererPacks/TinyLocal", isDirectory: true)
+    nonisolated let id: SpeechProviderID = .tinyLocal
+    nonisolated let capabilities = CapabilityProfile(
+        support: [.speechGeneration: .supported, .voiceCloning: .unsupported,
+                  .languageSelection: .supported, .accentSelection: .unsupported,
+                  .speed: .supported, .pitch: .supported],
+        languages: ["en"])
+    private let diagnostics: VoiceStudioDiagnostics
+    private var renderer: KittenTTS?
+
+    private static var config: KittenTTSConfig {
+        KittenTTSConfig(model: .nanoInt8, defaultVoice: .bella,
+                        storageDirectory: installedPackURL, ortNumThreads: 2)
+    }
+
+    init(diagnostics: VoiceStudioDiagnostics) { self.diagnostics = diagnostics }
+
+    func generate(_ request: VoiceRequest, voice: VoiceAsset?, referenceAudioURL: URL?) async -> SpeechResult {
+        guard case .tinyLocal = request.voice,
+              request.renderMode == .generate,
+              capabilities.supports(language: request.language) else {
+            return .unsupported(.speechGeneration)
+        }
+        do {
+            if renderer == nil {
+                let loadStarted = ProcessInfo.processInfo.systemUptime
+                await diagnostics.update {
+                    $0.provider = "Tiny local"; $0.rendererID = "KittenTTS-Nano-int8"
+                    $0.backend = "ONNX Runtime · CPU"; $0.runtime = "loading"
+                    $0.language = request.language ?? "en"; $0.voice = "built-in"
+                }
+                renderer = try await KittenTTS(Self.config)
+                await diagnostics.update {
+                    $0.runtime = "loaded"
+                    $0.rendererLoadDurationMilliseconds = max(0, Int((ProcessInfo.processInfo.systemUptime - loadStarted) * 1000))
+                }
+            }
+            guard let renderer else { return .failure("Local voice is not available right now.") }
+            let generationStarted = ProcessInfo.processInfo.systemUptime
+            let result = try await renderer.generate(request.text, speed: 1)
+            let output = FileManager.default.temporaryDirectory
+                .appendingPathComponent("tiny-local-\(UUID().uuidString).wav")
+            try result.wavData().write(to: output, options: .atomic)
+            await diagnostics.update {
+                $0.provider = "Tiny local"
+                $0.rendererID = "KittenTTS-Nano-int8"
+                $0.backend = "ONNX Runtime · CPU"
+                $0.runtime = "loaded"
+                $0.rendererGenerationDurationMilliseconds = max(0, Int((ProcessInfo.processInfo.systemUptime - generationStarted) * 1000))
+                $0.language = request.language ?? "en"
+                $0.voice = "built-in"
+            }
+            return .renderedFile(output, duration: result.duration, approximation: nil)
+        } catch {
+            await diagnostics.update {
+                $0.provider = "Tiny local"
+                $0.rendererID = "KittenTTS-Nano-int8"
+                $0.backend = "ONNX Runtime · CPU"
+                $0.runtime = "failed"
+            }
+            return .failure("Local speech could not be generated. Please try again.")
+        }
+    }
+
+    func isInstalled() -> Bool { KittenTTS.isModelCached(for: Self.config) }
+
+    func deleteInstalledPack() throws {
+        renderer = nil
+        if FileManager.default.fileExists(atPath: Self.installedPackURL.path) {
+            try FileManager.default.removeItem(at: Self.installedPackURL)
+        }
     }
 }
 

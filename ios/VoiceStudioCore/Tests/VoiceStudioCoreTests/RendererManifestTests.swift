@@ -28,6 +28,8 @@ final class SpeechCapabilityTests: XCTestCase {
         let system = CapabilityProfile(support: [.speechGeneration: .supported], languages: ["en", "zh"])
         let local = CapabilityProfile(support: [.speechGeneration: .supported,
                                                 .voiceCloning: .supported], languages: ["en", "zh"])
+        let tiny = CapabilityProfile(support: [.speechGeneration: .supported,
+                                              .voiceCloning: .unsupported], languages: ["en"])
 
         XCTAssertEqual(SpeechProviderSelection.select(voice: .systemDefault, language: "zh-CN",
                                                        system: system, local: local, localIsReady: true), .system)
@@ -37,6 +39,12 @@ final class SpeechCapabilityTests: XCTestCase {
                                                     system: system, local: local, localIsReady: false))
         XCTAssertNil(SpeechProviderSelection.select(voice: .systemDefault, language: "ja",
                                                     system: system, local: local, localIsReady: true))
+        XCTAssertEqual(SpeechProviderSelection.select(voice: .tinyLocal, language: "en-US",
+                                                       system: system, local: local, localIsReady: true,
+                                                       tinyLocal: tiny), .tinyLocal)
+        XCTAssertNil(SpeechProviderSelection.select(voice: .tinyLocal, language: "zh",
+                                                    system: system, local: local, localIsReady: true,
+                                                    tinyLocal: tiny))
     }
 
     func testVoiceRequestCarriesOnlyCanonicalUserIntent() throws {

@@ -4,7 +4,15 @@ import Darwin
 import Foundation
 import VoiceStudioCore
 
-private struct QwenPackManifest: Decodable {
+private struct QwenPackValidationIssue: LocalizedError {
+    let operation: String
+    let file: String
+    let expected: String
+    let actual: String
+    var errorDescription: String? { "\(operation) failed for \(file): expected \(expected); actual \(actual)." }
+}
+
+struct QwenPackManifest: Decodable {
     struct File: Decodable {
         let path: String
         let bytes: Int64
@@ -12,7 +20,7 @@ private struct QwenPackManifest: Decodable {
     }
 
     let format_version: Int
-    let model_id: String
+    let model_id: String?
     let model_revision: String
     let source_repository: String?
     let source_repository_revision: String?
@@ -23,14 +31,40 @@ private struct QwenPackManifest: Decodable {
     let ggml_revision: String
     let quantization: String
     let files: [File]
-    let pack_id: String
-    let renderer_id: String
-    let variant: String
-    let version: String
-    let compatibility_version: Int
-    let capabilities: [String: String]
-    let supported_languages: [String]
-    let supported_dialects: [String]
+    let pack_id: String?
+    let renderer_id: String?
+    let variant: String?
+    let version: String?
+    let compatibility_version: Int?
+    let capabilities: [String: String]?
+    let supported_languages: [String]?
+    let supported_dialects: [String]?
+}
+
+enum QwenPackManifestDecoder {
+    static func decode(_ data: Data) throws -> QwenPackManifest {
+        do { return try JSONDecoder().decode(QwenPackManifest.self, from: data) }
+        catch {
+            let detail = decodeDetail(error)
+            throw QwenPackValidationIssue(operation: "decodeManifest", file: "manifest.json",
+                                          expected: detail.expected, actual: detail.actual)
+        }
+    }
+
+    static func decodeDetail(_ error: Error) -> (expected: String, actual: String) {
+        switch error {
+        case DecodingError.keyNotFound(let key, _):
+            return ("required field \(key.stringValue)", "missing")
+        case DecodingError.typeMismatch(let type, let context):
+            return ("\(context.codingPath.map(\.stringValue).joined(separator: ".")) as \(type)", "invalid type")
+        case DecodingError.valueNotFound(let type, let context):
+            return ("\(context.codingPath.map(\.stringValue).joined(separator: ".")) as \(type)", "null or missing")
+        case DecodingError.dataCorrupted(let context):
+            return ("valid JSON at \(context.codingPath.map(\.stringValue).joined(separator: "."))", "corrupt data")
+        default:
+            return ("Qwen package manifest schema", error.localizedDescription)
+        }
+    }
 }
 
 /// Product-facing adapter for a replaceable local renderer pack. Runtime details stay here.
@@ -74,12 +108,16 @@ actor QwenRendererAdapter: InstallableSpeechProvider, VoicePreparingSpeechProvid
             await diagnostics.finish(.packValidation, startedAt: validationStarted)
             await diagnostics.update {
                 $0.pack = "valid"
-                $0.packID = source.pack_id
+                $0.packID = source.pack_id ?? "Qwen3-TTS-0.6B"
                 $0.packFilesFound = ["manifest.json"] + source.files.map(\.path)
             }
         } catch {
             await diagnostics.finish(.packValidation, startedAt: validationStarted, error: error,
-                                     friendlyError: "This local speech component is invalid or incompatible.")
+                                     friendlyError: "This local speech component is invalid or incompatible.",
+                                     operation: (error as? QwenPackValidationIssue)?.operation,
+                                     file: (error as? QwenPackValidationIssue)?.file,
+                                     expected: (error as? QwenPackValidationIssue)?.expected,
+                                     actual: (error as? QwenPackValidationIssue)?.actual)
             await diagnostics.update { $0.pack = "invalid"; $0.runtime = "not loaded" }
             throw error
         }
@@ -94,7 +132,11 @@ actor QwenRendererAdapter: InstallableSpeechProvider, VoicePreparingSpeechProvid
             await diagnostics.update { $0.pack = "imported" }
         } catch {
             await diagnostics.finish(.packImport, startedAt: importStarted, error: error,
-                                     friendlyError: "Could not import the local speech component.")
+                                     friendlyError: "Could not import the local speech component.",
+                                     operation: (error as? QwenPackValidationIssue)?.operation ?? "copyPack",
+                                     file: (error as? QwenPackValidationIssue)?.file ?? "pack contents",
+                                     expected: (error as? QwenPackValidationIssue)?.expected ?? "manifest and required model files copied intact",
+                                     actual: (error as? QwenPackValidationIssue)?.actual ?? error.localizedDescription)
             throw error
         }
         let loadStarted = ProcessInfo.processInfo.systemUptime
@@ -186,10 +228,18 @@ actor QwenRendererAdapter: InstallableSpeechProvider, VoicePreparingSpeechProvid
 
     private func validate(_ folder: URL) throws -> QwenPackManifest {
         let manifestURL = folder.appendingPathComponent("manifest.json")
-        let data = try Data(contentsOf: manifestURL)
-        let pack = try JSONDecoder().decode(QwenPackManifest.self, from: data)
+        let data: Data
+        do { data = try Data(contentsOf: manifestURL) }
+        catch {
+            let issue = error as NSError
+            throw QwenPackValidationIssue(operation: "readManifest", file: "manifest.json",
+                                          expected: "readable JSON manifest",
+                                          actual: "\(issue.domain)/\(issue.code): \(issue.localizedDescription)")
+        }
+        let pack: QwenPackManifest
+        pack = try QwenPackManifestDecoder.decode(data)
         guard pack.format_version == 1,
-              pack.model_id == "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+              pack.model_id == nil || pack.model_id == "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
               ((pack.model_revision == supportedModelRevision && pack.source_model_revision_attested != false) ||
                (pack.source_repository == "TeALO/qwen3-tts-gguf" &&
                 pack.source_repository_revision == "ee2fe152f14b4ec8b06c393969c3416246366833" &&
@@ -197,30 +247,46 @@ actor QwenRendererAdapter: InstallableSpeechProvider, VoicePreparingSpeechProvid
               pack.qwen3_tts_cpp_revision == supportedRuntimeRevision,
               pack.ggml_revision == supportedGGMLRevision,
               ["F16", "Q8_0"].contains(pack.quantization),
-              pack.compatibility_version == 1,
-              pack.capabilities == Self.expectedPackCapabilities,
-              pack.supported_languages.contains("en"), pack.supported_languages.contains("zh"),
-              !pack.pack_id.isEmpty, !pack.renderer_id.isEmpty,
-              !pack.variant.isEmpty, !pack.version.isEmpty else {
-            throw providerError(code: 10, "Manifest does not match the pinned local speech package contract.")
+              (pack.compatibility_version == nil || pack.compatibility_version == 1),
+              (pack.capabilities == nil || pack.capabilities == Self.expectedPackCapabilities),
+              (pack.supported_languages == nil || (pack.supported_languages!.contains("en") && pack.supported_languages!.contains("zh"))),
+              (pack.pack_id?.isEmpty != true), (pack.renderer_id?.isEmpty != true),
+              (pack.variant?.isEmpty != true), (pack.version?.isEmpty != true) else {
+            throw QwenPackValidationIssue(operation: "validateManifest", file: "manifest.json",
+                                          expected: "pinned Qwen 0.6B Base / F16 package revisions and capabilities",
+                                          actual: "manifest metadata is incompatible with the supported package contract")
         }
         let expectedModel = pack.quantization == "Q8_0" ? "qwen3-tts-0.6b-q8_0.gguf" : "qwen3-tts-0.6b-f16.gguf"
         let expectedNames = [expectedModel, "qwen3-tts-tokenizer-f16.gguf"]
         guard Set(pack.files.map(\.path)) == Set(expectedNames) else {
-            throw providerError(code: 11, "Manifest file list does not match the pinned model variant.")
+            throw QwenPackValidationIssue(operation: "validateFileList", file: "manifest.json",
+                                          expected: expectedNames.sorted().joined(separator: ", "),
+                                          actual: pack.files.map(\.path).sorted().joined(separator: ", "))
         }
         for name in expectedNames {
             guard let file = pack.files.first(where: { $0.path == name }), file.bytes > 0,
                   file.sha256.count == 64, file.sha256.allSatisfy({ $0.isHexDigit }) else {
-                throw providerError(code: 12, "Manifest entry is invalid for required file: \(name).")
+                throw QwenPackValidationIssue(operation: "validateFileEntry", file: name,
+                                              expected: "positive byte count and 64-character SHA-256",
+                                              actual: "missing or invalid manifest file entry")
             }
             let url = folder.appendingPathComponent(name)
             guard let values = try? url.resourceValues(forKeys: [.fileSizeKey]),
                   Int64(values.fileSize ?? -1) == file.bytes else {
-                throw providerError(code: 13, "Required model file is missing or truncated: \(name).")
+                let foundSize = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize.map(String.init) ?? "unreadable"
+                throw QwenPackValidationIssue(operation: "validateFileSize", file: name,
+                                              expected: "\(file.bytes) bytes", actual: "\(foundSize) bytes")
             }
-            guard let hash = try? Self.sha256(of: url), hash == file.sha256.lowercased() else {
-                throw providerError(code: 14, "SHA-256 validation failed for required file: \(name).")
+            let hash: String
+            do { hash = try Self.sha256(of: url) }
+            catch {
+                let issue = error as NSError
+                throw QwenPackValidationIssue(operation: "readSHA256", file: name,
+                                              expected: "readable model asset", actual: "\(issue.domain)/\(issue.code): \(issue.localizedDescription)")
+            }
+            guard hash == file.sha256.lowercased() else {
+                throw QwenPackValidationIssue(operation: "validateSHA256", file: name,
+                                              expected: file.sha256.lowercased(), actual: hash)
             }
         }
         return pack

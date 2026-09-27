@@ -1,4 +1,7 @@
 import AVFoundation
+import ImageIO
+import UIKit
+import UniformTypeIdentifiers
 import XCTest
 import VoiceStudioCore
 @testable import VoiceStudio
@@ -32,7 +35,7 @@ final class VoiceStudioAppTests: XCTestCase {
         XCTAssertEqual(initial.skin, .frost)
         XCTAssertNil(initial.backgroundImageURL)
         initial.setSkin(.warm)
-        try initial.saveBackgroundImage(Data([0xFF, 0xD8, 0xFF, 0xD9]))
+        try initial.saveBackgroundImage(makeBackgroundImage(orientation: 1, color: .systemBlue))
 
         let restored = AppAppearancePreference(defaults: defaults, skinKey: skinKey,
                                                backgroundKey: backgroundKey, appearanceDirectory: folder)
@@ -41,6 +44,100 @@ final class VoiceStudioAppTests: XCTestCase {
         restored.clearBackgroundImage()
         XCTAssertEqual(restored.skin, .warm)
         XCTAssertNil(restored.backgroundImageURL)
+    }
+
+    @MainActor
+    func testBackgroundImageNormalizationCorrectsOrientationPersistsAndReplaces() throws {
+        let defaults = makeLanguageDefaults()
+        let key = UUID().uuidString
+        let folder = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let appearance = AppAppearancePreference(defaults: defaults, backgroundKey: key,
+                                                 appearanceDirectory: folder)
+
+        try appearance.saveBackgroundImage(makeBackgroundImage(orientation: 6, color: .systemBlue))
+        let firstURL = try XCTUnwrap(appearance.backgroundImageURL)
+        let firstData = try Data(contentsOf: firstURL)
+        let source = try XCTUnwrap(CGImageSourceCreateWithData(firstData as CFData, nil))
+        XCTAssertEqual(CGImageSourceGetType(source) as String?, UTType.jpeg.identifier)
+        let normalizedCGImage = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
+        XCTAssertEqual(CGColorSpaceGetName(try XCTUnwrap(normalizedCGImage.colorSpace)) as String?, CGColorSpace.sRGB)
+        let properties = try XCTUnwrap(CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any])
+        XCTAssertEqual(properties[kCGImagePropertyPixelWidth] as? Int, 120)
+        XCTAssertEqual(properties[kCGImagePropertyPixelHeight] as? Int, 80)
+
+        try appearance.saveBackgroundImage(makeBackgroundImage(orientation: 1, color: .systemRed))
+        XCTAssertEqual(appearance.backgroundImageURL, firstURL)
+        XCTAssertNotEqual(try Data(contentsOf: firstURL), firstData)
+        XCTAssertEqual(AppAppearancePreference(defaults: defaults, backgroundKey: key,
+                                               appearanceDirectory: folder).backgroundImageURL, firstURL)
+        appearance.clearBackgroundImage()
+        XCTAssertNil(appearance.backgroundImageURL)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: firstURL.path))
+    }
+
+    @MainActor
+    func testInvalidBackgroundImageReportsFailureAndPreservesExistingImage() throws {
+        let defaults = makeLanguageDefaults()
+        let key = UUID().uuidString
+        let folder = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let appearance = AppAppearancePreference(defaults: defaults, backgroundKey: key,
+                                                 appearanceDirectory: folder)
+        try appearance.saveBackgroundImage(makeBackgroundImage(orientation: 1, color: .systemGreen))
+        let url = try XCTUnwrap(appearance.backgroundImageURL)
+        let saved = try Data(contentsOf: url)
+
+        XCTAssertThrowsError(try appearance.saveBackgroundImage(Data([0xFF, 0xD8, 0xFF, 0xD9])))
+        XCTAssertEqual(appearance.backgroundImageURL, url)
+        XCTAssertEqual(try Data(contentsOf: url), saved)
+    }
+
+    func testBackgroundNormalizerConvertsPNGToManagedJPEG() throws {
+        let normalized = try BackgroundImageNormalizer.normalize(makeBackgroundImage(orientation: 1, color: .systemOrange,
+                                                                                     type: UTType.png))
+        let source = try XCTUnwrap(CGImageSourceCreateWithData(normalized as CFData, nil))
+        XCTAssertEqual(CGImageSourceGetType(source) as String?, UTType.jpeg.identifier)
+    }
+
+    func testBackgroundNormalizerAcceptsHEICWhenEncoderIsAvailable() throws {
+        guard (CGImageDestinationCopyTypeIdentifiers() as? [String])?.contains(UTType.heic.identifier) == true else {
+            throw XCTSkip("HEIC encoder is unavailable on this test runtime.")
+        }
+        let heic = makeBackgroundImage(orientation: 1, color: .systemPurple, type: UTType.heic)
+        XCTAssertNoThrow(try BackgroundImageNormalizer.normalize(heic))
+    }
+
+    func testQwenManifestDecoderAcceptsSpikeCoreContractAndOptionalProductMetadata() throws {
+        let manifest = """
+        {"format_version":1,"model_revision":"dab70521e0956e3db91fb887d36c9a07d21ebc0b",
+         "qwen3_tts_cpp_revision":"b3ba14077cf1b3e11b86e5f84aa9184605c89b28",
+         "ggml_revision":"3af5f5760e19a96427f5f7a93b79cbdf3d4b265b","quantization":"F16",
+         "files":[{"path":"qwen3-tts-0.6b-f16.gguf","bytes":1,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+                  {"path":"qwen3-tts-tokenizer-f16.gguf","bytes":1,"sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]}
+        """.data(using: .utf8)!
+
+        let decoded = try QwenPackManifestDecoder.decode(manifest)
+
+        XCTAssertNil(decoded.model_id)
+        XCTAssertNil(decoded.pack_id)
+        XCTAssertEqual(decoded.files.map(\.path), ["qwen3-tts-0.6b-f16.gguf", "qwen3-tts-tokenizer-f16.gguf"])
+    }
+
+    func testQwenManifestDecoderReportsMissingRequiredField() throws {
+        let full = """
+        {"format_version":1,"model_revision":"dab70521e0956e3db91fb887d36c9a07d21ebc0b",
+         "qwen3_tts_cpp_revision":"b3ba14077cf1b3e11b86e5f84aa9184605c89b28",
+         "ggml_revision":"3af5f5760e19a96427f5f7a93b79cbdf3d4b265b","quantization":"F16","files":[]}
+        """.data(using: .utf8)!
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: full) as? [String: Any])
+        object.removeValue(forKey: "ggml_revision")
+        let missingRequiredField = try JSONSerialization.data(withJSONObject: object)
+
+        XCTAssertThrowsError(try QwenPackManifestDecoder.decode(missingRequiredField)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("required field ggml_revision"))
+            XCTAssertTrue(error.localizedDescription.contains("missing"))
+        }
     }
 
     @MainActor
@@ -168,6 +265,33 @@ final class VoiceStudioAppTests: XCTestCase {
     }
 
     @MainActor
+    func testTinyLocalProviderUsesSharedGeneratedAudioPipelineWithoutReferenceVoice() async throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("tiny-output.wav")
+        try makeSilentWaveFile(at: source, duration: 0.5)
+        let tiny = StubTinyLocalSpeechProvider(outputURL: source, duration: 0.5)
+        let local = StubLocalSpeechProvider()
+        let assembly = SpeechProviderAssembly(providers: [.system: UnavailableSpeechProvider(),
+                                                          .tinyLocal: tiny],
+                                              localPackProvider: local)
+        let model = try VoiceStudioModel(rootDirectory: root, providerAssembly: assembly)
+
+        XCTAssertTrue(model.canGenerate(text: "Hello", voice: .tinyLocal, language: "en"))
+        XCTAssertEqual(model.capabilities(for: .tinyLocal).status(for: .voiceCloning), .unsupported)
+        model.updateDiagnosticContext(voice: .tinyLocal, language: "en", accent: nil,
+                                      hasText: true, hasCurrentReference: false)
+        await model.generateSpeech(text: "Hello", voice: .tinyLocal, language: "en", accent: nil)
+
+        let generated = try XCTUnwrap(model.generatedAudio)
+        XCTAssertGreaterThan(generated.duration, 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: try AudioFileStore(rootDirectory: root).managedURL(for: generated).path))
+        XCTAssertEqual(model.diagnostics.snapshot.provider, "Tiny local")
+        XCTAssertEqual(model.diagnostics.snapshot.generation, "success")
+        XCTAssertNotNil(model.diagnostics.snapshot.realTimeFactor)
+    }
+
+    @MainActor
     func testShapingAndExpressionStayUnavailableUntilProviderSupportsThem() throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -192,7 +316,11 @@ final class VoiceStudioAppTests: XCTestCase {
         }
         let packStarted = ProcessInfo.processInfo.systemUptime
         diagnostics.start(.packValidation)
-        diagnostics.finish(.packValidation, startedAt: packStarted)
+        diagnostics.finish(.packValidation, startedAt: packStarted,
+                           error: NSError(domain: "VoiceStudio.LocalSpeech", code: 4865,
+                                          userInfo: [NSLocalizedDescriptionKey: "Manifest field missing."]),
+                           friendlyError: "Package validation failed.", operation: "decodeManifest",
+                           file: "manifest.json", expected: "required field model_revision", actual: "missing")
         let loadStarted = ProcessInfo.processInfo.systemUptime
         diagnostics.start(.runtimeLoad)
         diagnostics.finish(.runtimeLoad, startedAt: loadStarted,
@@ -201,11 +329,15 @@ final class VoiceStudioAppTests: XCTestCase {
                            friendlyError: "Could not load local speech.")
 
         XCTAssertEqual(diagnostics.stages.map(\.stage), [.packValidation, .runtimeLoad])
-        XCTAssertEqual(diagnostics.stages.map(\.state), [.success, .failed])
+        XCTAssertEqual(diagnostics.stages.map(\.state), [.failed, .failed])
         let exported = diagnostics.exportText()
         XCTAssertTrue(exported.contains("Friendly error: Could not load local speech."))
         XCTAssertTrue(exported.contains("Error domain: QwenRuntime"))
         XCTAssertTrue(exported.contains("Error code: 42"))
+        XCTAssertTrue(exported.contains("Operation: decodeManifest"))
+        XCTAssertTrue(exported.contains("File: manifest.json"))
+        XCTAssertTrue(exported.contains("Expected: required field model_revision"))
+        XCTAssertTrue(exported.contains("Actual: missing"))
         XCTAssertTrue(exported.contains("[private path]"))
         XCTAssertFalse(exported.contains("/Users/private"))
         XCTAssertFalse(exported.contains("private user text"))
@@ -557,6 +689,20 @@ final class VoiceStudioAppTests: XCTestCase {
         try data.write(to: url)
     }
 
+    private func makeBackgroundImage(orientation: UInt32, color: UIColor,
+                                    type: UTType = UTType.jpeg) -> Data {
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: 80, height: 120))
+        let image = renderer.image { context in
+            color.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: 80, height: 120))
+        }
+        let data = NSMutableData()
+        let destination = CGImageDestinationCreateWithData(data, type.identifier as CFString, 1, nil)!
+        CGImageDestinationAddImage(destination, image.cgImage!, [kCGImagePropertyOrientation: orientation] as CFDictionary)
+        CGImageDestinationFinalize(destination)
+        return data as Data
+    }
+
     private func appendLittleEndian(_ value: UInt16, to data: inout Data) {
         data.append(UInt8(value & 0x00ff))
         data.append(UInt8(value >> 8))
@@ -663,5 +809,26 @@ private actor StubLocalSpeechProvider: InstallableSpeechProvider, VoicePreparing
 
     func generate(_ request: VoiceRequest, voice: VoiceAsset?, referenceAudioURL: URL?) async -> SpeechResult {
         .unsupported(.speechGeneration)
+    }
+}
+
+private actor StubTinyLocalSpeechProvider: SpeechProvider {
+    nonisolated let id: SpeechProviderID = .tinyLocal
+    nonisolated let capabilities = CapabilityProfile(
+        support: [.speechGeneration: .supported, .voiceCloning: .unsupported,
+                  .languageSelection: .supported], languages: ["en"])
+    private let outputURL: URL
+    private let duration: TimeInterval
+
+    init(outputURL: URL, duration: TimeInterval) {
+        self.outputURL = outputURL
+        self.duration = duration
+    }
+
+    func generate(_ request: VoiceRequest, voice: VoiceAsset?, referenceAudioURL: URL?) async -> SpeechResult {
+        guard case .tinyLocal = request.voice, voice == nil, referenceAudioURL == nil else {
+            return .unsupported(.voiceCloning)
+        }
+        return .renderedFile(outputURL, duration: duration, approximation: nil)
     }
 }
