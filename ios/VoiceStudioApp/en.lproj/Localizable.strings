@@ -151,3 +151,13 @@
 "Output" = "Output";
 "Required files" = "Required files";
 "Model folder" = "Model folder";
+"Current voice" = "Current voice";
+"Built-in Voices" = "Built-in Voices";
+"Record New Voice" = "Record New Voice";
+"Stop Recording" = "Stop Recording";
+"Create From File" = "Create From File";
+"Preparing voice…" = "Preparing voice…";
+"No saved voices yet." = "No saved voices yet.";
+"Editable voice name" = "Editable voice name";
+"Background Import Diagnostics" = "Background Import Diagnostics";
+"Copy Background Diagnostics" = "Copy Background Diagnostics";

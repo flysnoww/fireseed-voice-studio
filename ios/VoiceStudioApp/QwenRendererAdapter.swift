@@ -68,7 +68,7 @@ enum QwenPackManifestDecoder {
 }
 
 /// Product-facing adapter for a replaceable local renderer pack. Runtime details stay here.
-actor QwenRendererAdapter: InstallableSpeechProvider, VoicePreparingSpeechProvider {
+actor QwenRendererAdapter: InstallableSpeechProvider, VoicePreparingSpeechProvider, SpeechRuntimeManaging {
     nonisolated static let installedPackURL = FileManager.default.urls(
         for: .applicationSupportDirectory, in: .userDomainMask)[0]
         .appendingPathComponent("RendererPacks/LocalVoice", isDirectory: true)
@@ -211,9 +211,25 @@ actor QwenRendererAdapter: InstallableSpeechProvider, VoicePreparingSpeechProvid
 
     func prepareVoice(_ voice: VoiceAsset, referenceAudioURL: URL) async throws {
         guard let runtime else { throw providerError(code: 20, "Local runtime is not loaded.") }
+        await diagnostics.updateVoicePrepareOperation("validateReference", physicalFootprintMB: Self.physicalFootprintMB())
         let normalized = try normalizeReferenceAudio(referenceAudioURL)
         defer { try? FileManager.default.removeItem(at: normalized) }
+        let normalizedInfo = try AVAudioFile(forReading: normalized)
+        let attributes = try FileManager.default.attributesOfItem(atPath: normalized.path)
+        let byteCount = (attributes[.size] as? NSNumber)?.intValue ?? 0
+        let sampleRate = Int(normalizedInfo.fileFormat.sampleRate)
+        let channelCount = normalizedInfo.fileFormat.channelCount
+        let duration = Double(normalizedInfo.length) / normalizedInfo.fileFormat.sampleRate
+        guard byteCount > 44, sampleRate == 24_000, channelCount == 1,
+              normalizedInfo.fileFormat.commonFormat == .pcmFormatInt16,
+              duration.isFinite, duration > 0 else {
+            throw providerError(code: 23, "Managed reference did not normalize to readable 24 kHz mono Int16 PCM WAV.")
+        }
+        await diagnostics.updateVoicePrepareOperation(
+            "prepareReference", referenceFormat: "WAV PCM Int16 · 24000 Hz · mono · \(byteCount) bytes · \(String(format: "%.2f", duration)) s",
+            physicalFootprintMB: Self.physicalFootprintMB())
         var embedding = [Float](repeating: 0, count: 4096)
+        await diagnostics.updateVoicePrepareOperation("speakerEncode", physicalFootprintMB: Self.physicalFootprintMB())
         let count = normalized.path.withCString { path in
             embedding.withUnsafeMutableBufferPointer { buffer in
                 qwen3_tts_extract_embedding_file(runtime, path, buffer.baseAddress, Int32(buffer.count))
@@ -224,6 +240,14 @@ actor QwenRendererAdapter: InstallableSpeechProvider, VoicePreparingSpeechProvid
         }
         embedding.removeSubrange(Int(count)..<embedding.count)
         preparedEmbeddings[voice.id] = embedding
+        await diagnostics.updateVoicePrepareOperation("cacheWrite", physicalFootprintMB: Self.physicalFootprintMB())
+    }
+
+    func unloadRuntime() async {
+        if let runtime { qwen3_tts_destroy(runtime) }
+        runtime = nil
+        preparedEmbeddings.removeAll()
+        await diagnostics.update { $0.runtime = "not loaded" }
     }
 
     private func validate(_ folder: URL) throws -> QwenPackManifest {
@@ -337,35 +361,67 @@ actor QwenRendererAdapter: InstallableSpeechProvider, VoicePreparingSpeechProvid
         "reference_transcript_conditioning": "unsupported", "local": "supported"
     ]
 
-    private func normalizeReferenceAudio(_ sourceURL: URL) throws -> URL {
+    func normalizeReferenceAudio(_ sourceURL: URL) throws -> URL {
         let source = try AVAudioFile(forReading: sourceURL)
         // Match the true-device Spike's known-good 24 kHz mono 16-bit PCM input.
-        let target = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 24_000,
-                                   channels: 1, interleaved: false)!
+        guard let target = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 24_000,
+                                         channels: 1, interleaved: false) else {
+            throw providerError(code: 24, "Could not create the required reference audio format.")
+        }
         guard let converter = AVAudioConverter(from: source.processingFormat, to: target) else {
             throw VoiceStudioError.invalidAudioFile
         }
         let destination = FileManager.default.temporaryDirectory
             .appendingPathComponent("voice-reference-\(UUID().uuidString).wav")
-        let output = try AVAudioFile(forWriting: destination, settings: target.settings)
-        while true {
-            let input = AVAudioPCMBuffer(pcmFormat: source.processingFormat, frameCapacity: 4096)!
-            try source.read(into: input)
-            if input.frameLength == 0 { break }
-            var didProvideInput = false
-            var conversionError: NSError?
-            let converted = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: 8192)!
-            let status = converter.convert(to: converted, error: &conversionError) { _, inputStatus in
-                guard !didProvideInput else { inputStatus.pointee = .noDataNow; return nil }
-                didProvideInput = true
-                inputStatus.pointee = .haveData
-                return input
+        do {
+            let output = try AVAudioFile(forWriting: destination, settings: target.settings)
+            while true {
+                guard let input = AVAudioPCMBuffer(pcmFormat: source.processingFormat, frameCapacity: 4096) else {
+                    throw providerError(code: 25, "Could not allocate reference audio buffers.")
+                }
+                try source.read(into: input)
+                if input.frameLength == 0 { break }
+                let expectedOutputFrames = Double(input.frameLength) * target.sampleRate /
+                    source.processingFormat.sampleRate
+                let outputCapacity = AVAudioFrameCount(ceil(expectedOutputFrames) + 4096)
+                guard outputCapacity > 0 else {
+                    throw providerError(code: 26, "Could not size the converted reference buffer.")
+                }
+                guard let converted = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: outputCapacity) else {
+                    throw providerError(code: 25, "Could not allocate reference audio buffers.")
+                }
+                var didProvideInput = false
+                var conversionError: NSError?
+                let status = converter.convert(to: converted, error: &conversionError) { _, inputStatus in
+                    guard !didProvideInput else { inputStatus.pointee = .noDataNow; return nil }
+                    didProvideInput = true
+                    inputStatus.pointee = .haveData
+                    return input
+                }
+                if let conversionError { throw conversionError }
+                if converted.frameLength > 0 { try output.write(from: converted) }
+                if status == .error { throw VoiceStudioError.invalidAudioFile }
             }
-            if let conversionError { throw conversionError }
-            if converted.frameLength > 0 { try output.write(from: converted) }
-            if status == .error { throw VoiceStudioError.invalidAudioFile }
+        } catch {
+            try? FileManager.default.removeItem(at: destination)
+            throw error
+        }
+        guard FileManager.default.fileExists(atPath: destination.path) else {
+            throw VoiceStudioError.missingManagedAudio
         }
         return destination
+    }
+
+    private static func physicalFootprintMB() -> Int? {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
+        let result = withUnsafeMutablePointer(to: &info) { pointer in
+            pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        guard result == KERN_SUCCESS else { return nil }
+        return Int(info.phys_footprint / 1_048_576)
     }
 
     private func runtimeError(_ runtime: OpaquePointer, fallback: String) -> String {

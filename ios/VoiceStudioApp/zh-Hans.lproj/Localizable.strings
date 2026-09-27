@@ -106,7 +106,7 @@
 "Warm Glass" = "暖色玻璃";
 "Replace Background" = "更换背景";
 "Reset Background" = "恢复默认背景";
-"Could not use this image. Please choose another." = "无法使用此图片，请选择其他图片。";
+"Could not use this image. Please choose another." = "无法使用这张照片，请尝试其他照片。";
 "Developer Tools" = "开发工具";
 "Loading…" = "正在加载…";
 "Import local speech component" = "导入本地语音组件";
@@ -151,3 +151,13 @@
 "Output" = "输出";
 "Required files" = "必需文件";
 "Model folder" = "模型目录";
+"Current voice" = "当前声音";
+"Built-in Voices" = "内置声音";
+"Record New Voice" = "录制新声音";
+"Stop Recording" = "停止录音";
+"Create From File" = "从文件创建";
+"Preparing voice…" = "正在准备声音…";
+"No saved voices yet." = "还没有已保存的声音。";
+"Editable voice name" = "可编辑的声音名称";
+"Background Import Diagnostics" = "背景导入诊断";
+"Copy Background Diagnostics" = "复制背景诊断";

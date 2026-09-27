@@ -108,6 +108,103 @@ final class VoiceStudioAppTests: XCTestCase {
         XCTAssertNoThrow(try BackgroundImageNormalizer.normalize(heic))
     }
 
+    func testWideColorBackgroundFixtureIsConvertedToSDRDisplayColorSpace() throws {
+        guard let fixture = makeWideColorBackgroundImage() else {
+            throw XCTSkip("Display P3 JPEG fixture could not be created on this runtime.")
+        }
+        let result = try BackgroundImageNormalizer.normalizeWithReport(fixture, sourceContentType: UTType.jpeg.identifier)
+        guard result.metadata.colorSpace == "Display P3" else {
+            throw XCTSkip("This ImageIO runtime did not preserve the Display P3 source profile in the fixture.")
+        }
+        XCTAssertEqual(result.metadata.outputColorSpace, "sRGB")
+        XCTAssertEqual(result.metadata.hdrOrWideColor, true)
+        XCTAssertGreaterThan(result.metadata.normalizedPixelWidth ?? 0, 0)
+        XCTAssertEqual(result.metadata.outputFormat, UTType.jpeg.identifier)
+    }
+
+    @MainActor
+    func testBackgroundDiagnosticsKeepSafeFormatMetadataAndManagedPersistence() throws {
+        let defaults = makeLanguageDefaults()
+        let folder = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let appearance = AppAppearancePreference(defaults: defaults, skinKey: UUID().uuidString,
+                                                 backgroundKey: UUID().uuidString,
+                                                 appearanceDirectory: folder)
+        let source = makeBackgroundImage(orientation: 1, color: .systemBlue)
+        try appearance.saveBackgroundImage(source, sourceContentType: UTType.jpeg.identifier)
+
+        let report = appearance.backgroundDiagnosticsText
+        XCTAssertTrue(report.contains("decodeImage: success"))
+        XCTAssertTrue(report.contains("normalizeOrientation: success"))
+        XCTAssertTrue(report.contains("normalizeColor: success"))
+        XCTAssertTrue(report.contains("encodeManagedAsset: success"))
+        XCTAssertTrue(report.contains("persist: success"))
+        XCTAssertTrue(report.contains("reload: success"))
+        XCTAssertTrue(report.contains("display: success"))
+        XCTAssertTrue(report.contains("output=public.jpeg"))
+        XCTAssertFalse(report.contains(folder.path))
+        XCTAssertFalse(report.localizedCaseInsensitiveContains("gps"))
+    }
+
+    @MainActor
+    func testVoicePrepareBreadcrumbSurvivesRestartAndDoesNotStorePrivateContent() {
+        let suite = UUID().uuidString
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let key = UUID().uuidString
+        let voiceID = UUID()
+        let diagnostics = VoiceStudioDiagnostics(defaults: defaults, breadcrumbKey: key)
+        diagnostics.beginVoicePrepare(provider: "local", renderer: "Qwen3-TTS", voiceID: voiceID,
+                                      referenceFormat: "managed 24 kHz mono PCM", runtimeLoaded: true,
+                                      physicalFootprintMB: 3072)
+        diagnostics.updateVoicePrepareOperation("speakerEncode")
+
+        let restored = VoiceStudioDiagnostics(defaults: defaults, breadcrumbKey: key)
+        let report = restored.exportText()
+        XCTAssertEqual(restored.snapshot.voicePrepare, VoicePrepareStateLabel.interrupted.rawValue)
+        XCTAssertTrue(report.contains("Previous session: Interrupted during voicePrepare · speakerEncode"))
+        XCTAssertTrue(report.contains("Process physical footprint: 3072 MB"))
+        XCTAssertFalse(report.contains(voiceID.uuidString))
+        XCTAssertFalse(report.contains("private/path"))
+        restored.finishVoicePrepare(.failed)
+        XCTAssertEqual(restored.snapshot.voicePrepare, VoicePrepareStateLabel.failed.rawValue)
+    }
+
+    func testVoicePreparationRoutingOnlyUsesCloneProviderForSavedCustomVoices() {
+        let clone = CapabilityProfile(support: [.speechGeneration: .supported,
+                                                .voiceCloning: .supported],
+                                      languages: ["en", "zh"])
+        let nonCloning = CapabilityProfile(support: [.speechGeneration: .supported,
+                                                     .voiceCloning: .unsupported],
+                                           languages: ["en"])
+
+        XCTAssertNil(VoicePreparationRouting.provider(for: .systemDefault, localCapabilities: clone))
+        XCTAssertNil(VoicePreparationRouting.provider(for: .tinyLocal, localCapabilities: clone))
+        XCTAssertEqual(VoicePreparationRouting.provider(for: .saved(UUID()), localCapabilities: clone), .local)
+        XCTAssertNil(VoicePreparationRouting.provider(for: .saved(UUID()), localCapabilities: nonCloning))
+    }
+
+    @MainActor
+    func testQwenReferenceConversionProducesReadable24KHzMonoInt16WAV() async throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("source.wav")
+        try makeSilentWaveFile(at: source, duration: 0.5)
+        let adapter = QwenRendererAdapter(diagnostics: VoiceStudioDiagnostics(
+            defaults: makeLanguageDefaults(), breadcrumbKey: UUID().uuidString))
+        let converted = try await adapter.normalizeReferenceAudio(source)
+        defer { try? FileManager.default.removeItem(at: converted) }
+
+        let file = try AVAudioFile(forReading: converted)
+        let size = try FileManager.default.attributesOfItem(atPath: converted.path)[.size] as? NSNumber
+        XCTAssertEqual(file.fileFormat.sampleRate, 24_000)
+        XCTAssertEqual(file.fileFormat.channelCount, 1)
+        XCTAssertEqual(file.fileFormat.commonFormat, .pcmFormatInt16)
+        XCTAssertGreaterThan(size?.intValue ?? 0, 44)
+        XCTAssertGreaterThan(file.length, 0)
+        XCTAssertEqual(Double(file.length) / file.fileFormat.sampleRate, 0.5, accuracy: 0.02)
+    }
+
     func testQwenManifestDecoderAcceptsSpikeCoreContractAndOptionalProductMetadata() throws {
         let manifest = """
         {"format_version":1,"model_revision":"dab70521e0956e3db91fb887d36c9a07d21ebc0b",
@@ -376,6 +473,8 @@ final class VoiceStudioAppTests: XCTestCase {
         await model.installLocalSpeechResource(from: root)
         let selection = VoiceSelection.saved(saved.id)
         XCTAssertFalse(model.canGenerate(text: "hello", voice: selection, language: "en"))
+        model.updateDiagnosticContext(voice: selection, language: "en", accent: nil,
+                                      hasText: false, hasCurrentReference: false)
 
         await model.prepareVoice(selection, language: "en")
         XCTAssertEqual(model.voicePreparationState, .failed)
@@ -387,6 +486,40 @@ final class VoiceStudioAppTests: XCTestCase {
         XCTAssertTrue(model.canGenerate(text: "hello", voice: selection, language: "en"))
         XCTAssertTrue(FileManager.default.fileExists(atPath: try store.managedURL(for: saved.referenceAudio).path))
         XCTAssertEqual(model.savedVoices.first?.referenceAudio.id, saved.referenceAudio.id)
+        XCTAssertEqual(model.diagnostics.snapshot.request, "invalid")
+        XCTAssertEqual(model.diagnostics.snapshot.voicePrepare, VoicePrepareStateLabel.success.rawValue)
+        let prepareCount = await local.prepareCallCount()
+        XCTAssertEqual(prepareCount, 2)
+        let managedURL = try store.managedURL(for: saved.referenceAudio)
+        let preparedURL = await local.lastPreparedReferenceURL()
+        XCTAssertEqual(preparedURL, managedURL)
+    }
+
+    @MainActor
+    func testSystemAndTinyVoicesNeverInvokeSavedVoicePrepare() async throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try AudioFileStore(rootDirectory: root)
+        let reference = try makeStagedAsset(in: store)
+        let saved = try store.saveVoice(VoiceAsset(name: "Custom", sourceType: .record,
+                                                   referenceAudio: reference))
+        let local = StubLocalSpeechProvider()
+        let system = UnavailableSpeechProvider()
+        let tiny = StubTinyLocalSpeechProvider(outputURL: root.appendingPathComponent("unused.wav"),
+                                               duration: 1)
+        let assembly = SpeechProviderAssembly(providers: [.system: system, .local: local, .tinyLocal: tiny],
+                                              localPackProvider: local)
+        let model = try VoiceStudioModel(rootDirectory: root, providerAssembly: assembly)
+        await model.installLocalSpeechResource(from: root)
+
+        await model.prepareVoice(.systemDefault, language: "en")
+        await model.prepareVoice(.tinyLocal, language: "en")
+
+        let prepareCount = await local.prepareCallCount()
+        XCTAssertEqual(prepareCount, 0)
+        XCTAssertEqual(model.preparationState(for: .systemDefault), .none)
+        XCTAssertEqual(model.preparationState(for: .tinyLocal), .none)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: try store.managedURL(for: saved.referenceAudio).path))
     }
 
     func testAppleSystemSpeechProviderProducesPlayableAudioForSharedRequest() async throws {
@@ -703,6 +836,24 @@ final class VoiceStudioAppTests: XCTestCase {
         return data as Data
     }
 
+    private func makeWideColorBackgroundImage() -> Data? {
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.displayP3),
+              let fill = CGColor(colorSpace: colorSpace, components: [0.9, 0.3, 0.2, 1]),
+              let context = CGContext(data: nil, width: 96, height: 64, bitsPerComponent: 8,
+                                      bytesPerRow: 0, space: colorSpace,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        context.setFillColor(fill)
+        context.fill(CGRect(x: 0, y: 0, width: 96, height: 64))
+        guard let rendered = context.makeImage() else { return nil }
+        let data = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(data, UTType.jpeg.identifier as CFString, 1, nil) else {
+            return nil
+        }
+        CGImageDestinationAddImage(destination, rendered, nil)
+        guard CGImageDestinationFinalize(destination) else { return nil }
+        return data as Data
+    }
+
     private func appendLittleEndian(_ value: UInt16, to data: inout Data) {
         data.append(UInt8(value & 0x00ff))
         data.append(UInt8(value >> 8))
@@ -791,12 +942,16 @@ private actor StubLocalSpeechProvider: InstallableSpeechProvider, VoicePreparing
     }
 
     private var shouldFailFirstPrepare: Bool
+    private var prepareCount = 0
+    private var preparedReferenceURL: URL?
 
     init(failFirstPrepare: Bool = false) { shouldFailFirstPrepare = failFirstPrepare }
 
     func installPack(at folder: URL) async throws -> CapabilityProfile { capabilities }
 
     func prepareVoice(_ voice: VoiceAsset, referenceAudioURL: URL) async throws {
+        prepareCount += 1
+        preparedReferenceURL = referenceAudioURL
         if shouldFailFirstPrepare {
             shouldFailFirstPrepare = false
             throw NSError(domain: "StubLocalProvider", code: 7,
@@ -806,6 +961,9 @@ private actor StubLocalSpeechProvider: InstallableSpeechProvider, VoicePreparing
             throw VoiceStudioError.missingManagedAudio
         }
     }
+
+    func prepareCallCount() -> Int { prepareCount }
+    func lastPreparedReferenceURL() -> URL? { preparedReferenceURL }
 
     func generate(_ request: VoiceRequest, voice: VoiceAsset?, referenceAudioURL: URL?) async -> SpeechResult {
         .unsupported(.speechGeneration)

@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import UIKit
 
 enum DiagnosticStage: String, CaseIterable, Sendable {
     case packValidation
@@ -17,6 +18,27 @@ enum DiagnosticStageState: String, Sendable {
     case running
     case success
     case failed
+}
+
+enum VoicePrepareStateLabel: String, Codable {
+    case idle
+    case running
+    case success
+    case failed
+    case interrupted
+}
+
+private struct VoicePrepareBreadcrumb: Codable {
+    var state: VoicePrepareStateLabel
+    var operation: String
+    var timestamp: Date
+    var provider: String
+    var renderer: String
+    var voiceID: String
+    var referenceFormat: String
+    var runtimeLoaded: Bool
+    var memoryWarningCount: Int
+    var physicalFootprintMB: Int?
 }
 
 struct DiagnosticStageResult: Sendable {
@@ -54,12 +76,53 @@ struct VoiceStudioDiagnosticSnapshot: Sendable {
     var outputDuration: Double?
     var generationDurationMilliseconds: Int?
     var realTimeFactor: Double?
+    var voicePrepare = VoicePrepareStateLabel.idle.rawValue
+    var voicePrepareOperation = "none"
+    var voicePrepareContext = "none"
+    var previousSession = "none"
+    var memoryWarningCount = 0
+    var physicalFootprintMB: Int?
 }
 
 @MainActor
 final class VoiceStudioDiagnostics: ObservableObject {
     @Published private(set) var snapshot = VoiceStudioDiagnosticSnapshot()
     @Published private(set) var stages: [DiagnosticStageResult] = []
+    private let breadcrumbDefaults: UserDefaults
+    private let breadcrumbKey: String
+
+    init(defaults: UserDefaults = .standard, breadcrumbKey: String = "voicePrepareBreadcrumb") {
+        breadcrumbDefaults = defaults
+        self.breadcrumbKey = breadcrumbKey
+        if var breadcrumb = Self.loadBreadcrumb(defaults: defaults, key: breadcrumbKey),
+           breadcrumb.state == .running {
+            breadcrumb.state = .interrupted
+            Self.saveBreadcrumb(breadcrumb, defaults: defaults, key: breadcrumbKey)
+            snapshot.voicePrepare = VoicePrepareStateLabel.interrupted.rawValue
+            snapshot.voicePrepareOperation = breadcrumb.operation
+            snapshot.voicePrepareContext = Self.context(for: breadcrumb)
+            snapshot.previousSession = "Interrupted during voicePrepare · \(breadcrumb.operation)"
+            snapshot.memoryWarningCount = breadcrumb.memoryWarningCount
+            snapshot.physicalFootprintMB = breadcrumb.physicalFootprintMB
+            set(DiagnosticStageResult(stage: .voicePrepare, state: .failed,
+                                      durationMilliseconds: nil, errorDomain: nil, errorCode: nil,
+                                      friendlyError: nil, underlyingError: nil,
+                                      operation: breadcrumb.operation, file: nil,
+                                      expected: nil, actual: "Previous session ended during voicePrepare"))
+        } else if let breadcrumb = Self.loadBreadcrumb(defaults: defaults, key: breadcrumbKey) {
+            snapshot.voicePrepare = breadcrumb.state.rawValue
+            snapshot.voicePrepareOperation = breadcrumb.operation
+            snapshot.voicePrepareContext = Self.context(for: breadcrumb)
+            snapshot.memoryWarningCount = breadcrumb.memoryWarningCount
+            snapshot.physicalFootprintMB = breadcrumb.physicalFootprintMB
+        }
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didReceiveMemoryWarningNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.recordMemoryWarning() }
+        }
+    }
 
     func update(_ change: (inout VoiceStudioDiagnosticSnapshot) -> Void) {
         change(&snapshot)
@@ -70,6 +133,56 @@ final class VoiceStudioDiagnostics: ObservableObject {
                                   errorDomain: nil, errorCode: nil,
                                   friendlyError: nil, underlyingError: nil,
                                   operation: nil, file: nil, expected: nil, actual: nil))
+    }
+
+    func beginVoicePrepare(provider: String, renderer: String, voiceID: UUID,
+                           referenceFormat: String, runtimeLoaded: Bool,
+                           physicalFootprintMB: Int?) {
+        let breadcrumb = VoicePrepareBreadcrumb(
+            state: .running, operation: "resolveProvider", timestamp: Date(),
+            provider: provider, renderer: renderer,
+            voiceID: String(voiceID.uuidString.prefix(8)),
+            referenceFormat: referenceFormat, runtimeLoaded: runtimeLoaded,
+            memoryWarningCount: snapshot.memoryWarningCount,
+            physicalFootprintMB: physicalFootprintMB)
+        Self.saveBreadcrumb(breadcrumb, defaults: breadcrumbDefaults, key: breadcrumbKey)
+        snapshot.voicePrepare = VoicePrepareStateLabel.running.rawValue
+        snapshot.voicePrepareOperation = breadcrumb.operation
+        snapshot.voicePrepareContext = Self.context(for: breadcrumb)
+        snapshot.previousSession = "none"
+        snapshot.physicalFootprintMB = physicalFootprintMB
+    }
+
+    func updateVoicePrepareOperation(_ operation: String, runtimeLoaded: Bool? = nil,
+                                     referenceFormat: String? = nil, physicalFootprintMB: Int? = nil) {
+        guard var breadcrumb = Self.loadBreadcrumb(defaults: breadcrumbDefaults, key: breadcrumbKey) else { return }
+        breadcrumb.operation = operation
+        if let runtimeLoaded { breadcrumb.runtimeLoaded = runtimeLoaded }
+        if let referenceFormat { breadcrumb.referenceFormat = referenceFormat }
+        breadcrumb.physicalFootprintMB = physicalFootprintMB ?? breadcrumb.physicalFootprintMB
+        Self.saveBreadcrumb(breadcrumb, defaults: breadcrumbDefaults, key: breadcrumbKey)
+        snapshot.voicePrepareOperation = operation
+        snapshot.voicePrepareContext = Self.context(for: breadcrumb)
+        snapshot.physicalFootprintMB = breadcrumb.physicalFootprintMB
+    }
+
+    func finishVoicePrepare(_ state: VoicePrepareStateLabel, physicalFootprintMB: Int? = nil) {
+        guard var breadcrumb = Self.loadBreadcrumb(defaults: breadcrumbDefaults, key: breadcrumbKey) else { return }
+        breadcrumb.state = state
+        breadcrumb.timestamp = Date()
+        breadcrumb.physicalFootprintMB = physicalFootprintMB ?? breadcrumb.physicalFootprintMB
+        Self.saveBreadcrumb(breadcrumb, defaults: breadcrumbDefaults, key: breadcrumbKey)
+        snapshot.voicePrepare = state.rawValue
+        snapshot.voicePrepareOperation = breadcrumb.operation
+        snapshot.voicePrepareContext = Self.context(for: breadcrumb)
+        snapshot.physicalFootprintMB = breadcrumb.physicalFootprintMB
+    }
+
+    private func recordMemoryWarning() {
+        snapshot.memoryWarningCount += 1
+        guard var breadcrumb = Self.loadBreadcrumb(defaults: breadcrumbDefaults, key: breadcrumbKey) else { return }
+        breadcrumb.memoryWarningCount = snapshot.memoryWarningCount
+        Self.saveBreadcrumb(breadcrumb, defaults: breadcrumbDefaults, key: breadcrumbKey)
     }
 
     func finish(_ stage: DiagnosticStage, startedAt: TimeInterval,
@@ -122,6 +235,12 @@ final class VoiceStudioDiagnostics: ObservableObject {
             "Accent: \(snapshot.accent ?? "--")",
             "Request: \(snapshot.request)",
             "Generate: \(snapshot.generation)",
+            "Voice prepare: \(snapshot.voicePrepare)",
+            "Voice prepare operation: \(snapshot.voicePrepareOperation)",
+            "Voice prepare context: \(snapshot.voicePrepareContext)",
+            "Previous session: \(snapshot.previousSession)",
+            "Memory warnings: \(snapshot.memoryWarningCount)",
+            "Process physical footprint: \(snapshot.physicalFootprintMB.map { "\($0) MB" } ?? "--")",
             "Generate time: \(snapshot.generationDurationMilliseconds.map { "\($0) ms" } ?? "--")",
             "Renderer inference: \(snapshot.rendererGenerationDurationMilliseconds.map { "\($0) ms" } ?? "--")",
             "Output: \(snapshot.outputFileName.map { "\($0) · \(snapshot.outputDuration.map { String(format: "%.2f s", $0) } ?? "duration unknown")" } ?? "none")",
@@ -150,6 +269,23 @@ final class VoiceStudioDiagnostics: ObservableObject {
             stages.append(result)
         }
         stages.sort { DiagnosticStage.allCases.firstIndex(of: $0.stage)! < DiagnosticStage.allCases.firstIndex(of: $1.stage)! }
+    }
+
+    private static func loadBreadcrumb(defaults: UserDefaults, key: String) -> VoicePrepareBreadcrumb? {
+        guard let data = defaults.data(forKey: key) else { return nil }
+        return try? JSONDecoder().decode(VoicePrepareBreadcrumb.self, from: data)
+    }
+
+    private static func saveBreadcrumb(_ breadcrumb: VoicePrepareBreadcrumb,
+                                       defaults: UserDefaults, key: String) {
+        guard let data = try? JSONEncoder().encode(breadcrumb) else { return }
+        defaults.set(data, forKey: key)
+    }
+
+    private static func context(for breadcrumb: VoicePrepareBreadcrumb) -> String {
+        "provider=\(breadcrumb.provider) · renderer=\(breadcrumb.renderer) · voice=\(breadcrumb.voiceID) · " +
+        "reference=\(breadcrumb.referenceFormat) · runtimeLoaded=\(breadcrumb.runtimeLoaded) · " +
+        "started=\(ISO8601DateFormatter().string(from: breadcrumb.timestamp))"
     }
 
     private static func redact(_ text: String) -> String {

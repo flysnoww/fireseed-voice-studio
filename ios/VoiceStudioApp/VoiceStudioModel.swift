@@ -31,6 +31,17 @@ enum VoicePreparationState: Equatable {
     case failed
 }
 
+enum VoicePreparationRouting {
+    static func provider(for selection: VoiceSelection,
+                         localCapabilities: CapabilityProfile?) -> SpeechProviderID? {
+        guard case .saved = selection,
+              let localCapabilities,
+              localCapabilities.status(for: .speechGeneration) == .supported,
+              localCapabilities.status(for: .voiceCloning) == .supported else { return nil }
+        return .local
+    }
+}
+
 @MainActor
 final class VoiceStudioModel: ObservableObject {
     @Published private(set) var isRecording = false
@@ -91,7 +102,8 @@ final class VoiceStudioModel: ObservableObject {
          microphonePermissionClient: (any MicrophonePermissionClient)? = nil,
          audioRecorder: (any AudioRecording)? = nil,
          audioImporter: (any AudioImporting)? = nil,
-         providerAssembly: SpeechProviderAssembly? = nil) throws {
+         providerAssembly: SpeechProviderAssembly? = nil,
+         diagnostics suppliedDiagnostics: VoiceStudioDiagnostics? = nil) throws {
         let storeRoot: URL
         if let rootDirectory {
             storeRoot = rootDirectory
@@ -103,7 +115,7 @@ final class VoiceStudioModel: ObservableObject {
         let fileStore = try AudioFileStore(rootDirectory: storeRoot)
         self.audioFileStore = fileStore
         self.audioLifecycle = AudioLifecycle(fileStore: fileStore)
-        let diagnostics = VoiceStudioDiagnostics()
+        let diagnostics = suppliedDiagnostics ?? VoiceStudioDiagnostics()
         let assembly = providerAssembly ?? SpeechProviderAssembly.production(diagnostics: diagnostics)
         self.diagnostics = diagnostics
         self.providers = assembly.providers
@@ -256,9 +268,11 @@ final class VoiceStudioModel: ObservableObject {
         do {
             _ = try await localPackProvider.installPack(at: folder)
             isLocalSpeechReady = true
-            preparedVoiceID = nil
-            preparationVoiceID = nil
-            voicePreparationState = .none
+            if voicePreparationState != .preparing {
+                preparedVoiceID = nil
+                preparationVoiceID = nil
+                voicePreparationState = .none
+            }
             statusMessage = "Local speech is ready."
         } catch {
             isLocalSpeechReady = false
@@ -275,23 +289,55 @@ final class VoiceStudioModel: ObservableObject {
     }
 
     func prepareVoice(_ selection: VoiceSelection, language: String) async {
-        guard let voiceID = selection.savedVoiceID,
+        guard let voiceID = selection.savedVoiceID else { return }
+        guard VoicePreparationRouting.provider(for: selection, localCapabilities: providers[.local]?.capabilities) == .local,
               let voice = savedVoices.first(where: { $0.id == voiceID }),
-              let voicePreparingProvider else { return }
+              let voicePreparingProvider else {
+            voicePreparationState = .failed
+            statusMessage = "This saved voice cannot be prepared by the available voice renderer."
+            return
+        }
         if preparedVoiceID == voiceID, voicePreparationState == .ready { return }
         preparedVoiceID = nil
         preparationVoiceID = voiceID
         voicePreparationState = .preparing
-        diagnostics.update { $0.voice = "saved voice · \(voice.id.uuidString.prefix(8))"; $0.reference = "preparing" }
+        diagnostics.update {
+            $0.provider = "Advanced local"; $0.rendererID = "Qwen3-TTS"; $0.backend = "CPU"
+            $0.voice = "saved voice · \(voice.id.uuidString.prefix(8))"; $0.reference = "preparing"
+        }
+        diagnostics.beginVoicePrepare(provider: SpeechProviderID.local.rawValue,
+                                      renderer: "Qwen3-TTS", voiceID: voiceID,
+                                      referenceFormat: "managed audio asset",
+                                      runtimeLoaded: isLocalSpeechReady,
+                                      physicalFootprintMB: nil)
         let started = ProcessInfo.processInfo.systemUptime
         diagnostics.start(.voicePrepare)
         do {
+            if !isLocalSpeechReady {
+                diagnostics.updateVoicePrepareOperation("runtimeLoad")
+                await restoreLocalSpeechProvider()
+            }
+            guard isLocalSpeechReady else {
+                throw NSError(domain: "VoiceStudio.Prepare", code: 1,
+                              userInfo: [NSLocalizedDescriptionKey: "The local voice renderer is not available. Import its model pack in Developer Tools and retry."])
+            }
+            diagnostics.updateVoicePrepareOperation("resolveProvider", runtimeLoaded: true)
+            diagnostics.updateVoicePrepareOperation("validateReference")
             let referenceURL = try audioFileStore.managedURL(for: voice.referenceAudio)
+            guard FileManager.default.fileExists(atPath: referenceURL.path),
+                  let attributes = try? FileManager.default.attributesOfItem(atPath: referenceURL.path),
+                  let bytes = (attributes[.size] as? NSNumber)?.intValue, bytes > 0 else {
+                throw VoiceStudioError.missingManagedAudio
+            }
+            let referenceFormat = "managed reference asset · \(bytes) bytes"
+            diagnostics.updateVoicePrepareOperation("prepareReference", runtimeLoaded: true,
+                                                    referenceFormat: referenceFormat)
             try await voicePreparingProvider.prepareVoice(voice, referenceAudioURL: referenceURL)
             preparedVoiceID = voiceID
             voicePreparationState = .ready
             diagnostics.update { $0.reference = "ready"; $0.language = language }
             diagnostics.finish(.voicePrepare, startedAt: started)
+            diagnostics.finishVoicePrepare(.success)
             statusMessage = "Voice is ready."
         } catch {
             voicePreparationState = .failed
@@ -299,8 +345,20 @@ final class VoiceStudioModel: ObservableObject {
             diagnostics.update { $0.reference = "failed" }
             diagnostics.finish(.voicePrepare, startedAt: started, error: error,
                                friendlyError: "Could not prepare this voice. Please try again.")
+            diagnostics.finishVoicePrepare(.failed)
             statusMessage = "Could not prepare this voice. Please try again."
         }
+    }
+
+    func activateVoice(_ selection: VoiceSelection) async {
+        guard selection.savedVoiceID == nil, isLocalSpeechReady,
+              let runtimeManager = localPackProvider as? any SpeechRuntimeManaging else { return }
+        isLocalSpeechReady = false
+        preparedVoiceID = nil
+        preparationVoiceID = nil
+        voicePreparationState = .none
+        diagnostics.update { $0.runtime = "not loaded"; $0.reference = "none" }
+        await runtimeManager.unloadRuntime()
     }
 
     func updateDiagnosticContext(voice: VoiceSelection, language: String, accent: String?,

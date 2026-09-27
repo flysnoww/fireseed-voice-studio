@@ -331,6 +331,10 @@ protocol VoicePreparingSpeechProvider: SpeechProvider {
     func prepareVoice(_ voice: VoiceAsset, referenceAudioURL: URL) async throws
 }
 
+protocol SpeechRuntimeManaging: SpeechProvider {
+    func unloadRuntime() async
+}
+
 actor AppleSystemSpeechProvider: SpeechProvider {
     nonisolated let id: SpeechProviderID = .system
     nonisolated let capabilities: CapabilityProfile

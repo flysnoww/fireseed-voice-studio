@@ -18,6 +18,8 @@ struct VoiceStudioHome: View {
     @State private var speed = 1.0
     @State private var pitch = 0.0
     @State private var voiceToDelete: VoiceAsset?
+    @State private var isSavedVoicePickerPresented = false
+    @State private var pendingVoiceName: String?
     @State private var textInputFrames: [String: CGRect] = [:]
     @FocusState private var focusedInput: InputField?
     @Environment(\.locale) private var locale
@@ -67,6 +69,7 @@ struct VoiceStudioHome: View {
             .tint(appearance.skin.accent)
             .navigationTitle("Voice Studio")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(.hidden, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     NavigationLink(destination: SettingsView(model: model)) {
@@ -86,7 +89,6 @@ struct VoiceStudioHome: View {
                 updateDiagnosticContext()
             }
             .task {
-                await model.restoreLocalSpeechProvider()
                 await model.refreshTinyLocalModelState()
             }
             .onChange(of: model.currentReference?.asset.id) { _, newID in
@@ -100,6 +102,7 @@ struct VoiceStudioHome: View {
                 focusedInput = nil
                 syncGenerationOptions()
                 updateDiagnosticContext()
+                Task { await model.activateVoice(generationVoice) }
             }
             .onChange(of: generationLanguage) { _, _ in focusedInput = nil; updateDiagnosticContext() }
             .onChange(of: generationAccent) { _, _ in updateDiagnosticContext() }
@@ -121,26 +124,42 @@ struct VoiceStudioHome: View {
 
     private var voiceCard: some View {
         StudioCard(title: "Voice", symbol: "person.wave.2") {
-            Picker("Voice", selection: $generationVoice) {
-                Text("System Voice").tag(VoiceSelection.systemDefault)
-                Text("Local Voice").tag(VoiceSelection.tinyLocal)
-                ForEach(model.savedVoices) { voice in
-                    Text(voice.name).tag(VoiceSelection.saved(voice.id))
-                }
+            LabeledContent("Current voice", value: selectedVoiceName)
+            Menu {
+                Button("System Voice") { generationVoice = .systemDefault }
+                Button("Local Voice") { generationVoice = .tinyLocal }
+            } label: {
+                Label("Built-in Voices", systemImage: "chevron.down.circle")
             }
             .accessibilityIdentifier("generationVoicePicker")
             HStack {
-                Button("Record") {
+                Button {
+                    focusedInput = nil
+                    isSavedVoicePickerPresented = true
+                } label: {
+                    Label("My Voices", systemImage: "person.2")
+                }
+                .accessibilityIdentifier("myVoicesButton")
+                Spacer()
+                Button {
                     focusedInput = nil
                     if model.isRecording { model.stopRecording() }
                     else { Task { await model.startRecording() } }
+                } label: {
+                    Label(model.isRecording ? "Stop Recording" : "Record New Voice",
+                          systemImage: model.isRecording ? "stop.circle" : "record.circle")
                 }
                 .tint(model.isRecording ? .red : appearance.skin.accent)
                 .disabled(model.isRequestingPermission && !model.isRecording)
-                .accessibilityIdentifier("recordButton")
-                Spacer()
-                ImportAudioButton(model: model, onChoose: { focusedInput = nil })
+                .accessibilityIdentifier("recordNewVoiceButton")
             }
+            ImportAudioButton(model: model, onChoose: { focusedInput = nil }, onImported: { url in
+                let candidateName = url.deletingPathExtension().lastPathComponent
+                let name = candidateName.isEmpty ? String(localized: "Imported Voice", locale: locale) : candidateName
+                pendingVoiceName = name
+                voiceName = name
+                voiceNameWasEdited = false
+            })
             if model.isRecording {
                 Label("Recording in progress", systemImage: "record.circle.fill")
                     .foregroundStyle(.red).accessibilityIdentifier("recordingState")
@@ -165,15 +184,20 @@ struct VoiceStudioHome: View {
                     Button("Stop") { model.stopPlayback() }.disabled(!model.isPlaying)
                         .accessibilityIdentifier("stopPlaybackButton")
                 }
-                TextField("Voice Name", text: $voiceName, onEditingChanged: { editing in
-                    if editing { voiceNameWasEdited = true }
-                })
-                .focused($focusedInput, equals: .voiceName)
-                .background(GeometryReader { geometry in
-                    Color.clear.preference(key: VoiceInputFramesKey.self,
-                                           value: ["voiceName": geometry.frame(in: .named("voiceStudioRoot"))])
-                })
-                .accessibilityIdentifier("voiceNameField")
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Voice Name").font(.caption).foregroundStyle(.secondary)
+                    TextField("Voice Name", text: $voiceName, onEditingChanged: { editing in
+                        if editing { voiceNameWasEdited = true }
+                    })
+                    .textFieldStyle(.roundedBorder)
+                    .focused($focusedInput, equals: .voiceName)
+                    .background(GeometryReader { geometry in
+                        Color.clear.preference(key: VoiceInputFramesKey.self,
+                                               value: ["voiceName": geometry.frame(in: .named("voiceStudioRoot"))])
+                    })
+                    .accessibilityHint("Editable voice name")
+                    .accessibilityIdentifier("voiceNameField")
+                }
                 Button("Save Voice") {
                     focusedInput = nil
                     model.saveVoice(name: voiceName)
@@ -185,10 +209,38 @@ struct VoiceStudioHome: View {
             if case .saved = generationVoice {
                 prepareVoiceButton
             }
-            if case .saved = generationVoice, !model.isLocalSpeechReady {
-                Label("Local voice generation is not ready.", systemImage: "info.circle")
-                    .font(.footnote).foregroundStyle(.secondary)
+        }
+        .sheet(isPresented: $isSavedVoicePickerPresented) {
+            NavigationStack {
+                List {
+                    if model.savedVoices.isEmpty {
+                        Text("No saved voices yet.").foregroundStyle(.secondary)
+                    }
+                    ForEach(model.savedVoices) { voice in
+                        Button {
+                            generationVoice = .saved(voice.id)
+                            isSavedVoicePickerPresented = false
+                        } label: {
+                            HStack {
+                                Label(voice.name, systemImage: "waveform")
+                                Spacer()
+                                if generationVoice == .saved(voice.id) {
+                                    Image(systemName: "checkmark").foregroundStyle(appearance.skin.accent)
+                                }
+                            }
+                        }
+                        .accessibilityIdentifier("savedVoiceChoice-\(voice.id.uuidString)")
+                    }
+                }
+                .navigationTitle("My Voices")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button("Done") { isSavedVoicePickerPresented = false }
+                    }
+                }
             }
+            .presentationDetents([.medium, .large])
         }
     }
 
@@ -197,7 +249,7 @@ struct VoiceStudioHome: View {
         let state = model.preparationState(for: generationVoice)
         let buttonTitle: LocalizedStringKey = switch state {
         case .none: "Confirm Voice"
-        case .preparing: "Recognizing voice…"
+        case .preparing: "Preparing voice…"
         case .ready: "Voice Ready"
         case .failed: "Preparation failed · Retry"
         }
@@ -221,7 +273,7 @@ struct VoiceStudioHome: View {
         }
         .buttonStyle(.bordered)
         .tint(buttonTint)
-        .disabled(!model.isLocalSpeechReady || state == .preparing || model.isGeneratingSpeech)
+        .disabled(model.isInstallingLocalSpeech || state == .preparing || model.isGeneratingSpeech)
         .accessibilityIdentifier("prepareVoiceButton")
     }
 
@@ -489,9 +541,25 @@ struct VoiceStudioHome: View {
     }
 
     private func updateDefaultVoiceName() {
+        if let pendingVoiceName, !pendingVoiceName.isEmpty {
+            voiceName = pendingVoiceName
+            self.pendingVoiceName = nil
+            return
+        }
         guard !voiceNameWasEdited, let reference = model.currentReference else { return }
         let key = reference.source == .record ? "Recorded Voice" : "Imported Voice"
         voiceName = String(localized: String.LocalizationValue(key), locale: locale)
+    }
+
+    private var selectedVoiceName: String {
+        switch generationVoice {
+        case .systemDefault:
+            String(localized: "System Voice", locale: locale)
+        case .tinyLocal:
+            String(localized: "Local Voice", locale: locale)
+        case .saved(let id):
+            model.savedVoices.first(where: { $0.id == id })?.name ?? String(localized: "My Voices", locale: locale)
+        }
     }
 
     private func syncGenerationOptions() {
@@ -556,6 +624,7 @@ private struct SettingsView: View {
     @EnvironmentObject private var appearance: AppAppearancePreference
     @State private var selectedBackground: PhotosPickerItem?
     @State private var backgroundError: String?
+    @State private var isLoadingBackground = false
     @State private var isSpeechComponentImporterPresented = false
 
     var body: some View {
@@ -584,11 +653,23 @@ private struct SettingsView: View {
                     PhotosPicker(selection: $selectedBackground, matching: .images) {
                         Label("Replace Background", systemImage: "photo")
                     }.accessibilityIdentifier("replaceBackgroundButton")
+                    if isLoadingBackground {
+                        ProgressView("Loading…")
+                    }
                     if appearance.backgroundImageURL != nil {
                         Button("Reset Background", role: .destructive) { appearance.clearBackgroundImage() }
                     }
                     if let backgroundError { Text(backgroundError).font(.footnote).foregroundStyle(.red) }
                 }.listRowBackground(Rectangle().fill(appearance.skin.material))
+#if DEBUG
+                Section("Background Import Diagnostics") {
+                    Button("Copy Background Diagnostics") {
+                        UIPasteboard.general.string = appearance.backgroundDiagnosticsText
+                    }
+                    Text(appearance.backgroundDiagnostics.last?.exportLine ?? "No background imports recorded.")
+                        .font(.caption.monospaced()).textSelection(.enabled)
+                }.listRowBackground(Rectangle().fill(appearance.skin.material))
+#endif
                 Section("Local Voice") {
                     if model.isTinyLocalModelReady {
                         Label("Local voice is ready", systemImage: "checkmark.circle")
@@ -616,6 +697,7 @@ private struct SettingsView: View {
         }
         .tint(appearance.skin.accent)
         .navigationTitle("Settings")
+        .toolbarBackground(.hidden, for: .navigationBar)
         .fileImporter(isPresented: $isSpeechComponentImporterPresented,
                       allowedContentTypes: [.folder], allowsMultipleSelection: false) { result in
             switch result {
@@ -627,21 +709,80 @@ private struct SettingsView: View {
         }
         .task(id: selectedBackground) {
             guard let selectedBackground else { return }
+            isLoadingBackground = true
+            defer { isLoadingBackground = false }
             let sourceTypes = selectedBackground.supportedContentTypes.map(\.identifier).joined(separator: ", ")
+            let sourceType = selectedBackground.supportedContentTypes.first?.identifier
+            appearance.recordBackgroundDiagnostic(stage: "pickerSelection", succeeded: true,
+                                                    sourceContentType: sourceType)
             backgroundLogger.info("Background import source content type: \(sourceTypes, privacy: .public)")
+            let loadStarted = ProcessInfo.processInfo.systemUptime
+            var isSavingBackground = false
             do {
-                guard let data = try await selectedBackground.loadTransferable(type: Data.self), !data.isEmpty else {
+                let fileTransfer: BackgroundPhotoFileTransfer?
+                do {
+                    fileTransfer = try await selectedBackground.loadTransferable(type: BackgroundPhotoFileTransfer.self)
+                } catch {
+                    fileTransfer = nil
+                    appearance.recordBackgroundDiagnostic(stage: "fileRepresentationFallback",
+                                                          succeeded: false, sourceContentType: sourceType,
+                                                          error: error)
+                }
+                let data: Data?
+                if let fileTransfer {
+                    data = fileTransfer.data
+                } else {
+                    data = try await selectedBackground.loadTransferable(type: Data.self)
+                }
+                let loadDuration = max(0, Int((ProcessInfo.processInfo.systemUptime - loadStarted) * 1000))
+                guard let data, !data.isEmpty else {
+                    appearance.recordBackgroundDiagnostic(stage: "loadTransferable", succeeded: false,
+                                                          sourceContentType: sourceType,
+                                                          error: BackgroundPhotoTransferError.empty,
+                                                          durationMilliseconds: loadDuration)
                     backgroundError = "Could not use this image. Please choose another."
-                    backgroundLogger.error("Background import failed at transfer: no image data")
+                    backgroundLogger.error("Background import failed at loadTransferable: no image data")
                     return
                 }
-                try appearance.saveBackgroundImage(data)
+                appearance.recordBackgroundDiagnostic(stage: "loadTransferable", succeeded: true,
+                                                      sourceContentType: sourceType,
+                                                      durationMilliseconds: loadDuration)
+                appearance.recordBackgroundDiagnostic(stage: "readData", succeeded: true,
+                                                      sourceContentType: sourceType,
+                                                      metadata: BackgroundImageMetadata(contentType: sourceType,
+                                                                                        sourceByteSize: data.count))
+                appearance.recordBackgroundDiagnostic(stage: "detectType", succeeded: true,
+                                                      sourceContentType: sourceType,
+                                                      metadata: BackgroundImageMetadata(contentType: sourceType,
+                                                                                        sourceByteSize: data.count))
+                try Task.checkCancellation()
+                isSavingBackground = true
+                try appearance.saveBackgroundImage(data, sourceContentType: sourceType)
                 backgroundError = nil
             } catch {
+                if Task.isCancelled { return }
+                if !isSavingBackground {
+                    appearance.recordBackgroundDiagnostic(stage: "loadTransferable", succeeded: false,
+                                                          sourceContentType: sourceType, error: error,
+                                                          durationMilliseconds: max(0, Int((ProcessInfo.processInfo.systemUptime - loadStarted) * 1000)))
+                }
                 backgroundError = "Could not use this image. Please choose another."
-                let failure = error as? BackgroundImageNormalizer.Failure
-                backgroundLogger.error("Background import failed at \(failure?.stage ?? "persistence", privacy: .public): \(error.localizedDescription, privacy: .private)")
+                backgroundLogger.error("Background import failed while reading or saving a selected image.")
             }
+        }
+    }
+}
+
+private enum BackgroundPhotoTransferError: Error {
+    case empty
+}
+
+private struct BackgroundPhotoFileTransfer: Transferable {
+    let data: Data
+
+    static var transferRepresentation: some TransferRepresentation {
+        FileRepresentation(importedContentType: .image) { received in
+            BackgroundPhotoFileTransfer(data: try Data(contentsOf: received.file))
         }
     }
 }
@@ -660,15 +801,21 @@ private struct AccountPlaceholderView: View {
 private struct ImportAudioButton: View {
     @ObservedObject var model: VoiceStudioModel
     var onChoose: () -> Void = {}
+    var onImported: (URL) -> Void = { _ in }
     @State private var isImporterPresented = false
 
     var body: some View {
-        Button("Import") { onChoose(); isImporterPresented = true }
+        Button("Create From File") { onChoose(); isImporterPresented = true }
             .disabled(model.isRecording || model.isRequestingPermission)
             .accessibilityIdentifier("importButton")
             .fileImporter(isPresented: $isImporterPresented, allowedContentTypes: [.audio], allowsMultipleSelection: false) { result in
                 switch result {
-                case .success(let urls): if let url = urls.first { model.importAudio(from: url) }
+                case .success(let urls):
+                    if let url = urls.first {
+                        let previousReferenceID = model.currentReference?.asset.id
+                        model.importAudio(from: url)
+                        if model.currentReference?.asset.id != previousReferenceID { onImported(url) }
+                    }
                 case .failure(let error): model.report(error)
                 }
             }
