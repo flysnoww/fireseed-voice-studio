@@ -30,6 +30,7 @@ jobs:
             -sdk iphonesimulator \
             -configuration Debug \
             CODE_SIGNING_ALLOWED=NO \
+            ARCHS=arm64 \
             build | tee xcodebuild-simulator-build.log
 
       - name: Select simulator
