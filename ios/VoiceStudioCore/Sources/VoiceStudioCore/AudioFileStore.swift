@@ -58,6 +58,18 @@ public final class AudioFileStore {
         return AudioAsset(id: id, fileName: fileName, duration: duration)
     }
 
+    /// Copies renderer output into managed staging so it follows the generated-audio cache policy.
+    public func registerGeneratedAudio(from source: URL, duration: TimeInterval,
+                                      sourceVoiceID: UUID, text: String) throws -> AudioAsset {
+        try validateFile(at: source, duration: duration)
+        let id = UUID()
+        let fileName = "\(id.uuidString.lowercased()).wav"
+        let destination = stagingDirectory.appendingPathComponent(fileName)
+        try fileManager.copyItem(at: source, to: destination)
+        return AudioAsset(id: id, fileName: fileName, duration: duration,
+                          sourceVoiceID: sourceVoiceID, text: text)
+    }
+
     public func managedURL(for asset: AudioAsset) throws -> URL {
         let ext = URL(fileURLWithPath: asset.fileName).pathExtension.lowercased()
         guard Self.supportedAudioExtensions.contains(ext),

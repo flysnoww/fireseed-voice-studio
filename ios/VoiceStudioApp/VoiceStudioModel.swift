@@ -30,6 +30,10 @@ final class VoiceStudioModel: ObservableObject {
     @Published private(set) var microphonePermissionDenied = false
     @Published private(set) var isPlaying = false
     @Published private(set) var isSavingVoice = false
+    @Published private(set) var isInstallingRenderer = false
+    @Published private(set) var isGeneratingSpeech = false
+    @Published private(set) var isRendererReady = false
+    @Published private(set) var generatedAudio: AudioAsset?
     @Published private(set) var currentReference: CurrentReferenceAudio?
     @Published private(set) var savedVoices: [VoiceAsset] = []
     @Published private(set) var savedVoiceFilter: SavedVoiceFilter = .time
@@ -52,6 +56,8 @@ final class VoiceStudioModel: ObservableObject {
     var savedVoicePageCount: Int { SavedVoiceLibrary.pageCount(for: filteredSavedVoices.count) }
 
     private let audioFileStore: AudioFileStore
+    private let audioLifecycle: AudioLifecycle
+    private let renderer: QwenRendererAdapter
 
     private let recorder: any AudioRecording
     private let importer: any AudioImporting
@@ -71,6 +77,8 @@ final class VoiceStudioModel: ObservableObject {
         }
         let fileStore = try AudioFileStore(rootDirectory: storeRoot)
         self.audioFileStore = fileStore
+        self.audioLifecycle = AudioLifecycle(fileStore: fileStore)
+        self.renderer = QwenRendererAdapter()
 
         let activeRecorder = audioRecorder ?? AudioRecorder(fileStore: fileStore,
                                                             microphonePermissionClient: microphonePermissionClient)
@@ -143,6 +151,80 @@ final class VoiceStudioModel: ObservableObject {
     }
 
     func playVoiceReference(_ voice: VoiceAsset) { play(voice.referenceAudio) }
+
+    var generationCapabilities: RendererCapabilities { renderer.capabilities }
+
+    func restoreLocalRenderer() async {
+        guard !isRendererReady, !isInstallingRenderer else { return }
+        let installed = QwenRendererAdapter.installedPackURL
+        guard FileManager.default.fileExists(atPath: installed.appendingPathComponent("manifest.json").path) else { return }
+        await installRendererPack(from: installed)
+    }
+
+    func installRendererPack(from folder: URL) async {
+        guard !isInstallingRenderer, !isGeneratingSpeech else { return }
+        isInstallingRenderer = true
+        defer { isInstallingRenderer = false }
+        do {
+            _ = try await renderer.installPack(at: folder)
+            isRendererReady = true
+            statusMessage = "Local voice renderer ready."
+        } catch {
+            isRendererReady = false
+            statusMessage = "Could not load local voice renderer. Please try again."
+        }
+    }
+
+    func generateSpeech(text: String, voiceID: UUID, language: String) async {
+        guard isRendererReady, !isGeneratingSpeech,
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let voice = savedVoices.first(where: { $0.id == voiceID }),
+              generationCapabilities.support(for: .voiceClone) == .supported else { return }
+        isGeneratingSpeech = true
+        defer { isGeneratingSpeech = false }
+        stopPlayback()
+        do {
+            let referenceURL = try audioFileStore.managedURL(for: voice.referenceAudio)
+            guard await renderer.loadVoice(voice, referenceAudioURL: referenceURL) == .supported else {
+                statusMessage = "This saved voice could not be prepared for local generation."
+                return
+            }
+            let request = VoiceRequest(text: text, voiceID: voice.id, language: language,
+                                      renderMode: .generate)
+            switch await renderer.synthesize(request) {
+            case .renderedFile(let url, let duration, _):
+                defer { try? FileManager.default.removeItem(at: url) }
+                let asset = try audioFileStore.registerGeneratedAudio(from: url, duration: duration,
+                                                                     sourceVoiceID: voice.id, text: text)
+                try audioLifecycle.cache(asset, as: .generated)
+                generatedAudio = asset
+                statusMessage = "Speech generated."
+            case .failure:
+                statusMessage = "Speech generation failed. Please try again."
+            case .unsupported:
+                statusMessage = "This renderer does not support the requested capability."
+            case .audio:
+                statusMessage = "Generated audio could not be saved. Please try again."
+            }
+        } catch {
+            statusMessage = "Speech generation failed. Please try again."
+        }
+    }
+
+    func playGeneratedAudio() {
+        guard let generatedAudio else { return }
+        play(generatedAudio)
+    }
+
+    func saveGeneratedAudio() {
+        guard let generatedAudio, generatedAudio.persistenceState == .temporary else { return }
+        do {
+            self.generatedAudio = try audioLifecycle.save(id: generatedAudio.id, from: .generated)
+            statusMessage = "Audio saved."
+        } catch {
+            statusMessage = "Could not save audio. Please try again."
+        }
+    }
 
     func stopPlayback() {
         player.stop()

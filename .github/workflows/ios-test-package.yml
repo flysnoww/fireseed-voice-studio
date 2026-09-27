@@ -18,6 +18,9 @@ jobs:
       - name: Swift domain and file lifecycle tests
         run: swift test --package-path ios/VoiceStudioCore -Xswiftc -strict-concurrency=complete
 
+      - name: Build pinned CPU renderer for simulator
+        run: bash experiments/m2b-qwen-ios/scripts/build_formal_ios_runtime.sh simulator
+
       - name: Xcode Simulator build
         run: |
           set -o pipefail
@@ -49,6 +52,7 @@ jobs:
       - name: Build unsigned iPhone app
         run: |
           set -o pipefail
+          bash experiments/m2b-qwen-ios/scripts/build_formal_ios_runtime.sh device
           xcodebuild \
             -project ios/VoiceStudio.xcodeproj \
             -scheme VoiceStudio \

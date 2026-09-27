@@ -8,7 +8,10 @@ struct VoiceStudioHome: View {
     @State private var voiceName = "My voice"
     @State private var defaultVoiceName = "My voice"
     @State private var voiceNameWasEdited = false
-    @State private var text = ""
+    @State private var generationText = ""
+    @State private var generationVoiceID: UUID?
+    @State private var generationLanguage = "zh"
+    @State private var isRendererPackImporterPresented = false
     @State private var voiceToDelete: VoiceAsset?
     @Environment(\.locale) private var locale
     @Environment(\.openURL) private var openURL
@@ -83,16 +86,60 @@ struct VoiceStudioHome: View {
                     }
                 }
 
-                Section("Text") {
-                    TextField("Enter text for your voice", text: $text, axis: .vertical)
-                        .lineLimit(2...5)
-                    HStack {
-                        Button("Preview") {}.disabled(true)
-                        Button("Generate") {}.disabled(true)
+                Section("Create speech") {
+                    Button(model.isInstallingRenderer ? "Loading local voice engine…" :
+                           (model.isRendererReady ? "Local voice engine ready" : "Import local voice pack")) {
+                        isRendererPackImporterPresented = true
                     }
-                    Text("Preview and Generate will be available when a renderer is added.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+                    .disabled(model.isInstallingRenderer || model.isGeneratingSpeech)
+                    .accessibilityIdentifier("rendererPackButton")
+
+                    if model.savedVoices.isEmpty {
+                        Text("Save a recorded or imported voice to start creating speech.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Picker("Voice", selection: Binding(
+                            get: { generationVoiceID ?? model.savedVoices[0].id },
+                            set: { generationVoiceID = $0 }
+                        )) {
+                            ForEach(model.savedVoices) { voice in
+                                Text(voice.name).tag(voice.id)
+                            }
+                        }
+                        .accessibilityIdentifier("generationVoicePicker")
+
+                        Picker("Speech language", selection: $generationLanguage) {
+                            Text("Chinese").tag("zh")
+                            Text("English").tag("en")
+                        }
+                        .accessibilityIdentifier("speechLanguagePicker")
+
+                        TextField("Enter text for your voice", text: $generationText, axis: .vertical)
+                            .lineLimit(2...5)
+                        Button(model.isGeneratingSpeech ? "Generating…" : "Generate") {
+                            guard let voiceID = generationVoiceID ?? model.savedVoices.first?.id else { return }
+                            Task { await model.generateSpeech(text: generationText, voiceID: voiceID,
+                                                             language: generationLanguage) }
+                        }
+                        .disabled(!model.isRendererReady || model.isGeneratingSpeech ||
+                                  generationText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .accessibilityIdentifier("generateSpeechButton")
+                    }
+
+                    if model.generatedAudio != nil {
+                        HStack {
+                            Button("Play generated speech") { model.playGeneratedAudio() }
+                                .disabled(model.isGeneratingSpeech)
+                            if model.generatedAudio?.persistenceState == .temporary {
+                                Button("Save Audio") { model.saveGeneratedAudio() }
+                                    .disabled(model.isGeneratingSpeech)
+                            } else {
+                                Label("Audio saved", systemImage: "checkmark.circle")
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
                 }
 
                 if !model.savedVoices.isEmpty {
@@ -103,12 +150,28 @@ struct VoiceStudioHome: View {
             .buttonStyle(.borderless)
             .navigationTitle("Voice Studio")
             .onAppear(perform: updateDefaultVoiceName)
+            .task { await model.restoreLocalRenderer() }
             .onChange(of: model.currentReference?.asset.id) { _, newID in
                 guard newID != nil else { return }
                 voiceNameWasEdited = false
                 updateDefaultVoiceName()
             }
             .onChange(of: locale.identifier) { _, _ in updateDefaultVoiceName() }
+            .onChange(of: model.savedVoices.map(\.id)) { _, voiceIDs in
+                if generationVoiceID.map({ !voiceIDs.contains($0) }) ?? true {
+                    generationVoiceID = voiceIDs.first
+                }
+            }
+            .fileImporter(isPresented: $isRendererPackImporterPresented,
+                          allowedContentTypes: [.folder], allowsMultipleSelection: false) { result in
+                switch result {
+                case .success(let urls):
+                    guard let folder = urls.first else { return }
+                    Task { await model.installRendererPack(from: folder) }
+                case .failure(let error):
+                    model.report(error)
+                }
+            }
             .confirmationDialog("Delete Voice?", isPresented: Binding(
                 get: { voiceToDelete != nil },
                 set: { if !$0 { voiceToDelete = nil } }

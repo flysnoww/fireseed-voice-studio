@@ -56,6 +56,39 @@ final class AudioLifecycleTests: XCTestCase {
         XCTAssertEqual(store.savedAudioAssets(), [saved])
     }
 
+    func testGeneratedSpeechIsManagedThenPersistentAcrossRelaunch() throws {
+        let source = temporaryRoot.appendingPathComponent("renderer-output.wav")
+        try Data([0x10, 0x20, 0x30]).write(to: source)
+        let voiceID = UUID()
+        let generated = try store.registerGeneratedAudio(from: source, duration: 2.5,
+                                                         sourceVoiceID: voiceID, text: "Hello")
+        try FileManager.default.removeItem(at: source)
+        XCTAssertEqual(generated.persistenceState, .temporary)
+        XCTAssertEqual(generated.sourceVoiceID, voiceID)
+        XCTAssertEqual(generated.text, "Hello")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: try store.managedURL(for: generated).path))
+
+        let lifecycle = AudioLifecycle(fileStore: store)
+        try lifecycle.cache(generated, as: .generated)
+        let saved = try XCTUnwrap(lifecycle.save(id: generated.id, from: .generated))
+        let relaunched = try AudioFileStore(rootDirectory: temporaryRoot)
+        XCTAssertEqual(relaunched.savedAudioAssets(), [saved])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: try relaunched.managedURL(for: saved).path))
+    }
+
+    func testRemovingRendererPackDoesNotAffectSavedVoiceOrReference() throws {
+        let saved = try store.saveVoice(VoiceAsset(name: "Independent voice", sourceType: .record,
+                                                   referenceAudio: makeStagedAsset()))
+        let rendererFolder = temporaryRoot.appendingPathComponent("RendererPacks/Standard", isDirectory: true)
+        try FileManager.default.createDirectory(at: rendererFolder, withIntermediateDirectories: true)
+        try Data([0x01]).write(to: rendererFolder.appendingPathComponent("pack-marker"))
+        try FileManager.default.removeItem(at: rendererFolder)
+
+        let restored = try XCTUnwrap(AudioFileStore(rootDirectory: temporaryRoot).savedVoices().first)
+        XCTAssertEqual(restored.id, saved.id)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: try store.managedURL(for: restored.referenceAudio).path))
+    }
+
     func testAudioPersistenceStateChangesOnPromotion() throws {
         let staged = try makeStagedAsset()
         XCTAssertEqual(staged.persistenceState, .temporary)

@@ -98,15 +98,88 @@ public enum RendererCapability: String, Codable, CaseIterable, Sendable {
     case local
     case streaming
     case referenceVoice
-    case voiceClone
-    case accentControl
-    case attributeControl
+    case voiceClone = "voice_clone"
+    case voiceDesign = "voice_design"
+    case timbreControl = "timbre_control"
+    case emotionControl = "emotion_control"
+    case accentControl = "accent_control"
+    case speedControl = "speed_control"
+    case instructionControl = "instruction_control"
+    case languageSelection = "language_selection"
+    case dialectControl = "dialect_control"
+    case referenceTranscriptConditioning = "reference_transcript_conditioning"
+    case attributeControl = "attribute_control"
 }
 
 public enum CapabilitySupport: String, Codable, Sendable {
     case supported
     case approximate
     case unsupported
+}
+
+/// Model-neutral, serializable capability claims for one installed renderer pack.
+public struct RendererCapabilityManifest: Codable, Equatable, Sendable {
+    public let support: [RendererCapability: CapabilitySupport]
+    public let supportedLanguages: [String]
+    public let supportedDialects: [String]
+
+    public init(support: [RendererCapability: CapabilitySupport],
+                supportedLanguages: [String] = [], supportedDialects: [String] = []) {
+        self.support = support
+        self.supportedLanguages = supportedLanguages
+        self.supportedDialects = supportedDialects
+    }
+
+    public func status(for capability: RendererCapability) -> CapabilitySupport {
+        support[capability] ?? .unsupported
+    }
+}
+
+public struct RendererPackFile: Codable, Equatable, Sendable {
+    public let path: String
+    public let bytes: Int64
+    public let sha256: String
+
+    public init(path: String, bytes: Int64, sha256: String) {
+        self.path = path
+        self.bytes = bytes
+        self.sha256 = sha256
+    }
+}
+
+/// Small pack identity and inventory contract; implementation metadata stays inside the pack.
+public struct RendererPackManifest: Codable, Equatable, Sendable {
+    public let schemaVersion: Int
+    public let packID: String
+    public let rendererID: String
+    public let variant: String
+    public let version: String
+    public let requiredFiles: [RendererPackFile]
+    public let capabilities: RendererCapabilityManifest
+    public let compatibilityVersion: Int
+
+    public init(schemaVersion: Int = 1, packID: String, rendererID: String, variant: String,
+                version: String, requiredFiles: [RendererPackFile],
+                capabilities: RendererCapabilityManifest, compatibilityVersion: Int = 1) {
+        self.schemaVersion = schemaVersion
+        self.packID = packID
+        self.rendererID = rendererID
+        self.variant = variant
+        self.version = version
+        self.requiredFiles = requiredFiles
+        self.capabilities = capabilities
+        self.compatibilityVersion = compatibilityVersion
+    }
+
+    public func isStructurallyValid() -> Bool {
+        schemaVersion == 1 && compatibilityVersion > 0 && !packID.isEmpty && !rendererID.isEmpty &&
+        !variant.isEmpty && !version.isEmpty && !requiredFiles.isEmpty &&
+        requiredFiles.allSatisfy { file in
+            file.bytes > 0 && file.sha256.count == 64 &&
+            file.sha256.allSatisfy({ $0.isHexDigit }) && !file.path.isEmpty &&
+            !file.path.hasPrefix("/") && !file.path.contains("..") && !file.path.contains("\\")
+        }
+    }
 }
 
 public struct RendererCapabilities: Equatable, Sendable {
@@ -119,16 +192,23 @@ public struct RendererCapabilities: Equatable, Sendable {
     public func support(for capability: RendererCapability) -> CapabilitySupport {
         values[capability] ?? .unsupported
     }
+
+    public init(manifest: RendererCapabilityManifest) {
+        self.values = manifest.support
+    }
 }
 
 public enum RendererResult: Equatable, Sendable {
     case unsupported(RendererCapability)
     case audio(AudioAsset, approximation: String?)
+    case renderedFile(URL, duration: TimeInterval, approximation: String?)
+    case failure(String)
 }
 
 public protocol RendererAdapter: Sendable {
     var capabilities: RendererCapabilities { get }
-    func loadVoice(_ voice: VoiceAsset) async -> CapabilitySupport
+    func installPack(at folder: URL) async throws -> RendererCapabilityManifest
+    func loadVoice(_ voice: VoiceAsset, referenceAudioURL: URL) async -> CapabilitySupport
     func synthesize(_ request: VoiceRequest) async -> RendererResult
 }
 
@@ -138,7 +218,11 @@ public struct UnavailableRenderer: RendererAdapter {
 
     public init() {}
 
-    public func loadVoice(_ voice: VoiceAsset) async -> CapabilitySupport {
+    public func installPack(at folder: URL) async throws -> RendererCapabilityManifest {
+        throw VoiceStudioError.rendererUnavailable
+    }
+
+    public func loadVoice(_ voice: VoiceAsset, referenceAudioURL: URL) async -> CapabilitySupport {
         .unsupported
     }
 
@@ -154,6 +238,8 @@ public enum VoiceStudioError: Error, LocalizedError, Equatable {
     case missingManagedAudio
     case invalidManagedAudioPath
     case recordingFailed
+    case rendererUnavailable
+    case invalidRendererPack
 
     public var errorDescription: String? {
         switch self {
@@ -169,6 +255,10 @@ public enum VoiceStudioError: Error, LocalizedError, Equatable {
             return "The audio asset does not point to a file managed by Voice Studio."
         case .recordingFailed:
             return "Recording stopped before a valid audio file was created."
+        case .rendererUnavailable:
+            return "No local voice renderer is available."
+        case .invalidRendererPack:
+            return "This local voice pack is invalid or incompatible."
         }
     }
 }
