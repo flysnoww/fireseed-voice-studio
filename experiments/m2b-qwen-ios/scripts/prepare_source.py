@@ -25,7 +25,7 @@ def git(*args: str, cwd: Path | None = None, check: bool = True) -> str:
 def main() -> None:
     if not UPSTREAM.exists():
         subprocess.run(
-            ["git", "clone", "--no-checkout", QWEN_URL, str(UPSTREAM)], check=True
+            ["git", "clone", QWEN_URL, str(UPSTREAM)], check=True
         )
 
     if not (UPSTREAM / ".git").exists():
