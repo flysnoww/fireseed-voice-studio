@@ -21,7 +21,7 @@ case "$PLATFORM" in
 esac
 
 python3 "$ROOT/scripts/prepare_source.py"
-GGML_BUILD="$UPSTREAM/ggml/build-formal-$SDK"
+GGML_BUILD="$ROOT/build/formal-$SDK/ggml"
 QWEN_BUILD="$UPSTREAM/build-formal-$SDK"
 SDK_PATH="$(xcrun --sdk "$SDK" --show-sdk-path)"
 
