@@ -341,23 +341,6 @@ private final class SpeechBufferWriter: @unchecked Sendable {
     }
 }
 
-private final class AudioRenderCompletion: @unchecked Sendable {
-    private let lock = NSLock()
-    private var didFinish = false
-
-    func finish() {
-        lock.lock()
-        didFinish = true
-        lock.unlock()
-    }
-
-    var isFinished: Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return didFinish
-    }
-}
-
 struct AudioTimePitchProcessor {
     func process(_ sourceURL: URL, speed: Double, pitch: Double) throws -> URL {
         guard speed.isFinite, (0.5...2).contains(speed), pitch.isFinite, (-2400...2400).contains(pitch) else {
@@ -381,33 +364,38 @@ struct AudioTimePitchProcessor {
         do {
             let output = try AVAudioFile(forWriting: outputURL, settings: input.fileFormat.settings)
             let renderBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4096)!
-            let completion = AudioRenderCompletion()
+            let expectedFrames = AVAudioFramePosition(ceil(Double(input.length) / speed))
+            let outputFrameLimit = expectedFrames + AVAudioFramePosition(format.sampleRate * 0.25)
+            var renderedFrames: AVAudioFramePosition = 0
             engine.prepare()
             try engine.start()
-            player.scheduleFile(input, at: nil, completionCallbackType: .dataRendered) { _ in
-                completion.finish()
-            }
+            player.scheduleFile(input, at: nil, completionCallbackType: .dataRendered) { _ in }
             player.play()
             var attempts = 0
-            while attempts < 100_000 {
+            while renderedFrames < outputFrameLimit, attempts < 10_000 {
                 attempts += 1
-                switch try engine.renderOffline(4096, to: renderBuffer) {
+                let framesToRender = AVAudioFrameCount(min(4096, outputFrameLimit - renderedFrames))
+                switch try engine.renderOffline(framesToRender, to: renderBuffer) {
                 case .success:
                     if renderBuffer.frameLength > 0 {
                         try output.write(from: renderBuffer)
-                    } else if completion.isFinished {
-                        engine.stop()
-                        return outputURL
+                        renderedFrames += AVAudioFramePosition(renderBuffer.frameLength)
                     }
-                case .insufficientDataFromInputNode, .cannotDoInCurrentContext:
-                    if completion.isFinished {
+                case .insufficientDataFromInputNode:
+                    if renderedFrames >= expectedFrames {
                         engine.stop()
                         return outputURL
                     }
                     continue
+                case .cannotDoInCurrentContext:
+                    continue
                 @unknown default:
                     throw VoiceStudioError.invalidAudioFile
                 }
+            }
+            if renderedFrames > 0 {
+                engine.stop()
+                return outputURL
             }
             throw VoiceStudioError.invalidAudioFile
         } catch {
