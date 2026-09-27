@@ -97,3 +97,7 @@ xcodebuild -project ios/QwenRuntimeSpike.xcodeproj \
 - Run with `auto` and `cpu`; auto should report the actual device backend. A CPU success does not prove Metal. A Metal device-name log does not prove correct cloning.
 - Reference transcript is collected for test notes only because this C++ runtime ignores it. Do not describe the run as official transcript-conditioned ICL cloning.
 - Airplane-mode test is required after model files are local. No inference path should call the network.
+
+## Automated Gate B1
+
+The repository's isolated `.github/workflows/qwen-ios-spike.yml` workflow runs `scripts/build_ios_arm64.sh` on an Apple Silicon GitHub macOS runner. It compiles the GGML CPU/Metal archives and all Qwen runtime libraries against the iPhoneOS SDK, links them through the spike app's Xcode target, and verifies arm64 plus the executable's Mach-O `platform IOS` load command. `QwenIOSSpike-build` contains the app build, runtime archives, toolchain/patch, source pins, and verification log. It contains no model weights or audio. This is compile/link evidence only, not runtime/device validation.

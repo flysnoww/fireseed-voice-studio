@@ -30,3 +30,7 @@ Preparation packages are exact-version pinned in model/requirements-conversion.t
 ## Known pipeline limitation
 
 The pinned C++ runtime performs reference audio → ECAPA-TDNN speaker embedding → new-text tokenizer → Qwen talker/code predictor → WavTokenizer decoder → 24 kHz mono PCM. Its API has no reference transcript argument. The transcript field in the spike UI is explicitly marked as diagnostic-only and is not sent to the runtime. Therefore this is an x-vector reference-conditioned cloning path, not the official reference-audio-plus-reference-text ICL path. See the research report and compatibility matrix before interpreting device audio.
+
+## Gate B1 iPhoneOS ARM64 CI build
+
+The independent `Qwen iOS Spike Build` workflow runs on GitHub's Apple Silicon `macos-15` runner. It builds the pinned GGML and Qwen runtime sources with the iPhoneOS toolchain, links the static runtime into this spike's Xcode app for `generic/platform=iOS`, verifies arm64 architecture and the final Mach-O `IOS` platform, and uploads `QwenIOSSpike-build`. No model weights or reference audio are required or included. The workflow verifies compilation and linking only; it does not run inference or claim device execution.

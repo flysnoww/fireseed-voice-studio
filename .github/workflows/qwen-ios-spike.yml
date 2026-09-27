@@ -1,0 +1,47 @@
+name: Qwen iOS Spike Build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'experiments/m2b-qwen-ios/**'
+      - '.github/workflows/qwen-ios-spike.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  iphoneos-arm64-build:
+    # macos-15 is GitHub's Apple Silicon runner label.
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Record toolchain and target SDK
+        run: |
+          set -euo pipefail
+          mkdir -p experiments/m2b-qwen-ios/artifact
+          {
+            echo "Runner image: ${ImageOS:-unknown} ${ImageVersion:-unknown}"
+            echo "Runner architecture: $(uname -m)"
+            echo "Xcode:"
+            xcodebuild -version
+            echo "CMake: $(cmake --version | head -n 1)"
+            echo "iPhoneOS SDK: $(xcrun --sdk iphoneos --show-sdk-version)"
+            echo "iPhoneOS SDK path: $(xcrun --sdk iphoneos --show-sdk-path)"
+            echo "Commit: $GITHUB_SHA"
+          } | tee experiments/m2b-qwen-ios/artifact/build-metadata.txt
+          test "$(uname -m)" = arm64
+
+      - name: Build and verify Qwen runtime for physical iPhone ARM64
+        run: bash experiments/m2b-qwen-ios/scripts/build_ios_arm64.sh
+
+      - name: Upload Qwen iOS spike build
+        uses: actions/upload-artifact@v4
+        with:
+          name: QwenIOSSpike-build
+          retention-days: 14
+          path: experiments/m2b-qwen-ios/artifact/
+          if-no-files-found: error
