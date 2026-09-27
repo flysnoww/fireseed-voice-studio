@@ -22,7 +22,7 @@ esac
 
 python3 "$ROOT/scripts/prepare_source.py"
 GGML_BUILD="$ROOT/build/formal-$SDK/ggml"
-QWEN_BUILD="$UPSTREAM/build-formal-$SDK"
+QWEN_BUILD="$ROOT/build/formal-$SDK/qwen"
 SDK_PATH="$(xcrun --sdk "$SDK" --show-sdk-path)"
 
 # Let separate simulator/device CMake trees coexist without changing the pinned upstream revision.
