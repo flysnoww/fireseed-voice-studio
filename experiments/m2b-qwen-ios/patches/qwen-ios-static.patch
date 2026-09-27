@@ -90,9 +90,15 @@ diff --git a/src/qwen3tts_c_api.h b/src/qwen3tts_c_api.h
 diff --git a/src/qwen3_tts.h b/src/qwen3_tts.h
 --- a/src/qwen3_tts.h
 +++ b/src/qwen3_tts.h
-@@ -13,1 +13,2 @@
+@@ -13,5 +13,6 @@
  namespace qwen3_tts {
+-
 +const char * active_backend_name();
++
+ // TTS generation parameters
+-
++
+ struct tts_params {
 diff --git a/src/qwen3tts_c_api.cpp b/src/qwen3tts_c_api.cpp
 --- a/src/qwen3tts_c_api.cpp
 +++ b/src/qwen3tts_c_api.cpp
