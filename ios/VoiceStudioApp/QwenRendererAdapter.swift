@@ -374,7 +374,15 @@ actor QwenRendererAdapter: InstallableSpeechProvider, VoicePreparingSpeechProvid
         let destination = FileManager.default.temporaryDirectory
             .appendingPathComponent("voice-reference-\(UUID().uuidString).wav")
         do {
-            let output = try AVAudioFile(forWriting: destination, settings: target.settings)
+            let output: AVAudioFile
+            do {
+                output = try AVAudioFile(forWriting: destination, settings: target.settings,
+                                         commonFormat: target.commonFormat, interleaved: target.isInterleaved)
+            } catch {
+                let detail = error as NSError
+                throw providerError(code: 29,
+                                    "Could not create PCM WAV writer (\(detail.domain) \(detail.code)): \(detail.localizedDescription)")
+            }
             guard let converted = AVAudioPCMBuffer(pcmFormat: target,
                                                    frameCapacity: AVAudioFrameCount(target.sampleRate * 5)) else {
                 throw providerError(code: 25, "Could not allocate reference audio buffers.")
@@ -394,7 +402,9 @@ actor QwenRendererAdapter: InstallableSpeechProvider, VoicePreparingSpeechProvid
                     do {
                         try source.read(into: input)
                     } catch {
-                        inputReadError = error
+                        let detail = error as NSError
+                        inputReadError = providerError(code: 28,
+                                                      "Could not read reference audio buffer (\(detail.domain) \(detail.code)): \(detail.localizedDescription)")
                         inputStatus.pointee = .endOfStream
                         return nil
                     }
@@ -409,10 +419,18 @@ actor QwenRendererAdapter: InstallableSpeechProvider, VoicePreparingSpeechProvid
                 if let inputReadError { throw inputReadError }
                 if let conversionError {
                     throw NSError(domain: "VoiceStudio.AudioConversion", code: conversionError.code,
-                                  userInfo: [NSLocalizedDescriptionKey: conversionError.localizedDescription,
+                                  userInfo: [NSLocalizedDescriptionKey: "AVAudioConverter failed (\(conversionError.domain) \(conversionError.code)): \(conversionError.localizedDescription)",
                                              NSUnderlyingErrorKey: conversionError])
                 }
-                if converted.frameLength > 0 { try output.write(from: converted) }
+                if converted.frameLength > 0 {
+                    do {
+                        try output.write(from: converted)
+                    } catch {
+                        let detail = error as NSError
+                        throw providerError(code: 30,
+                                            "Could not write normalized PCM WAV (\(detail.domain) \(detail.code)): \(detail.localizedDescription)")
+                    }
+                }
                 switch status {
                 case .endOfStream:
                     reachedEndOfStream = true
