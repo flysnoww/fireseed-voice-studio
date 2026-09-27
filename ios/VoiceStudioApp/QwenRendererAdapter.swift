@@ -1,4 +1,4 @@
-import AVFoundation
+@preconcurrency import AVFoundation
 import CryptoKit
 import Darwin
 import Foundation
@@ -363,6 +363,19 @@ actor QwenRendererAdapter: InstallableSpeechProvider, VoicePreparingSpeechProvid
 
     func normalizeReferenceAudio(_ sourceURL: URL) throws -> URL {
         let source = try AVAudioFile(forReading: sourceURL)
+        guard source.length > 0, source.length <= Int64(UInt32.max),
+              let inputBuffer = AVAudioPCMBuffer(pcmFormat: source.processingFormat,
+                                                 frameCapacity: AVAudioFrameCount(source.length)) else {
+            throw providerError(code: 25, "Could not allocate the source reference audio buffer.")
+        }
+        do {
+            try source.read(into: inputBuffer)
+        } catch {
+            let detail = error as NSError
+            throw providerError(code: 28,
+                                "Could not read source reference audio (\(detail.domain) \(detail.code)): \(detail.localizedDescription)")
+        }
+        guard inputBuffer.frameLength > 0 else { throw VoiceStudioError.invalidAudioFile }
         // Match the true-device Spike's known-good 24 kHz mono 16-bit PCM input.
         guard let target = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 24_000,
                                          channels: 1, interleaved: true) else {
@@ -388,35 +401,19 @@ actor QwenRendererAdapter: InstallableSpeechProvider, VoicePreparingSpeechProvid
                 throw providerError(code: 25, "Could not allocate reference audio buffers.")
             }
             var reachedEndOfStream = false
+            var didProvideInput = false
             while !reachedEndOfStream {
                 converted.frameLength = 0
-                var inputReadError: Error?
-                var retainedInputBuffers: [AVAudioPCMBuffer] = []
                 var conversionError: NSError?
                 let status = converter.convert(to: converted, error: &conversionError) { _, inputStatus in
-                    guard inputReadError == nil,
-                          let input = AVAudioPCMBuffer(pcmFormat: source.processingFormat, frameCapacity: 4096) else {
+                    guard !didProvideInput else {
                         inputStatus.pointee = .endOfStream
                         return nil
                     }
-                    do {
-                        try source.read(into: input)
-                    } catch {
-                        let detail = error as NSError
-                        inputReadError = self.providerError(code: 28,
-                                                           "Could not read reference audio buffer (\(detail.domain) \(detail.code)): \(detail.localizedDescription)")
-                        inputStatus.pointee = .endOfStream
-                        return nil
-                    }
-                    guard input.frameLength > 0 else {
-                        inputStatus.pointee = .endOfStream
-                        return nil
-                    }
-                    retainedInputBuffers.append(input)
+                    didProvideInput = true
                     inputStatus.pointee = .haveData
-                    return input
+                    return inputBuffer
                 }
-                if let inputReadError { throw inputReadError }
                 if let conversionError {
                     throw NSError(domain: "VoiceStudio.AudioConversion", code: conversionError.code,
                                   userInfo: [NSLocalizedDescriptionKey: "AVAudioConverter failed (\(conversionError.domain) \(conversionError.code)): \(conversionError.localizedDescription)",
