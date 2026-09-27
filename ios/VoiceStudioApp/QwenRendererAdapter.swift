@@ -365,7 +365,7 @@ actor QwenRendererAdapter: InstallableSpeechProvider, VoicePreparingSpeechProvid
         let source = try AVAudioFile(forReading: sourceURL)
         // Match the true-device Spike's known-good 24 kHz mono 16-bit PCM input.
         guard let target = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 24_000,
-                                         channels: 1, interleaved: false) else {
+                                         channels: 1, interleaved: true) else {
             throw providerError(code: 24, "Could not create the required reference audio format.")
         }
         guard let converter = AVAudioConverter(from: source.processingFormat, to: target) else {
