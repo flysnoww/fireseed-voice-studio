@@ -56,7 +56,7 @@ diff --git a/src/gguf_loader.h b/src/gguf_loader.h
 diff --git a/src/gguf_loader.cpp b/src/gguf_loader.cpp
 --- a/src/gguf_loader.cpp
 +++ b/src/gguf_loader.cpp
-@@ -216,4 +216,10 @@
+@@ -216,4 +216,11 @@
      ggml_backend_free(backend);
  }
 -
@@ -64,7 +64,8 @@ diff --git a/src/gguf_loader.cpp b/src/gguf_loader.cpp
 +    const auto & shared = get_shared_backend_state();
 +    if (!shared.backend) return "Not loaded";
 +    ggml_backend_dev_t device = ggml_backend_get_device(shared.backend);
-+    return device ? ggml_backend_dev_name(device) : "Unknown";
++    ggml_backend_reg_t registry = device ? ggml_backend_dev_backend_reg(device) : nullptr;
++    return registry ? ggml_backend_reg_name(registry) : "Unknown";
 +}
 +
  bool GGUFLoader::open(const std::string & path) {

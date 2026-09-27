@@ -1,14 +1,23 @@
-# True-device checklist
+# Gate B2 true-device checklist
 
-1. On a Mac with Xcode, open `ios/QwenRuntimeSpike.xcodeproj`.
-2. Select the actual iPhone, set a signing team, build and install.
-3. Put both prepared F16 GGUF files into a local Files folder on the iPhone.
-4. In the spike, select that model folder; record a 5–30 s reference WAV or select a WAV file. Confirm playback before embedding.
-5. Enter the transcript for notes only; the pinned C++ runtime does not consume it.
-6. Enter new text, load, prepare reference, generate, and play.
-7. Record load/prepare/generation time, output duration, RTF, backend, physical footprint, and memory-warning count.
-8. Repeat with CPU and Auto; verify actual backend and compare output and timing.
-9. Observe termination and thermal behavior; note intelligibility and speaker similarity.
-10. Enable Airplane Mode and repeat after confirming both model files are local.
+## Install the independent spike
 
-Record device model, iOS version, model file hashes, actual run commit, and results. A Metal/CPU smoke test is not the official ref-audio-plus-ref-text cloning gate.
+1. Download the `QwenIOSSpike-unsigned-IPA` workflow artifact ZIP and extract `QwenIOSSpike-unsigned.ipa`.
+2. On Windows, connect the iPhone, open Sideloadly, select the extracted IPA, enter the Apple ID Sideloadly requires, and press Start. This signs the unsigned IPA for installation; it does not add signing credentials to the repository.
+3. If iOS asks, trust the developer app under **Settings → General → VPN & Device Management**.
+4. Prepare the local `Qwen3-TTS-0.6B` folder as described in `model/README.md`. Put it in Files on the iPhone (for example, AirDrop the folder from a Mac or copy it using Files and local device storage).
+5. Open **Qwen iOS Spike** → **Import model package from Files** → choose the `Qwen3-TTS-0.6B` folder. Wait for import to finish; the app copies it into private local storage.
+6. Choose **CPU** or **Metal**, tap **Load model**, record a 5–10 second reference or choose WAV/M4A, tap **Prepare reference embedding**, enter new text, tap **Generate local speech**, then **Play generated audio**.
+
+## Four minimum cloning checks
+
+Run each case with CPU, then unload the model, switch to Metal, reload, and repeat. Record success/failure, actual backend, load/prepare/generation times, output duration, RTF, physical footprint, memory warnings, crash/thermal behavior, and whether the speaker similarity is acceptable:
+
+1. Chinese reference → new Chinese text
+2. Chinese reference → new English text
+3. English reference → new English text
+4. English reference → new Chinese text
+
+Finally enable Airplane Mode and repeat load, reference preparation, generation, and playback. Record iPhone model, iOS version, IPA commit, and `manifest.json` hashes.
+
+The transcript field is diagnostic-only and is not passed to this x-vector/speaker-embedding runtime. These checks are not evidence of the official reference-audio-plus-transcript conditioning path. Do not report any device, voice-cloning, CPU, Metal, offline, memory, or performance result until the user runs these checks on an iPhone.

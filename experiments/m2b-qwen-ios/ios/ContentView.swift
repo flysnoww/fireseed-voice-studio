@@ -8,14 +8,13 @@ struct ContentView: View {
     @StateObject private var runtime = QwenRuntime()
     @State private var modelFolder: URL?
     @State private var referenceURL: URL?
-    @State private var scopedReferenceURL: URL?
     @State private var recorder: AVAudioRecorder?
     @State private var recording = false
     @State private var recordStarted: Date?
     @State private var elapsed = 0
     @State private var transcript = ""
     @State private var newText = "Hello, this is a local voice cloning test."
-    @State private var backendMode = "auto"
+    @State private var backendMode = "metal"
     @State private var status = "Select a local model folder."
     @State private var error: String?
     @State private var showModelPicker = false
@@ -30,9 +29,10 @@ struct ContentView: View {
         NavigationStack {
             Form {
                 Section("Model") {
-                    Button(modelFolder?.lastPathComponent ?? "Choose on-device model folder") { showModelPicker = true }
+                    Button(modelFolder == nil ? "Import model package from Files" : "Model package imported") { showModelPicker = true }
+                        .disabled(runtime.isLoaded || busy)
                     Picker("Backend", selection: $backendMode) {
-                        Text("Auto (Metal if available)").tag("auto")
+                        Text("Metal").tag("metal")
                         Text("CPU").tag("cpu")
                     }.disabled(runtime.isLoaded || busy)
                     HStack {
@@ -49,14 +49,14 @@ struct ContentView: View {
                     Text("Backend: \(runtime.backendName)").font(.caption.monospaced())
                     Text("Load: \(runtime.loadMilliseconds) ms · Reference prepare: \(runtime.prepareMilliseconds) ms")
                         .font(.caption.monospaced())
-                    Text("Model files stay on this device. No network inference.").font(.caption)
+                    Text("Model files are copied to this app's private storage. No network inference.").font(.caption)
                 }
 
                 Section("Reference audio") {
                     HStack {
                         Button(recording ? "Stop recording" : "Record") { recording ? stopRecording() : startRecording() }
                             .disabled(busy)
-                        Button("Choose WAV") { showAudioPicker = true }.disabled(recording || busy)
+                        Button("Choose WAV / M4A") { showAudioPicker = true }.disabled(recording || busy)
                     }
                     if recording { Label("Recording · \(elapsed)s", systemImage: "record.circle").foregroundStyle(.red) }
                     if let referenceURL {
@@ -96,24 +96,34 @@ struct ContentView: View {
                 }
             }
             .navigationTitle("Qwen iOS Spike")
+            .onAppear {
+                let installed = QwenModelPackage.installedURL
+                if FileManager.default.fileExists(atPath: installed.appendingPathComponent("manifest.json").path) {
+                    modelFolder = installed
+                }
+            }
             .fileImporter(isPresented: $showModelPicker, allowedContentTypes: [.folder], allowsMultipleSelection: false) { result in
                 switch result {
                 case .success(let urls):
                     guard let url = urls.first else { return }
-                    modelFolder = url
-                    runtime.holdSecurityScope(url)
-                    status = "Model folder selected."
+                    busy = true
+                    error = nil
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        do {
+                            let installed = try QwenModelPackage.install(from: url)
+                            DispatchQueue.main.async { modelFolder = installed; status = "Model package imported to app storage."; busy = false }
+                        } catch {
+                            DispatchQueue.main.async { self.error = error.localizedDescription; self.busy = false }
+                        }
+                    }
                 case .failure(let failure): error = failure.localizedDescription
                 }
             }
-            .fileImporter(isPresented: $showAudioPicker, allowedContentTypes: [.wav], allowsMultipleSelection: false) { result in
+            .fileImporter(isPresented: $showAudioPicker, allowedContentTypes: [.wav, .mpeg4Audio], allowsMultipleSelection: false) { result in
                 switch result {
                 case .success(let urls):
                     if let url = urls.first {
-                        if let scopedReferenceURL { scopedReferenceURL.stopAccessingSecurityScopedResource() }
-                        _ = url.startAccessingSecurityScopedResource()
-                        scopedReferenceURL = url
-                        referenceURL = url
+                        importReference(url)
                     }
                 case .failure(let failure): error = failure.localizedDescription
                 }
@@ -164,8 +174,6 @@ struct ContentView: View {
                     try AVAudioSession.sharedInstance().setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker])
                     try AVAudioSession.sharedInstance().setActive(true)
                     next.record()
-                    if let scopedReferenceURL { scopedReferenceURL.stopAccessingSecurityScopedResource() }
-                    scopedReferenceURL = nil
                     recorder = next; referenceURL = url; recording = true; recordStarted = Date(); elapsed = 0
                 } catch { self.error = error.localizedDescription }
             }
@@ -174,6 +182,50 @@ struct ContentView: View {
 
     private func stopRecording() {
         recorder?.stop(); recorder = nil; recording = false; recordStarted = nil
+    }
+
+    private func importReference(_ sourceURL: URL) {
+        busy = true
+        error = nil
+        let scoped = sourceURL.startAccessingSecurityScopedResource()
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let normalized = try normalizeReference(sourceURL)
+                if scoped { sourceURL.stopAccessingSecurityScopedResource() }
+                DispatchQueue.main.async { referenceURL = normalized; status = "Reference audio decoded and converted to 24 kHz mono WAV."; busy = false }
+            } catch {
+                if scoped { sourceURL.stopAccessingSecurityScopedResource() }
+                DispatchQueue.main.async { self.error = "Audio decode failed: \(error.localizedDescription)"; self.busy = false }
+            }
+        }
+    }
+
+    private func normalizeReference(_ sourceURL: URL) throws -> URL {
+        let source = try AVAudioFile(forReading: sourceURL)
+        let targetFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 24_000, channels: 1, interleaved: false)!
+        guard let converter = AVAudioConverter(from: source.processingFormat, to: targetFormat) else {
+            throw NSError(domain: "QwenRuntimeSpike", code: 20, userInfo: [NSLocalizedDescriptionKey: "Unsupported reference audio format."])
+        }
+        let outputURL = FileManager.default.temporaryDirectory.appendingPathComponent("reference-\(UUID().uuidString).wav")
+        let output = try AVAudioFile(forWriting: outputURL, settings: targetFormat.settings)
+        while true {
+            let input = AVAudioPCMBuffer(pcmFormat: source.processingFormat, frameCapacity: 4096)!
+            try source.read(into: input)
+            if input.frameLength == 0 { break }
+            var didProvideInput = false
+            var conversionError: NSError?
+            let converted = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: 8192)!
+            let status = converter.convert(to: converted, error: &conversionError) { _, inputStatus in
+                guard !didProvideInput else { inputStatus.pointee = .noDataNow; return nil }
+                didProvideInput = true
+                inputStatus.pointee = .haveData
+                return input
+            }
+            if let conversionError { throw conversionError }
+            if converted.frameLength > 0 { try output.write(from: converted) }
+            if status == .error { throw NSError(domain: "QwenRuntimeSpike", code: 21, userInfo: [NSLocalizedDescriptionKey: "Audio decoder could not convert the selected file."]) }
+        }
+        return outputURL
     }
 
     private func play(_ url: URL, output: Bool) {

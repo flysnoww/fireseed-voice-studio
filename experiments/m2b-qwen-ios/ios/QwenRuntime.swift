@@ -4,6 +4,78 @@ import Foundation
 import Darwin
 import OSLog
 
+private struct QwenPackageManifest: Decodable {
+    struct File: Decodable { let path: String; let bytes: Int; let sha256: String }
+    let format_version: Int
+    let model_revision: String
+    let qwen3_tts_cpp_revision: String
+    let ggml_revision: String
+    let quantization: String
+    let files: [File]
+}
+
+enum QwenModelPackage {
+    static let fileNames = ["qwen3-tts-0.6b-f16.gguf", "qwen3-tts-tokenizer-f16.gguf"]
+
+    static var installedURL: URL {
+        let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        return root.appendingPathComponent("Qwen3TTS-0.6B", isDirectory: true)
+    }
+
+    static func install(from source: URL) throws -> URL {
+        let scoped = source.startAccessingSecurityScopedResource()
+        defer { if scoped { source.stopAccessingSecurityScopedResource() } }
+        try validate(source)
+        let manager = FileManager.default
+        let destination = installedURL
+        let parent = destination.deletingLastPathComponent()
+        try manager.createDirectory(at: parent, withIntermediateDirectories: true)
+        let staging = parent.appendingPathComponent("Qwen3TTS-0.6B-import-\(UUID().uuidString)", isDirectory: true)
+        let backup = parent.appendingPathComponent("Qwen3TTS-0.6B-backup-\(UUID().uuidString)", isDirectory: true)
+        defer { try? manager.removeItem(at: staging); try? manager.removeItem(at: backup) }
+        try manager.createDirectory(at: staging, withIntermediateDirectories: true)
+        for name in fileNames + ["manifest.json"] {
+            try manager.copyItem(at: source.appendingPathComponent(name), to: staging.appendingPathComponent(name))
+        }
+        try validate(staging)
+        var movedOldPackage = false
+        if manager.fileExists(atPath: destination.path) {
+            try manager.moveItem(at: destination, to: backup)
+            movedOldPackage = true
+        }
+        do {
+            try manager.moveItem(at: staging, to: destination)
+        } catch {
+            if movedOldPackage { try? manager.moveItem(at: backup, to: destination) }
+            throw error
+        }
+        return destination
+    }
+
+    static func validate(_ folder: URL) throws {
+        let manifestURL = folder.appendingPathComponent("manifest.json")
+        guard let data = try? Data(contentsOf: manifestURL),
+              let manifest = try? JSONDecoder().decode(QwenPackageManifest.self, from: data),
+              manifest.format_version == 1,
+              manifest.model_revision == "dab70521e0956e3db91fb887d36c9a07d21ebc0b",
+              manifest.qwen3_tts_cpp_revision == "b3ba14077cf1b3e11b86e5f84aa9184605c89b28",
+              manifest.ggml_revision == "3af5f5760e19a96427f5f7a93b79cbdf3d4b265b",
+              manifest.quantization == "F16" else {
+            throw NSError(domain: "QwenRuntimeSpike", code: 10,
+                          userInfo: [NSLocalizedDescriptionKey: "Invalid model package: manifest.json is missing or unsupported."])
+        }
+        for name in fileNames {
+            guard let record = manifest.files.first(where: { $0.path == name }),
+                  record.sha256.count == 64,
+                  let values = try? folder.appendingPathComponent(name).resourceValues(forKeys: [.fileSizeKey]),
+                  values.fileSize == record.bytes else {
+                throw NSError(domain: "QwenRuntimeSpike", code: 11,
+                              userInfo: [NSLocalizedDescriptionKey: "Invalid model package: missing or truncated \(name)."])
+            }
+        }
+    }
+}
+
 struct GenerationResult {
     let url: URL
     let duration: Double
@@ -18,16 +90,9 @@ final class QwenRuntime: ObservableObject {
     @Published private(set) var physicalFootprintMB = 0
     private var handle: OpaquePointer?
     private var embedding: [Float]?
-    private var securityScopedFolder: URL?
     private let logger = Logger(subsystem: "org.fireseed.QwenRuntimeSpike", category: "runtime")
     private(set) var loadMilliseconds = 0
     private(set) var prepareMilliseconds = 0
-
-    func holdSecurityScope(_ url: URL) {
-        if let securityScopedFolder { securityScopedFolder.stopAccessingSecurityScopedResource() }
-        _ = url.startAccessingSecurityScopedResource()
-        securityScopedFolder = url
-    }
 
     private func publishOnMain(_ update: () -> Void) {
         if Thread.isMainThread { update() }
@@ -36,17 +101,18 @@ final class QwenRuntime: ObservableObject {
 
     func load(folder: URL?, backend: String) throws {
         let started = ProcessInfo.processInfo.systemUptime
-        guard let folder else { throw failure("Select a local model folder.") }
-        setenv("QWEN3_TTS_BACKEND", backend, 1)
-        let main = folder.appendingPathComponent("qwen3-tts-0.6b-f16.gguf")
-        let tokenizer = folder.appendingPathComponent("qwen3-tts-tokenizer-f16.gguf")
-        guard FileManager.default.fileExists(atPath: main.path), FileManager.default.fileExists(atPath: tokenizer.path) else {
-            throw failure("The selected folder does not contain both converted GGUF files.")
-        }
+        guard let folder else { throw failure("Model missing: import a model package first.") }
+        try QwenModelPackage.validate(folder)
+        setenv("QWEN3_TTS_BACKEND", backend == "metal" ? "auto" : backend, 1)
         let next = folder.path.withCString { qwen3_tts_create($0, 4) }
-        guard let next else { throw failure("qwen3_tts_create failed while loading the model directory.") }
+        guard let next else { throw failure("Model load failed: Qwen runtime could not load this model package.") }
         handle = next
         let selectedBackend = String(cString: qwen3_tts_active_backend_name(next))
+        if backend == "metal" && !selectedBackend.localizedCaseInsensitiveContains("metal") {
+            qwen3_tts_destroy(next)
+            handle = nil
+            throw failure("Metal unavailable: runtime selected \(selectedBackend).")
+        }
         let elapsed = Int((ProcessInfo.processInfo.systemUptime - started) * 1000)
         publishOnMain {
             self.backendName = selectedBackend
@@ -66,7 +132,7 @@ final class QwenRuntime: ObservableObject {
                 qwen3_tts_extract_embedding_file(handle, path, buffer.baseAddress, Int32(buffer.count))
             }
         }
-        guard count > 0 else { throw runtimeFailure(handle) }
+        guard count > 0 else { throw runtimeFailure(handle, context: "Reference embedding failed") }
         values.removeSubrange(Int(count)..<values.count)
         let elapsed = Int((ProcessInfo.processInfo.systemUptime - started) * 1000)
         publishOnMain {
@@ -87,7 +153,7 @@ final class QwenRuntime: ObservableObject {
         let audio: UnsafeMutablePointer<Qwen3TtsAudio>? = embedding.withUnsafeBufferPointer { vector in
             text.withCString { qwen3_tts_synthesize_with_embedding(handle, $0, vector.baseAddress, Int32(vector.count), &params) }
         }
-        guard let audio else { throw runtimeFailure(handle) }
+        guard let audio else { throw runtimeFailure(handle, context: "Generation failed") }
         defer { qwen3_tts_free_audio(audio) }
         let samples = Array(UnsafeBufferPointer(start: audio.pointee.samples, count: Int(audio.pointee.n_samples)))
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("generated-\(UUID().uuidString).wav")
@@ -106,14 +172,16 @@ final class QwenRuntime: ObservableObject {
             self.hasReference = false
             self.backendName = "Not loaded"
         }
-        if let securityScopedFolder { securityScopedFolder.stopAccessingSecurityScopedResource() }
-        securityScopedFolder = nil
     }
 
     func logMemoryWarning() { logger.warning("memory_warning_received") }
 
-    private func runtimeFailure(_ handle: OpaquePointer) -> NSError {
-        NSError(domain: "QwenRuntimeSpike", code: 2, userInfo: [NSLocalizedDescriptionKey: String(cString: qwen3_tts_get_error(handle))])
+    private func runtimeFailure(_ handle: OpaquePointer, context: String) -> NSError {
+        let detail = String(cString: qwen3_tts_get_error(handle))
+        let lower = detail.lowercased()
+        let category = lower.contains("memory") || lower.contains("alloc") ? "Out of memory" : context
+        return NSError(domain: "QwenRuntimeSpike", code: 2,
+                       userInfo: [NSLocalizedDescriptionKey: "\(category): \(detail)"])
     }
 
     private func failure(_ message: String) -> NSError {

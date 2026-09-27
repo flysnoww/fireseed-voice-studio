@@ -30,6 +30,15 @@ No quantization is applied by the prepared baseline; outputs are F16. `convert_t
 
 After conversion, `prepare_model.py` writes an ignored local manifest containing the resolved source SHA, converter source SHA, dependency versions, file sizes, and SHA-256 digests for both generated GGUF files. The artifacts must not be added to Git.
 
+The same command also creates the iPhone Files import folder at
+`model/assets/Qwen3-TTS-0.6B/`, with `manifest.json` and the two converted
+GGUF files. The script prints `package_bytes`, measured from the actual GGUF
+outputs; no exact package size is claimed until conversion has run. The manifest
+records format version 1, official model revision, `qwen3-tts.cpp` and GGML
+revisions, F16 quantization, exact conversion command, and each output's byte
+count and SHA-256. The app copies this folder to its own Application Support
+directory. Model packages remain local and are ignored by Git.
+
 ## Memory sizing (estimates unless stated otherwise)
 
 | Variant | Runtime GGUF weight estimate | Notes |

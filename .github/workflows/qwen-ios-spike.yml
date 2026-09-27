@@ -38,6 +38,20 @@ jobs:
       - name: Build and verify Qwen runtime for physical iPhone ARM64
         run: bash experiments/m2b-qwen-ios/scripts/build_ios_arm64.sh
 
+      - name: Package and verify unsigned iPhone IPA
+        run: |
+          bash experiments/m2b-qwen-ios/scripts/package_unsigned_ipa.sh \
+            experiments/m2b-qwen-ios/derived-device/Build/Products/Release-iphoneos/QwenRuntimeSpike.app \
+            "$RUNNER_TEMP/QwenIOSSpike-unsigned.ipa"
+
+      - name: Upload installable Qwen iOS spike IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: QwenIOSSpike-unsigned-IPA
+          retention-days: 14
+          path: ${{ runner.temp }}/QwenIOSSpike-unsigned.ipa
+          if-no-files-found: error
+
       - name: Upload Qwen iOS spike build
         uses: actions/upload-artifact@v4
         with:

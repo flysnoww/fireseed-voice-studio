@@ -8,6 +8,7 @@ import hashlib
 import importlib.metadata
 import json
 import os
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -39,6 +40,7 @@ OUTPUTS = [
     ASSET_DIR / "qwen3-tts-tokenizer-f16.gguf",
 ]
 MANIFEST_PATH = ASSET_DIR / "conversion-manifest.json"
+PACKAGE_DIR = ASSET_DIR / "Qwen3TTS-0.6B"
 
 
 def sha256(path: Path) -> str:
@@ -82,6 +84,33 @@ def validate_or_refuse_existing_outputs(input_hashes: dict[str, str]) -> dict | 
     if len(manifest.get("outputs", [])) != len(OUTPUTS):
         raise SystemExit("Existing manifest has an incomplete output list; preserving outputs.")
     return manifest
+
+
+def write_import_package(manifest: dict) -> dict:
+    """Create the Files-importable package from verified conversion outputs."""
+    PACKAGE_DIR.mkdir(parents=True, exist_ok=True)
+    files = []
+    for source in OUTPUTS:
+        destination = PACKAGE_DIR / source.name
+        if not destination.is_file() or sha256(destination) != sha256(source):
+            shutil.copy2(source, destination)
+        files.append({"path": destination.name, "bytes": destination.stat().st_size,
+                      "sha256": sha256(destination)})
+    package_manifest = {
+        "format_version": 1,
+        "model_id": MODEL_ID,
+        "model_revision": MODEL_REVISION,
+        "qwen3_tts_cpp_revision": QWEN_SHA,
+        "ggml_revision": GGML_SHA,
+        "quantization": "F16",
+        "conversion_command": "python upstream/scripts/setup_pipeline_models.py --models-dir model/assets --skip-download --coreml off",
+        "files": files,
+    }
+    (PACKAGE_DIR / "manifest.json").write_text(
+        json.dumps(package_manifest, indent=2) + "\n", encoding="utf-8"
+    )
+    package_manifest["package_bytes"] = sum(record["bytes"] for record in files)
+    return package_manifest
 
 
 def main() -> None:
@@ -138,7 +167,7 @@ def main() -> None:
 
     existing = validate_or_refuse_existing_outputs(input_hashes)
     if existing is not None:
-        print(json.dumps(existing, indent=2))
+        print(json.dumps({"conversion": existing, "import_package": write_import_package(existing)}, indent=2))
         return
 
     env = os.environ.copy()
@@ -188,7 +217,7 @@ def main() -> None:
     MANIFEST_PATH.write_text(
         json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
     )
-    print(json.dumps(manifest, indent=2))
+    print(json.dumps({"conversion": manifest, "import_package": write_import_package(manifest)}, indent=2))
 
 
 if __name__ == "__main__":

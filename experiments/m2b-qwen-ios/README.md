@@ -31,6 +31,24 @@ Preparation packages are exact-version pinned in model/requirements-conversion.t
 
 The pinned C++ runtime performs reference audio → ECAPA-TDNN speaker embedding → new-text tokenizer → Qwen talker/code predictor → WavTokenizer decoder → 24 kHz mono PCM. Its API has no reference transcript argument. The transcript field in the spike UI is explicitly marked as diagnostic-only and is not sent to the runtime. Therefore this is an x-vector reference-conditioned cloning path, not the official reference-audio-plus-reference-text ICL path. See the research report and compatibility matrix before interpreting device audio.
 
-## Gate B1 iPhoneOS ARM64 CI build
+## Local model package for iPhone Files
 
-The independent `Qwen iOS Spike Build` workflow runs on GitHub's Apple Silicon `macos-15` runner. It builds the pinned GGML and Qwen runtime sources with the iPhoneOS toolchain, links the static runtime into this spike's Xcode app for `generic/platform=iOS`, verifies arm64 architecture and the final Mach-O `IOS` platform, and uploads `QwenIOSSpike-build`. No model weights or reference audio are required or included. The workflow verifies compilation and linking only; it does not run inference or claim device execution.
+Run `python3 scripts/prepare_source.py`, install the pinned packages from
+`model/requirements-conversion.txt`, then run `python3 scripts/prepare_model.py
+--python <venv-python>`. The script downloads only the pinned official
+SafeTensors revision, verifies both source hashes, runs the pinned converter,
+and writes a `model/assets/Qwen3-TTS-0.6B/` folder. That import folder contains
+the two F16 GGUF outputs and `manifest.json` with exact source/converter
+revisions, sizes, and SHA-256 hashes. Its exact size is printed by the script
+as `package_bytes`; generated weights are local and ignored by Git. The app
+copies a selected folder into its private Application Support directory and
+restores that installed path when reopened. Files are never uploaded.
+
+The package does not include the full source snapshot. It contains only the
+two converted runtime files used by this spike; the tokenizer and decoder
+assets are embedded in the converted GGUF outputs. The model has not been
+prepared in this Windows checkout, so no measured package size is claimed.
+
+## Gate B2 unsigned IPA
+
+The independent `Qwen iOS Spike Build` workflow runs on GitHub's Apple Silicon `macos-15` runner. It builds the pinned GGML and Qwen runtime sources with the iPhoneOS toolchain, links the static runtime into this spike's Xcode app for `generic/platform=iOS`, verifies arm64 architecture and the final Mach-O `IOS` platform, and keeps the `QwenIOSSpike-build` artifact. It also packages the unsigned app as `QwenIOSSpike-unsigned.ipa` and uploads `QwenIOSSpike-unsigned-IPA`. The package check verifies the distinct bundle ID, iPhoneOS/arm64 binary, and absence of model weights. The IPA is unsigned and needs Sideloadly signing for device installation. No model weights or reference audio are included. A successful package build does not verify inference or device execution.

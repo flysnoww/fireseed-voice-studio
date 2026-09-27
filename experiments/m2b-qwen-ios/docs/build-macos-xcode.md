@@ -45,7 +45,7 @@ cmake -S upstream/ggml -B upstream/ggml/build \
 cmake --build upstream/ggml/build --parallel --target ggml ggml-base ggml-cpu ggml-metal
 ```
 
-Embedded Metal mode is selected to avoid the upstream alternative's hard-coded `xcrun -sdk macosx metal` shader compilation. The runtime will select Metal in `auto` mode if GGML reports an available GPU backend; the app has a CPU override for comparison.
+Embedded Metal mode is selected to avoid the upstream alternative's hard-coded `xcrun -sdk macosx metal` shader compilation. The UI offers CPU and Metal attempts. CPU sets the pinned runtime's explicit `cpu` mode. Metal uses its `auto` GPU-preferred mode, then verifies the actual backend registry is Metal and reports Metal unavailable if it fell back. The pinned runtime has no dedicated Metal mode; the spike does not claim one.
 
 ## 3. Build qwen static libraries and C API
 
@@ -94,7 +94,7 @@ xcodebuild -project ios/QwenRuntimeSpike.xcodeproj \
 ## 5. Interpretation
 
 - Record app build result, selected GGML backend name, load/prepare/generate ms, output duration/RTF, and physical footprint/memory warnings.
-- Run with `auto` and `cpu`; auto should report the actual device backend. A CPU success does not prove Metal. A Metal device-name log does not prove correct cloning.
+- Run with Metal and CPU; check the actual backend registry reported by the app. A CPU success does not prove Metal. A Metal backend report does not prove correct cloning.
 - Reference transcript is collected for test notes only because this C++ runtime ignores it. Do not describe the run as official transcript-conditioned ICL cloning.
 - Airplane-mode test is required after model files are local. No inference path should call the network.
 
