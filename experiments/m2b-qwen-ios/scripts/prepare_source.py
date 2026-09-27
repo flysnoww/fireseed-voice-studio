@@ -78,9 +78,10 @@ def main() -> None:
             capture_output=True,
         )
         if already_applied.returncode != 0:
+            diagnostics = (applied.stdout + applied.stderr).decode(errors="replace").strip()
             raise SystemExit(
                 "Pinned upstream files differ from the expected patch context; "
-                "refusing to apply an unreviewed source edit."
+                "refusing to apply an unreviewed source edit.\n" + diagnostics
             )
 
     print(f"qwen3-tts.cpp: {actual_qwen}")
