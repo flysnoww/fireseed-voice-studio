@@ -375,32 +375,50 @@ actor QwenRendererAdapter: InstallableSpeechProvider, VoicePreparingSpeechProvid
             .appendingPathComponent("voice-reference-\(UUID().uuidString).wav")
         do {
             let output = try AVAudioFile(forWriting: destination, settings: target.settings)
-            while true {
-                guard let input = AVAudioPCMBuffer(pcmFormat: source.processingFormat, frameCapacity: 4096) else {
-                    throw providerError(code: 25, "Could not allocate reference audio buffers.")
-                }
-                try source.read(into: input)
-                if input.frameLength == 0 { break }
-                let expectedOutputFrames = Double(input.frameLength) * target.sampleRate /
-                    source.processingFormat.sampleRate
-                let outputCapacity = AVAudioFrameCount(ceil(expectedOutputFrames) + 4096)
-                guard outputCapacity > 0 else {
-                    throw providerError(code: 26, "Could not size the converted reference buffer.")
-                }
-                guard let converted = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: outputCapacity) else {
-                    throw providerError(code: 25, "Could not allocate reference audio buffers.")
-                }
-                var didProvideInput = false
+            guard let converted = AVAudioPCMBuffer(pcmFormat: target,
+                                                   frameCapacity: AVAudioFrameCount(target.sampleRate * 5)) else {
+                throw providerError(code: 25, "Could not allocate reference audio buffers.")
+            }
+            var reachedEndOfStream = false
+            while !reachedEndOfStream {
+                converted.frameLength = 0
+                var inputReadError: Error?
                 var conversionError: NSError?
                 let status = converter.convert(to: converted, error: &conversionError) { _, inputStatus in
-                    guard !didProvideInput else { inputStatus.pointee = .noDataNow; return nil }
-                    didProvideInput = true
+                    guard inputReadError == nil,
+                          let input = AVAudioPCMBuffer(pcmFormat: source.processingFormat, frameCapacity: 4096) else {
+                        inputStatus.pointee = .endOfStream
+                        return nil
+                    }
+                    do {
+                        try source.read(into: input)
+                    } catch {
+                        inputReadError = error
+                        inputStatus.pointee = .endOfStream
+                        return nil
+                    }
+                    guard input.frameLength > 0 else {
+                        inputStatus.pointee = .endOfStream
+                        return nil
+                    }
                     inputStatus.pointee = .haveData
                     return input
                 }
+                if let inputReadError { throw inputReadError }
                 if let conversionError { throw conversionError }
                 if converted.frameLength > 0 { try output.write(from: converted) }
-                if status == .error { throw VoiceStudioError.invalidAudioFile }
+                switch status {
+                case .endOfStream:
+                    reachedEndOfStream = true
+                case .error:
+                    throw VoiceStudioError.invalidAudioFile
+                case .haveData, .inputRanDry:
+                    guard converted.frameLength > 0 else {
+                        throw providerError(code: 26, "Audio conversion stopped before producing output.")
+                    }
+                @unknown default:
+                    throw VoiceStudioError.invalidAudioFile
+                }
             }
         } catch {
             try? FileManager.default.removeItem(at: destination)
