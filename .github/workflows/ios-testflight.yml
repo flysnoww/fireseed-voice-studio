@@ -1,0 +1,262 @@
+name: iOS TestFlight
+
+on:
+  workflow_dispatch:
+    inputs:
+      marketing_version:
+        description: App marketing version (for example 0.1)
+        required: true
+        default: "0.1"
+        type: string
+      build_number:
+        description: Unused positive integer build number from App Store Connect
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-testflight-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  archive-and-upload:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_PROVISIONING_PROFILE_BASE64: ${{ secrets.APPLE_PROVISIONING_PROFILE_BASE64 }}
+      APPSTORE_API_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
+      APPSTORE_API_ISSUER_ID: ${{ secrets.APPSTORE_API_ISSUER_ID }}
+      APPSTORE_API_PRIVATE_KEY_BASE64: ${{ secrets.APPSTORE_API_PRIVATE_KEY_BASE64 }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate requested version
+        env:
+          MARKETING_VERSION: ${{ inputs.marketing_version }}
+          BUILD_NUMBER: ${{ inputs.build_number }}
+        run: |
+          set -euo pipefail
+          [[ "$MARKETING_VERSION" =~ ^[0-9]+(\.[0-9]+){1,2}$ ]]
+          [[ "$BUILD_NUMBER" =~ ^[1-9][0-9]*$ ]]
+          echo "MARKETING_VERSION=$MARKETING_VERSION" >> "$GITHUB_ENV"
+          echo "BUILD_NUMBER=$BUILD_NUMBER" >> "$GITHUB_ENV"
+
+      - name: Environment
+        run: |
+          sw_vers
+          xcodebuild -version
+          xcrun simctl list devices available
+
+      - name: Swift domain and file lifecycle tests
+        run: swift test --package-path ios/VoiceStudioCore -Xswiftc -strict-concurrency=complete
+
+      - name: Build pinned CPU renderer for simulator
+        run: bash experiments/m2b-qwen-ios/scripts/build_formal_ios_runtime.sh simulator
+
+      - name: Xcode Simulator build
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project ios/VoiceStudio.xcodeproj \
+            -scheme VoiceStudio \
+            -sdk iphonesimulator \
+            -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO \
+            ARCHS=arm64 \
+            build | tee xcodebuild-simulator-build.log
+
+      - name: Select simulator
+        run: |
+          DEVICE_ID=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"]; print(next(x["udid"] for runtime in d.values() for x in runtime if x["name"].startswith("iPhone")))')
+          echo "DEVICE_ID=$DEVICE_ID" >> "$GITHUB_ENV"
+
+      - name: XCTest
+        run: |
+          set -o pipefail
+          xcodebuild test \
+            -project ios/VoiceStudio.xcodeproj \
+            -scheme VoiceStudio \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=$DEVICE_ID,arch=arm64" \
+            -resultBundlePath TestResults.xcresult \
+            ARCHS=arm64 \
+            CODE_SIGNING_ALLOWED=NO | tee xcodebuild-test.log
+
+      - name: Verify distribution profile and install signing identity
+        env:
+          EXPECTED_TEAM: Z36ZADH7T7
+          EXPECTED_BUNDLE_ID: com.fireseed.voicestudio
+          EXPECTED_PROFILE_NAME: Voice Studio App Store Distribution
+        run: |
+          set -euo pipefail
+          set +x
+          for name in APPLE_CERTIFICATE_P12_BASE64 APPLE_CERTIFICATE_PASSWORD APPLE_PROVISIONING_PROFILE_BASE64 APPSTORE_API_KEY_ID APPSTORE_API_ISSUER_ID APPSTORE_API_PRIVATE_KEY_BASE64; do
+            if [[ -z "${!name:-}" ]]; then echo "Required repository secret is missing: $name" >&2; exit 1; fi
+          done
+
+          KEYCHAIN_PATH="$RUNNER_TEMP/voice-studio-$GITHUB_RUN_ID.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
+          P12_PATH="$RUNNER_TEMP/voice-studio-distribution.p12"
+          PROFILE_PATH="$RUNNER_TEMP/voice-studio.mobileprovision"
+          PROFILE_PLIST="$RUNNER_TEMP/voice-studio-profile.plist"
+          CERT_PATH="$RUNNER_TEMP/voice-studio-distribution-cert.pem"
+          printf '%s' "$KEYCHAIN_PATH" > "$RUNNER_TEMP/voice-studio-keychain-path"
+
+          python3 - "$P12_PATH" "$PROFILE_PATH" <<'PY'
+          import base64, os, pathlib, sys
+          for key, path in zip(("APPLE_CERTIFICATE_P12_BASE64", "APPLE_PROVISIONING_PROFILE_BASE64"), sys.argv[1:]):
+              pathlib.Path(path).write_bytes(base64.b64decode(os.environ[key], validate=True))
+          PY
+
+          openssl pkcs12 -in "$P12_PATH" -passin env:APPLE_CERTIFICATE_PASSWORD -info -noout
+          openssl pkcs12 -in "$P12_PATH" -passin env:APPLE_CERTIFICATE_PASSWORD -clcerts -nokeys -out "$CERT_PATH"
+          openssl x509 -in "$CERT_PATH" -noout -subject | grep -q 'Apple Distribution'
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$P12_PATH" -f pkcs12 -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep -q 'Apple Distribution'
+
+          security cms -D -i "$PROFILE_PATH" > "$PROFILE_PLIST"
+          python3 - "$PROFILE_PLIST" "$CERT_PATH" <<'PY'
+          import hashlib, plistlib, subprocess, sys
+          from pathlib import Path
+          profile = plistlib.loads(Path(sys.argv[1]).read_bytes())
+          cert_der = subprocess.check_output(["openssl", "x509", "-in", sys.argv[2], "-outform", "DER"])
+          cert_digest = hashlib.sha256(cert_der).digest()
+          ent = profile.get("Entitlements", {})
+          expected_app_id = "Z36ZADH7T7.com.fireseed.voicestudio"
+          checks = {
+              "profile name": profile.get("Name") == "Voice Studio App Store Distribution",
+              "team": "Z36ZADH7T7" in profile.get("TeamIdentifier", []),
+              "bundle id": ent.get("application-identifier") == expected_app_id,
+              "get-task-allow": ent.get("get-task-allow") is False,
+              "App Store distribution (no device/ad-hoc entitlements)": "ProvisionedDevices" not in profile and profile.get("ProvisionsAllDevices") is not True,
+              "certificate matches profile": any(hashlib.sha256(item).digest() == cert_digest for item in profile.get("DeveloperCertificates", [])),
+          }
+          failed = [name for name, ok in checks.items() if not ok]
+          if failed:
+              raise SystemExit("Provisioning profile validation failed: " + ", ".join(failed))
+          print("Provisioning profile validated: Voice Studio App Store Distribution / Z36ZADH7T7 / com.fireseed.voicestudio / App Store distribution")
+          PY
+          UUID=$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$PROFILE_PLIST")
+          echo "$UUID" > "$RUNNER_TEMP/voice-studio-profile-uuid"
+          PROFILE_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
+          mkdir -p "$PROFILE_DIR"
+          cp "$PROFILE_PATH" "$PROFILE_DIR/$UUID.mobileprovision"
+
+      - name: Archive and export signed IPA
+        run: |
+          set -euo pipefail
+          xcodebuild archive \
+            -project ios/VoiceStudio.xcodeproj \
+            -scheme VoiceStudio \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/VoiceStudio.xcarchive" \
+            -derivedDataPath "$RUNNER_TEMP/VoiceStudioDerivedData" \
+            MARKETING_VERSION="$MARKETING_VERSION" \
+            CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
+            VOICE_TESTFLIGHT_PROFILE_SPECIFIER='Voice Studio App Store Distribution' \
+            CODE_SIGNING_ALLOWED=YES | tee xcodebuild-archive.log
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/VoiceStudio.xcarchive" \
+            -exportPath "$RUNNER_TEMP/VoiceStudioExport" \
+            -exportOptionsPlist ios/VoiceStudio.xcodeproj/ExportOptions-TestFlight.plist | tee xcodebuild-export.log
+
+      - name: Verify signed IPA and upload metadata
+        run: |
+          set -euo pipefail
+          IPA="$RUNNER_TEMP/VoiceStudioExport/VoiceStudio.ipa"
+          APP="$RUNNER_TEMP/VoiceStudio.xcarchive/Products/Applications/VoiceStudio.app"
+          test -s "$IPA"
+          test -d "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          codesign -dv --verbose=4 "$APP" 2> "$RUNNER_TEMP/voice-studio-codesign.txt"
+          grep -q '^Identifier=com.fireseed.voicestudio$' "$RUNNER_TEMP/voice-studio-codesign.txt"
+          grep -q '^TeamIdentifier=Z36ZADH7T7$' "$RUNNER_TEMP/voice-studio-codesign.txt"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist" | grep -qx 'com.fireseed.voicestudio'
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$APP/Info.plist" | grep -qx 'AppIcon'
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Info.plist" | grep -qx "$MARKETING_VERSION"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Info.plist" | grep -qx "$BUILD_NUMBER"
+          python3 - "$APP/Info.plist" <<'PY'
+          import plistlib, sys
+          with open(sys.argv[1], "rb") as f: p = plistlib.load(f)
+          family = p.get("UIDeviceFamily", [])
+          if family != [1]: raise SystemExit(f"Expected iPhone-only UIDeviceFamily [1], got {family}")
+          PY
+          codesign -d --entitlements :- "$APP" > "$RUNNER_TEMP/voice-studio-entitlements.plist" 2>/dev/null
+          python3 - "$RUNNER_TEMP/voice-studio-entitlements.plist" <<'PY'
+          import plistlib, sys
+          with open(sys.argv[1], "rb") as f: e = plistlib.load(f)
+          if e.get("application-identifier") != "Z36ZADH7T7.com.fireseed.voicestudio": raise SystemExit("Unexpected signed application-identifier")
+          if e.get("com.apple.developer.team-identifier") != "Z36ZADH7T7": raise SystemExit("Unexpected signed team identifier")
+          if e.get("get-task-allow") is not False: raise SystemExit("Signed app is not distribution-signed")
+          PY
+          mkdir -p package
+          cp "$IPA" package/VoiceStudio-TestFlight.ipa
+          {
+            echo "Git commit: $GITHUB_SHA"
+            echo "Bundle identifier: com.fireseed.voicestudio"
+            echo "Marketing version: $MARKETING_VERSION"
+            echo "Build number: $BUILD_NUMBER"
+            echo "Distribution: Apple App Store Connect"
+            echo "IPA size (bytes): $(stat -f%z "$IPA")"
+          } | tee package/build-info.txt
+
+      - name: Upload signed IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VoiceStudio-TestFlight-IPA
+          retention-days: 14
+          path: |
+            package/VoiceStudio-TestFlight.ipa
+            package/build-info.txt
+          if-no-files-found: error
+
+      - name: Upload to App Store Connect
+        env:
+          API_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
+          API_ISSUER_ID: ${{ secrets.APPSTORE_API_ISSUER_ID }}
+          API_PRIVATE_KEY_BASE64: ${{ secrets.APPSTORE_API_PRIVATE_KEY_BASE64 }}
+        run: |
+          set -euo pipefail
+          API_KEY_PATH="$RUNNER_TEMP/AuthKey_${API_KEY_ID}.p8"
+          python3 - "$API_KEY_PATH" <<'PY'
+          import base64, os, pathlib, sys
+          pathlib.Path(sys.argv[1]).write_bytes(base64.b64decode(os.environ["API_PRIVATE_KEY_BASE64"], validate=True))
+          PY
+          xcrun altool --upload-app \
+            --type ios \
+            --file package/VoiceStudio-TestFlight.ipa \
+            --apiKey "$API_KEY_ID" \
+            --apiIssuer "$API_ISSUER_ID"
+
+      - name: Cleanup signing material
+        if: always()
+        run: |
+          set +e
+          KEYCHAIN_PATH_FILE="$RUNNER_TEMP/voice-studio-keychain-path"
+          if [[ -f "$RUNNER_TEMP/voice-studio-profile-uuid" ]]; then
+            UUID=$(cat "$RUNNER_TEMP/voice-studio-profile-uuid")
+            rm -f "$HOME/Library/MobileDevice/Provisioning Profiles/$UUID.mobileprovision"
+          fi
+          if [[ -f "$KEYCHAIN_PATH_FILE" ]]; then security delete-keychain "$(cat "$KEYCHAIN_PATH_FILE")" 2>/dev/null; fi
+          rm -f "$RUNNER_TEMP"/voice-studio-* "$RUNNER_TEMP"/AuthKey_*.p8
+
+      - name: Upload failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-testflight-failure-logs
+          path: |
+            xcodebuild-*.log
+            TestResults.xcresult
+          if-no-files-found: ignore

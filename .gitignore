@@ -20,6 +20,10 @@ xcuserdata/
 *.ipa
 *.dSYM/
 *.mobileprovision
+*.provisionprofile
+*.p8
+*.cer
+*.pem
 
 # Local model packages and converted weights must stay on this machine.
 /local-models/
