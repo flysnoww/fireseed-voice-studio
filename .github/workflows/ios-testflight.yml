@@ -239,7 +239,10 @@ jobs:
           API_PRIVATE_KEY_BASE64: ${{ secrets.APPSTORE_API_PRIVATE_KEY_BASE64 }}
         run: |
           set -euo pipefail
-          API_KEY_PATH="$RUNNER_TEMP/AuthKey_${API_KEY_ID}.p8"
+          API_KEY_DIR="$HOME/.appstoreconnect/private_keys"
+          mkdir -p "$API_KEY_DIR"
+          chmod 700 "$API_KEY_DIR"
+          API_KEY_PATH="$API_KEY_DIR/AuthKey_${API_KEY_ID}.p8"
           python3 - "$API_KEY_PATH" <<'PY'
           import base64, os, pathlib, sys
           pathlib.Path(sys.argv[1]).write_bytes(base64.b64decode(os.environ["API_PRIVATE_KEY_BASE64"], validate=True))
@@ -260,6 +263,7 @@ jobs:
             rm -f "$HOME/Library/MobileDevice/Provisioning Profiles/$UUID.mobileprovision"
           fi
           if [[ -f "$KEYCHAIN_PATH_FILE" ]]; then security delete-keychain "$(cat "$KEYCHAIN_PATH_FILE")" 2>/dev/null; fi
+          if [[ -n "${APPSTORE_API_KEY_ID:-}" ]]; then rm -f "$HOME/.appstoreconnect/private_keys/AuthKey_${APPSTORE_API_KEY_ID}.p8"; fi
           rm -f "$RUNNER_TEMP"/voice-studio-* "$RUNNER_TEMP"/AuthKey_*.p8
 
       - name: Upload failure logs
