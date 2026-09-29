@@ -629,7 +629,7 @@ final class VoiceStudioAppTests: XCTestCase {
         XCTAssertEqual(Set(personal.map(\.identifier)).union(standard.map(\.identifier)),
                        Set(catalog.map(\.identifier)))
         XCTAssertTrue(Set(personal.map(\.identifier)).isDisjoint(with: Set(standard.map(\.identifier))))
-        XCTAssertTrue(personal.allSatisfy { $0.traits.contains(.isPersonalVoice) })
+        XCTAssertTrue(personal.allSatisfy { $0.voiceTraits.contains(.isPersonalVoice) })
     }
 
     func testSystemProviderAdvertisesOnlyImplementedPostProcessingAndNoExpression() {

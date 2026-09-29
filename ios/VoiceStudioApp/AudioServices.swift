@@ -350,11 +350,11 @@ enum SystemVoiceCatalog {
     }
 
     static func personalVoices(_ voices: [AVSpeechSynthesisVoice]) -> [AVSpeechSynthesisVoice] {
-        voices.filter { $0.traits.contains(.isPersonalVoice) }
+        voices.filter { $0.voiceTraits.contains(.isPersonalVoice) }
     }
 
     static func nonPersonalVoices(_ voices: [AVSpeechSynthesisVoice]) -> [AVSpeechSynthesisVoice] {
-        voices.filter { !$0.traits.contains(.isPersonalVoice) }
+        voices.filter { !$0.voiceTraits.contains(.isPersonalVoice) }
     }
 }
 
