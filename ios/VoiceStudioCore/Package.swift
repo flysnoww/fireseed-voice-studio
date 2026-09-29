@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "VoiceStudioCore",
-    platforms: [.iOS(.v17)],
+    platforms: [.iOS(.v17), .macOS(.v10_15)],
     products: [.library(name: "VoiceStudioCore", targets: ["VoiceStudioCore"])],
     targets: [
         .target(name: "VoiceStudioCore"),
