@@ -86,6 +86,9 @@ jobs:
             ARCHS=arm64 \
             CODE_SIGNING_ALLOWED=NO | tee xcodebuild-test.log
 
+      - name: Build pinned CPU renderer for iPhone
+        run: bash experiments/m2b-qwen-ios/scripts/build_formal_ios_runtime.sh device
+
       - name: Verify distribution profile and install signing identity
         env:
           EXPECTED_TEAM: Z36ZADH7T7
