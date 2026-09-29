@@ -18,7 +18,12 @@ struct VoiceStudioHome: View {
     @State private var speed = 1.0
     @State private var pitch = 0.0
     @State private var voiceToDelete: VoiceAsset?
+    @State private var generatedAudioToDelete: AudioAsset?
+    @State private var voiceToEdit: VoiceAsset?
+    @State private var audioToEdit: AudioAsset?
     @State private var isSavedVoicePickerPresented = false
+    @State private var isSystemVoicePickerPresented = false
+    @State private var isGeneratedAudioLibraryPresented = false
     @State private var pendingVoiceName: String?
     @State private var textInputFrames: [String: CGRect] = [:]
     @FocusState private var focusedInput: InputField?
@@ -37,13 +42,13 @@ struct VoiceStudioHome: View {
                     ScrollView {
                         VStack(spacing: 16) {
                             voiceCard
+                            libraryEntryCard
                             textCard
                             shapingCard
                             expressionCard
                             languageCard
                             generateCard
                             developerDiagnosticsCard
-                            if !model.savedVoices.isEmpty { savedVoiceLibrarySection }
                         }
                         .padding(.horizontal, 18)
                         .padding(.top, 12)
@@ -119,6 +124,34 @@ struct VoiceStudioHome: View {
             } message: {
                 Text("This voice and its saved reference audio will be removed.")
             }
+            .confirmationDialog("Delete Generated Audio?", isPresented: Binding(
+                get: { generatedAudioToDelete != nil }, set: { if !$0 { generatedAudioToDelete = nil } }
+            ), titleVisibility: .visible) {
+                Button("Delete", role: .destructive) {
+                    if let generatedAudioToDelete { model.deleteGeneratedAudio(id: generatedAudioToDelete.id) }
+                    generatedAudioToDelete = nil
+                }
+                Button("Cancel", role: .cancel) { generatedAudioToDelete = nil }
+            } message: {
+                Text("This generated audio file will be removed.")
+            }
+            .sheet(isPresented: $isSystemVoicePickerPresented) { systemVoicePicker }
+            .sheet(isPresented: $isGeneratedAudioLibraryPresented) { generatedAudioLibrary }
+            .sheet(item: $voiceToEdit) { voice in
+                VoiceAssetEditor(voice: voice, selected: generationVoice == .saved(voice.id),
+                                 onSelect: { generationVoice = .saved(voice.id); voiceToEdit = nil },
+                                 onPlay: { model.playVoiceReference(voice) }, onStop: { model.stopPlayback() },
+                                 onRename: { model.renameSavedVoice(id: voice.id, name: $0) },
+                                 onFavorite: { model.setSavedVoiceFavorite(id: voice.id, isFavorite: $0) },
+                                 onDelete: { voiceToEdit = nil; voiceToDelete = voice })
+            }
+            .sheet(item: $audioToEdit) { audio in
+                GeneratedAudioEditor(audio: audio, shareURL: model.managedURL(for: audio),
+                                     onPlay: { model.playAudioAsset(audio) }, onStop: { model.stopPlayback() },
+                                     onRename: { model.renameGeneratedAudio(id: audio.id, name: $0) },
+                                     onFavorite: { model.setGeneratedAudioFavorite(id: audio.id, isFavorite: $0) },
+                                     onDelete: { audioToEdit = nil; generatedAudioToDelete = audio })
+            }
         }
     }
 
@@ -126,7 +159,8 @@ struct VoiceStudioHome: View {
         StudioCard(title: "Voice", symbol: "person.wave.2") {
             LabeledContent("Current voice", value: selectedVoiceName)
             Menu {
-                Button("System Voice") { generationVoice = .systemDefault }
+                Button("System Default") { generationVoice = .systemDefault }
+                Button("Choose System Voice…") { isSystemVoicePickerPresented = true }
                 Button("Local Voice") { generationVoice = .tinyLocal }
             } label: {
                 Label("Built-in Voices", systemImage: "chevron.down.circle")
@@ -140,6 +174,10 @@ struct VoiceStudioHome: View {
                     Label("My Voices", systemImage: "person.2")
                 }
                 .accessibilityIdentifier("myVoicesButton")
+                Button {
+                    focusedInput = nil
+                    isSystemVoicePickerPresented = true
+                } label: { Label("System Voices", systemImage: "waveform") }
                 Spacer()
                 Button {
                     focusedInput = nil
@@ -216,20 +254,36 @@ struct VoiceStudioHome: View {
                     if model.savedVoices.isEmpty {
                         Text("No saved voices yet.").foregroundStyle(.secondary)
                     }
-                    ForEach(model.savedVoices) { voice in
-                        Button {
-                            generationVoice = .saved(voice.id)
-                            isSavedVoicePickerPresented = false
-                        } label: {
-                            HStack {
-                                Label(voice.name, systemImage: "waveform")
-                                Spacer()
-                                if generationVoice == .saved(voice.id) {
-                                    Image(systemName: "checkmark").foregroundStyle(appearance.skin.accent)
+                    ForEach(model.pagedSavedVoices) { voice in
+                        HStack {
+                            Button {
+                                generationVoice = .saved(voice.id)
+                                isSavedVoicePickerPresented = false
+                            } label: {
+                                HStack {
+                                    VStack(alignment: .leading) {
+                                        Text(voice.name)
+                                        Text("\(sourceLocalizationKey(for: voice.sourceType)) · \(SavedVoiceLibrary.formattedDuration(voice.referenceAudio.duration))")
+                                            .font(.caption).foregroundStyle(.secondary)
+                                    }
+                                    Spacer()
+                                    if generationVoice == .saved(voice.id) { Image(systemName: "checkmark").foregroundStyle(appearance.skin.accent) }
                                 }
-                            }
+                            }.accessibilityIdentifier("savedVoiceChoice-\(voice.id.uuidString)")
+                            Button { voiceToEdit = voice; isSavedVoicePickerPresented = false } label: {
+                                Image(systemName: "info.circle")
+                            }.accessibilityLabel("Edit \(voice.name)")
+                            Button { voiceToDelete = voice } label: { Image(systemName: "trash") }
+                                .accessibilityLabel("Delete \(voice.name)")
                         }
-                        .accessibilityIdentifier("savedVoiceChoice-\(voice.id.uuidString)")
+                    }
+                    if model.savedVoicePageCount > 1 {
+                        HStack {
+                            Button("Previous") { model.setSavedVoicePage(model.savedVoicePage - 1) }.disabled(model.savedVoicePage == 0)
+                            Spacer(); Text("\(model.savedVoicePage + 1) / \(model.savedVoicePageCount)"); Spacer()
+                            Button("Next") { model.setSavedVoicePage(model.savedVoicePage + 1) }
+                                .disabled(model.savedVoicePage >= model.savedVoicePageCount - 1)
+                        }
                     }
                 }
                 .navigationTitle("My Voices")
@@ -241,6 +295,97 @@ struct VoiceStudioHome: View {
                 }
             }
             .presentationDetents([.medium, .large])
+        }
+    }
+
+    private var libraryEntryCard: some View {
+        StudioCard(title: "Libraries", symbol: "square.stack") {
+            HStack {
+                Button { isSavedVoicePickerPresented = true } label: {
+                    Label("My Voices", systemImage: "person.2")
+                }
+                Spacer()
+                Button { isGeneratedAudioLibraryPresented = true } label: {
+                    Label("Generation History", systemImage: "waveform.path")
+                }
+            }
+        }
+    }
+
+    private var systemVoicePicker: some View {
+        NavigationStack {
+            List {
+                Button {
+                    generationVoice = .systemDefault
+                    isSystemVoicePickerPresented = false
+                } label: {
+                    HStack { Text("System Default"); Spacer(); if generationVoice == .systemDefault { Image(systemName: "checkmark") } }
+                }
+                ForEach(AVSpeechSynthesisVoice.speechVoices(), id: \.identifier) { voice in
+                    Button {
+                        generationVoice = .systemVoice(voice.identifier)
+                        generationLanguage = voice.language
+                        generationAccent = voice.language
+                        isSystemVoicePickerPresented = false
+                    } label: {
+                        HStack {
+                            VStack(alignment: .leading) {
+                                Text(voice.name)
+                                Text(languageDisplayName(voice.language)).font(.caption).foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            if generationVoice == .systemVoice(voice.identifier) { Image(systemName: "checkmark") }
+                        }
+                    }.accessibilityIdentifier("systemVoice-\(voice.identifier)")
+                }
+            }
+            .navigationTitle("System Voices")
+            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { isSystemVoicePickerPresented = false } } }
+        }
+        .presentationDetents([.medium, .large])
+    }
+
+    private var generatedAudioLibrary: some View {
+        NavigationStack {
+            List {
+                if model.pagedGeneratedAudio.isEmpty { Text("No generated audio yet.").foregroundStyle(.secondary) }
+                ForEach(model.pagedGeneratedAudio) { audio in
+                    Button { audioToEdit = audio; isGeneratedAudioLibraryPresented = false } label: {
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack { Text(audio.displayName).font(.headline); if audio.isFavorite { Image(systemName: "star.fill").foregroundStyle(.yellow) } }
+                            Text("\(audio.createdAt.formatted(date: .abbreviated, time: .shortened)) · \(SavedVoiceLibrary.formattedDuration(audio.duration)) · \(generatedSourceName(audio.sourceVoice))")
+                                .font(.caption).foregroundStyle(.secondary)
+                            if let text = audio.text { Text(text).lineLimit(2).font(.footnote).foregroundStyle(.secondary) }
+                        }
+                    }.accessibilityIdentifier("generatedAudio-\(audio.id.uuidString)")
+                        .swipeActions(edge: .trailing) {
+                            Button(role: .destructive) { generatedAudioToDelete = audio } label: {
+                                Label("Delete", systemImage: "trash")
+                            }
+                        }
+                }
+                if model.generatedAudioPageCount > 1 {
+                    HStack {
+                        Button("Previous") { model.setGeneratedAudioPage(model.generatedAudioPage - 1) }
+                            .disabled(model.generatedAudioPage == 0)
+                        Spacer(); Text("\(model.generatedAudioPage + 1) / \(model.generatedAudioPageCount)"); Spacer()
+                        Button("Next") { model.setGeneratedAudioPage(model.generatedAudioPage + 1) }
+                            .disabled(model.generatedAudioPage >= model.generatedAudioPageCount - 1)
+                    }
+                }
+            }
+            .navigationTitle("Generation History")
+            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { isGeneratedAudioLibraryPresented = false } } }
+        }
+        .presentationDetents([.medium, .large])
+    }
+
+    private func generatedSourceName(_ source: GeneratedAudioVoiceSource?) -> String {
+        switch source {
+        case .savedVoice: String(localized: "My Voices", locale: locale)
+        case .systemVoice: String(localized: "System Voice", locale: locale)
+        case .tinyLocalVoice: String(localized: "Local Voice", locale: locale)
+        case nil: String(localized: "Unknown Voice", locale: locale)
         }
     }
 
@@ -376,13 +521,19 @@ struct VoiceStudioHome: View {
 
             if model.generatedAudio != nil {
                 HStack {
-                    Button("Play generated speech") { model.playGeneratedAudio() }
+                    Button(model.isPlaying ? "Pause" : "Play generated speech") {
+                        if model.isPlaying { model.stopPlayback() } else { model.playGeneratedAudio() }
+                    }
                         .disabled(model.isGeneratingSpeech)
                     Spacer()
                     if model.generatedAudio?.persistenceState == .temporary {
                         Button("Save Audio") { model.saveGeneratedAudio() }.disabled(model.isGeneratingSpeech)
                     } else {
                         Label("Audio saved", systemImage: "checkmark.circle").foregroundStyle(.secondary)
+                    }
+                    if let audio = model.generatedAudio, let url = model.managedURL(for: audio) {
+                        ShareLink(item: url) { Image(systemName: "square.and.arrow.up") }
+                            .accessibilityLabel("Share generated audio")
                     }
                 }
                 .accessibilityIdentifier("generatedAudioControls")
@@ -468,75 +619,12 @@ struct VoiceStudioHome: View {
                                       hasCurrentReference: model.currentReference != nil)
     }
 
-    private var savedVoiceLibrarySection: some View {
-        StudioCard(title: "My Voices", symbol: "person.2") {
-            Menu {
-                ForEach(SavedVoiceFilter.allCases) { filter in
-                    Button { model.setSavedVoiceFilter(filter) } label: {
-                        if model.savedVoiceFilter == filter {
-                            Label(filterLocalizationKey(for: filter), systemImage: "checkmark")
-                        } else { Text(filterLocalizationKey(for: filter)) }
-                    }
-                }
-            } label: {
-                Label(filterLocalizationKey(for: model.savedVoiceFilter), systemImage: "line.3.horizontal.decrease")
-            }.accessibilityIdentifier("savedVoiceFilterMenu")
-
-            if model.pagedSavedVoices.isEmpty { Text("No voices in this filter.").foregroundStyle(.secondary) }
-            ForEach(model.pagedSavedVoices) { voice in savedVoiceRow(voice) }
-            if model.savedVoicePageCount > 1 {
-                HStack {
-                    Button("Previous") { model.setSavedVoicePage(model.savedVoicePage - 1) }
-                        .disabled(model.savedVoicePage == 0)
-                    Spacer()
-                    Text("\(model.savedVoicePage + 1) / \(model.savedVoicePageCount)")
-                        .accessibilityIdentifier("savedVoicePageState")
-                    Spacer()
-                    Button("Next") { model.setSavedVoicePage(model.savedVoicePage + 1) }
-                        .disabled(model.savedVoicePage >= model.savedVoicePageCount - 1)
-                }
-            }
-        }
-    }
-
-    private func savedVoiceRow(_ voice: VoiceAsset) -> some View {
-        HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(voice.name).font(.headline)
-                HStack(spacing: 4) {
-                    Text(sourceLocalizationKey(for: voice.sourceType))
-                    Text("·")
-                    Text(SavedVoiceLibrary.formattedDuration(voice.referenceAudio.duration))
-                }.font(.caption).foregroundStyle(.secondary)
-            }
-            Spacer(minLength: 4)
-            Button("Play") { model.playVoiceReference(voice) }.labelStyle(.iconOnly)
-                .accessibilityLabel("Play \(voice.name) reference")
-            Button("Stop") { model.stopPlayback() }.labelStyle(.iconOnly).accessibilityLabel("Stop playback")
-            Button { voiceToDelete = voice } label: { Image(systemName: "trash") }
-                .labelStyle(.iconOnly).accessibilityLabel("Delete")
-        }
-        .padding(.vertical, 4)
-        .padding(8)
-        .background(model.mostRecentlySavedVoiceID == voice.id ? appearance.skin.accent.opacity(0.12) : .clear,
-                    in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .id(voice.id)
-    }
-
     private func sourceLocalizationKey(for source: VoiceSourceType) -> LocalizedStringKey {
         switch source {
         case .record: "Recorded"
         case .imported: "Imported"
         case .random: "Random"
         case .builtIn: "Built-in"
-        }
-    }
-
-    private func filterLocalizationKey(for filter: SavedVoiceFilter) -> LocalizedStringKey {
-        switch filter {
-        case .time: "Time"
-        case .imported: "Imported"
-        case .recorded: "Recorded"
         }
     }
 
@@ -554,7 +642,10 @@ struct VoiceStudioHome: View {
     private var selectedVoiceName: String {
         switch generationVoice {
         case .systemDefault:
-            String(localized: "System Voice", locale: locale)
+            String(localized: "System Default", locale: locale)
+        case .systemVoice(let identifier):
+            AVSpeechSynthesisVoice.speechVoices().first(where: { $0.identifier == identifier })?.name
+                ?? String(localized: "System Voice", locale: locale)
         case .tinyLocal:
             String(localized: "Local Voice", locale: locale)
         case .saved(let id):
@@ -599,6 +690,26 @@ private struct StudioCard<Content: View>: View {
     }
 }
 
+private struct BackgroundImportRequestGate {
+    private(set) var activeRequestID: UUID?
+
+    mutating func begin() -> UUID {
+        let id = UUID()
+        activeRequestID = id
+        return id
+    }
+
+    func accepts(_ id: UUID) -> Bool { activeRequestID == id }
+
+    mutating func finish(_ id: UUID) -> Bool {
+        guard accepts(id) else { return false }
+        activeRequestID = nil
+        return true
+    }
+
+    mutating func cancel() { activeRequestID = nil }
+}
+
 private struct StudioBackdrop: View {
     let skin: AppSkin
     let imageURL: URL?
@@ -626,6 +737,8 @@ private struct SettingsView: View {
     @State private var backgroundError: String?
     @State private var isLoadingBackground = false
     @State private var isSpeechComponentImporterPresented = false
+    @State private var backgroundImportTask: Task<Void, Never>?
+    @State private var backgroundImportGate = BackgroundImportRequestGate()
 
     var body: some View {
         ZStack {
@@ -707,68 +820,65 @@ private struct SettingsView: View {
             case .failure(let error): model.reportLocalSpeechImportError(error)
             }
         }
-        .task(id: selectedBackground) {
-            guard let selectedBackground else { return }
+        .onChange(of: selectedBackground) { _, item in
+            guard let item else { return }
+            backgroundImportTask?.cancel()
+            let requestID = backgroundImportGate.begin()
+            selectedBackground = nil
             isLoadingBackground = true
-            defer { isLoadingBackground = false }
-            let sourceTypes = selectedBackground.supportedContentTypes.map(\.identifier).joined(separator: ", ")
-            let sourceType = selectedBackground.supportedContentTypes.first?.identifier
-            appearance.recordBackgroundDiagnostic(stage: "pickerSelection", succeeded: true,
-                                                    sourceContentType: sourceType)
-            backgroundLogger.info("Background import source content type: \(sourceTypes, privacy: .public)")
-            let loadStarted = ProcessInfo.processInfo.systemUptime
-            var isSavingBackground = false
-            do {
-                let fileTransfer: BackgroundPhotoFileTransfer?
+            let sourceTypes = item.supportedContentTypes.map(\.identifier).joined(separator: ", ")
+            let sourceType = item.supportedContentTypes.first?.identifier
+            backgroundImportTask = Task { @MainActor in
+                appearance.recordBackgroundDiagnostic(stage: "pickerSelection", succeeded: true,
+                                                        sourceContentType: sourceType, requestID: requestID)
+                backgroundLogger.info("Background import source content type: \(sourceTypes, privacy: .public)")
+                let loadStarted = ProcessInfo.processInfo.systemUptime
                 do {
-                    fileTransfer = try await selectedBackground.loadTransferable(type: BackgroundPhotoFileTransfer.self)
+                    let fileTransfer: BackgroundPhotoFileTransfer?
+                    do {
+                        fileTransfer = try await item.loadTransferable(type: BackgroundPhotoFileTransfer.self)
+                    } catch {
+                        fileTransfer = nil
+                        appearance.recordBackgroundDiagnostic(stage: "fileRepresentationFallback", succeeded: false,
+                                                              sourceContentType: sourceType, error: error, requestID: requestID)
+                    }
+                    let data: Data?
+                    if let fileTransfer { data = fileTransfer.data }
+                    else { data = try await item.loadTransferable(type: Data.self) }
+                    let duration = max(0, Int((ProcessInfo.processInfo.systemUptime - loadStarted) * 1000))
+                    guard let data, !data.isEmpty else { throw BackgroundPhotoTransferError.empty }
+                    try Task.checkCancellation()
+                    guard backgroundImportGate.accepts(requestID) else { return }
+                    appearance.recordBackgroundDiagnostic(stage: "loadTransferable", succeeded: true,
+                                                          sourceContentType: sourceType, durationMilliseconds: duration,
+                                                          requestID: requestID)
+                    let metadata = BackgroundImageMetadata(contentType: sourceType, sourceByteSize: data.count)
+                    appearance.recordBackgroundDiagnostic(stage: "readData", succeeded: true,
+                                                          sourceContentType: sourceType, metadata: metadata, requestID: requestID)
+                    appearance.recordBackgroundDiagnostic(stage: "detectType", succeeded: true,
+                                                          sourceContentType: sourceType, metadata: metadata, requestID: requestID)
+                    guard backgroundImportGate.accepts(requestID) else { return }
+                    try appearance.saveBackgroundImage(data, sourceContentType: sourceType, requestID: requestID)
+                    guard backgroundImportGate.finish(requestID) else { return }
+                    backgroundError = nil
+                    isLoadingBackground = false
                 } catch {
-                    fileTransfer = nil
-                    appearance.recordBackgroundDiagnostic(stage: "fileRepresentationFallback",
-                                                          succeeded: false, sourceContentType: sourceType,
-                                                          error: error)
+                    guard backgroundImportGate.finish(requestID) else { return }
+                    if !Task.isCancelled {
+                        appearance.recordBackgroundDiagnostic(stage: "loadTransferable", succeeded: false,
+                                                              sourceContentType: sourceType, error: error,
+                                                              durationMilliseconds: max(0, Int((ProcessInfo.processInfo.systemUptime - loadStarted) * 1000)),
+                                                              requestID: requestID)
+                        backgroundError = "Could not use this image. Please choose another."
+                    }
+                    isLoadingBackground = false
                 }
-                let data: Data?
-                if let fileTransfer {
-                    data = fileTransfer.data
-                } else {
-                    data = try await selectedBackground.loadTransferable(type: Data.self)
-                }
-                let loadDuration = max(0, Int((ProcessInfo.processInfo.systemUptime - loadStarted) * 1000))
-                guard let data, !data.isEmpty else {
-                    appearance.recordBackgroundDiagnostic(stage: "loadTransferable", succeeded: false,
-                                                          sourceContentType: sourceType,
-                                                          error: BackgroundPhotoTransferError.empty,
-                                                          durationMilliseconds: loadDuration)
-                    backgroundError = "Could not use this image. Please choose another."
-                    backgroundLogger.error("Background import failed at loadTransferable: no image data")
-                    return
-                }
-                appearance.recordBackgroundDiagnostic(stage: "loadTransferable", succeeded: true,
-                                                      sourceContentType: sourceType,
-                                                      durationMilliseconds: loadDuration)
-                appearance.recordBackgroundDiagnostic(stage: "readData", succeeded: true,
-                                                      sourceContentType: sourceType,
-                                                      metadata: BackgroundImageMetadata(contentType: sourceType,
-                                                                                        sourceByteSize: data.count))
-                appearance.recordBackgroundDiagnostic(stage: "detectType", succeeded: true,
-                                                      sourceContentType: sourceType,
-                                                      metadata: BackgroundImageMetadata(contentType: sourceType,
-                                                                                        sourceByteSize: data.count))
-                try Task.checkCancellation()
-                isSavingBackground = true
-                try appearance.saveBackgroundImage(data, sourceContentType: sourceType)
-                backgroundError = nil
-            } catch {
-                if Task.isCancelled { return }
-                if !isSavingBackground {
-                    appearance.recordBackgroundDiagnostic(stage: "loadTransferable", succeeded: false,
-                                                          sourceContentType: sourceType, error: error,
-                                                          durationMilliseconds: max(0, Int((ProcessInfo.processInfo.systemUptime - loadStarted) * 1000)))
-                }
-                backgroundError = "Could not use this image. Please choose another."
-                backgroundLogger.error("Background import failed while reading or saving a selected image.")
             }
+        }
+        .onDisappear {
+            backgroundImportTask?.cancel()
+            backgroundImportGate.cancel()
+            isLoadingBackground = false
         }
     }
 }
@@ -795,6 +905,118 @@ private struct AccountPlaceholderView: View {
                 .multilineTextAlignment(.center).foregroundStyle(.secondary)
         }
         .padding().navigationTitle("Account")
+    }
+}
+
+private struct VoiceAssetEditor: View {
+    let voice: VoiceAsset
+    let selected: Bool
+    let onSelect: () -> Void
+    let onPlay: () -> Void
+    let onStop: () -> Void
+    let onRename: (String) -> Void
+    let onFavorite: (Bool) -> Void
+    let onDelete: () -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var name: String
+
+    init(voice: VoiceAsset, selected: Bool, onSelect: @escaping () -> Void,
+         onPlay: @escaping () -> Void, onStop: @escaping () -> Void,
+         onRename: @escaping (String) -> Void, onFavorite: @escaping (Bool) -> Void,
+         onDelete: @escaping () -> Void) {
+        self.voice = voice; self.selected = selected; self.onSelect = onSelect
+        self.onPlay = onPlay; self.onStop = onStop; self.onRename = onRename
+        self.onFavorite = onFavorite; self.onDelete = onDelete
+        _name = State(initialValue: voice.name)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("Voice Name", text: $name)
+                    LabeledContent("Source", value: voice.sourceType.rawValue.capitalized)
+                    LabeledContent("Duration", value: SavedVoiceLibrary.formattedDuration(voice.referenceAudio.duration))
+                    LabeledContent("Saved", value: voice.savedAt.formatted(date: .abbreviated, time: .shortened))
+                }
+                Section {
+                    HStack {
+                        Button("Play") { onPlay() }
+                        Button("Stop") { onStop() }
+                        Button(selected ? "Selected" : "Select Voice") { onSelect() }
+                    }
+                    Toggle("Favorite", isOn: Binding(get: { voice.isFavorite }, set: onFavorite))
+                }
+                Section {
+                    Button("Save Changes") { onRename(name); dismiss() }
+                        .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    Button("Delete Voice…", role: .destructive) { onDelete() }
+                }
+            }
+            .navigationTitle("Voice Details")
+            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
+        }
+        .presentationDetents([.medium, .large])
+    }
+}
+
+private struct GeneratedAudioEditor: View {
+    let audio: AudioAsset
+    let shareURL: URL?
+    let onPlay: () -> Void
+    let onStop: () -> Void
+    let onRename: (String) -> Void
+    let onFavorite: (Bool) -> Void
+    let onDelete: () -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var name: String
+
+    init(audio: AudioAsset, shareURL: URL?, onPlay: @escaping () -> Void, onStop: @escaping () -> Void,
+         onRename: @escaping (String) -> Void, onFavorite: @escaping (Bool) -> Void,
+         onDelete: @escaping () -> Void) {
+        self.audio = audio; self.shareURL = shareURL; self.onPlay = onPlay; self.onStop = onStop
+        self.onRename = onRename; self.onFavorite = onFavorite; self.onDelete = onDelete
+        _name = State(initialValue: audio.displayName)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("Audio Name", text: $name)
+                    LabeledContent("Created", value: audio.createdAt.formatted(date: .abbreviated, time: .shortened))
+                    LabeledContent("Duration", value: SavedVoiceLibrary.formattedDuration(audio.duration))
+                    LabeledContent("Language", value: audio.language ?? "--")
+                    LabeledContent("Voice", value: sourceName)
+                    if let text = audio.text { Text(text).font(.footnote) }
+                }
+                Section {
+                    HStack {
+                        Button("Play") { onPlay() }
+                        Button("Stop") { onStop() }
+                        if let shareURL { ShareLink(item: shareURL) { Label("Share", systemImage: "square.and.arrow.up") } }
+                    }
+                    Toggle("Favorite", isOn: Binding(get: { audio.isFavorite }, set: onFavorite))
+                }
+                Section {
+                    Button("Save Changes") { onRename(name); dismiss() }
+                        .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    Button("Delete Audio…", role: .destructive) { onDelete() }
+                }
+            }
+            .navigationTitle("Generated Audio")
+            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
+        }
+        .presentationDetents([.medium, .large])
+    }
+
+    private var sourceName: String {
+        switch audio.sourceVoice {
+        case .savedVoice: "Saved Voice"
+        case .systemVoice: "System Voice"
+        case .tinyLocalVoice: "Tiny Local Voice"
+        case nil: "Unknown Voice"
+        }
     }
 }
 

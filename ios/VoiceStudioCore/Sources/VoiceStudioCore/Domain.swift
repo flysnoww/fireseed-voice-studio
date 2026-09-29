@@ -15,6 +15,12 @@ public enum AudioCacheKind: String, Codable, Sendable {
     case generated
 }
 
+public enum GeneratedAudioVoiceSource: Codable, Equatable, Sendable {
+    case savedVoice(UUID)
+    case systemVoice(String?)
+    case tinyLocalVoice(String?)
+}
+
 public struct AudioAsset: Identifiable, Codable, Equatable, Sendable {
     public let id: UUID
     /// A generated file name relative to the managed audio store, never an arbitrary URL.
@@ -22,19 +28,53 @@ public struct AudioAsset: Identifiable, Codable, Equatable, Sendable {
     public let duration: TimeInterval
     public let createdAt: Date
     public let sourceVoiceID: UUID?
+    public let sourceVoice: GeneratedAudioVoiceSource?
+    public let language: String?
     public let text: String?
+    public let displayName: String
+    public let isFavorite: Bool
     public let persistenceState: AudioPersistenceState
 
     public init(id: UUID = UUID(), fileName: String, duration: TimeInterval, createdAt: Date = Date(),
-                sourceVoiceID: UUID? = nil, text: String? = nil,
+                sourceVoiceID: UUID? = nil, sourceVoice: GeneratedAudioVoiceSource? = nil,
+                language: String? = nil, text: String? = nil, displayName: String? = nil,
+                isFavorite: Bool = false,
                 persistenceState: AudioPersistenceState = .temporary) {
         self.id = id
         self.fileName = fileName
         self.duration = duration
         self.createdAt = createdAt
         self.sourceVoiceID = sourceVoiceID
+        self.sourceVoice = sourceVoice ?? sourceVoiceID.map(GeneratedAudioVoiceSource.savedVoice)
+        self.language = language
         self.text = text
+        let suggested = text?.split(whereSeparator: \.isNewline).first.map(String.init)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.displayName = displayName ?? suggested.flatMap { $0.isEmpty ? nil : String($0.prefix(48)) } ?? "Generated Audio"
+        self.isFavorite = isFavorite
         self.persistenceState = persistenceState
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, fileName, duration, createdAt, sourceVoiceID, sourceVoice, language, text, displayName, isFavorite, persistenceState
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        let id = try values.decode(UUID.self, forKey: .id)
+        let fileName = try values.decode(String.self, forKey: .fileName)
+        let duration = try values.decode(TimeInterval.self, forKey: .duration)
+        let createdAt = try values.decode(Date.self, forKey: .createdAt)
+        let sourceVoiceID = try values.decodeIfPresent(UUID.self, forKey: .sourceVoiceID)
+        let sourceVoice = try values.decodeIfPresent(GeneratedAudioVoiceSource.self, forKey: .sourceVoice)
+        let language = try values.decodeIfPresent(String.self, forKey: .language)
+        let text = try values.decodeIfPresent(String.self, forKey: .text)
+        let displayName = try values.decodeIfPresent(String.self, forKey: .displayName)
+        let isFavorite = try values.decodeIfPresent(Bool.self, forKey: .isFavorite) ?? false
+        let persistenceState = try values.decode(AudioPersistenceState.self, forKey: .persistenceState)
+        self.init(id: id, fileName: fileName, duration: duration, createdAt: createdAt,
+                  sourceVoiceID: sourceVoiceID, sourceVoice: sourceVoice, language: language,
+                  text: text, displayName: displayName, isFavorite: isFavorite,
+                  persistenceState: persistenceState)
     }
 }
 
@@ -56,13 +96,15 @@ public struct VoiceAsset: Identifiable, Codable, Equatable, Sendable {
     public let defaultAttributes: [String: String]
     public let createdAt: Date
     public let updatedAt: Date
+    public let isFavorite: Bool
 
     /// Voices are created as part of the save action; keep this computed to preserve the stored schema.
     public var savedAt: Date { createdAt }
 
     public init(id: UUID = UUID(), name: String, sourceType: VoiceSourceType, referenceAudio: AudioAsset,
                 languageHint: String? = nil, defaultAccent: String? = nil,
-                defaultAttributes: [String: String] = [:], createdAt: Date = Date(), updatedAt: Date = Date()) {
+                defaultAttributes: [String: String] = [:], createdAt: Date = Date(), updatedAt: Date = Date(),
+                isFavorite: Bool = false) {
         self.id = id
         self.name = name
         self.sourceType = sourceType
@@ -72,12 +114,38 @@ public struct VoiceAsset: Identifiable, Codable, Equatable, Sendable {
         self.defaultAttributes = defaultAttributes
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+        self.isFavorite = isFavorite
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, sourceType, referenceAudio, languageHint, defaultAccent, defaultAttributes, createdAt, updatedAt, isFavorite
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(id: try values.decode(UUID.self, forKey: .id),
+                  name: try values.decode(String.self, forKey: .name),
+                  sourceType: try values.decode(VoiceSourceType.self, forKey: .sourceType),
+                  referenceAudio: try values.decode(AudioAsset.self, forKey: .referenceAudio),
+                  languageHint: try values.decodeIfPresent(String.self, forKey: .languageHint),
+                  defaultAccent: try values.decodeIfPresent(String.self, forKey: .defaultAccent),
+                  defaultAttributes: try values.decodeIfPresent([String: String].self, forKey: .defaultAttributes) ?? [:],
+                  createdAt: try values.decode(Date.self, forKey: .createdAt),
+                  updatedAt: try values.decode(Date.self, forKey: .updatedAt),
+                  isFavorite: try values.decodeIfPresent(Bool.self, forKey: .isFavorite) ?? false)
+    }
+
+    public func updating(name: String? = nil, isFavorite: Bool? = nil) -> VoiceAsset {
+        VoiceAsset(id: id, name: name ?? self.name, sourceType: sourceType, referenceAudio: referenceAudio,
+                   languageHint: languageHint, defaultAccent: defaultAccent, defaultAttributes: defaultAttributes,
+                   createdAt: createdAt, updatedAt: Date(), isFavorite: isFavorite ?? self.isFavorite)
     }
 }
 
 public enum VoiceSelection: Codable, Equatable, Hashable, Sendable {
     case saved(UUID)
     case systemDefault
+    case systemVoice(String)
     case tinyLocal
 
     public var savedVoiceID: UUID? {
@@ -203,6 +271,10 @@ public enum SpeechProviderSelection {
             guard system.status(for: .speechGeneration) == .supported,
                   system.supports(language: language) else { return nil }
             return .system
+        case .systemVoice:
+            guard system.status(for: .speechGeneration) == .supported,
+                  system.supports(language: language) else { return nil }
+            return .system
         case .tinyLocal:
             guard tinyLocalIsReady, let tinyLocal,
                   tinyLocal.status(for: .speechGeneration) == .supported,
@@ -254,6 +326,7 @@ public enum VoiceStudioError: Error, LocalizedError, Equatable {
     case invalidAudioFile
     case missingManagedAudio
     case invalidManagedAudioPath
+    case assetIsReferenced
     case recordingFailed
     case rendererUnavailable
     case invalidRendererPack
@@ -270,6 +343,8 @@ public enum VoiceStudioError: Error, LocalizedError, Equatable {
             return "The managed audio file is missing. Import or record the reference again."
         case .invalidManagedAudioPath:
             return "The audio asset does not point to a file managed by Voice Studio."
+        case .assetIsReferenced:
+            return "This audio is still used by another saved asset."
         case .recordingFailed:
             return "Recording stopped before a valid audio file was created."
         case .rendererUnavailable:

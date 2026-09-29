@@ -116,19 +116,20 @@ final class AppAppearancePreference: ObservableObject {
         self.skin = skin
     }
 
-    func saveBackgroundImage(_ data: Data, sourceContentType: String? = nil) throws {
+    func saveBackgroundImage(_ data: Data, sourceContentType: String? = nil, requestID: UUID? = nil) throws {
         let result: BackgroundImageNormalizer.Result
         do {
             result = try BackgroundImageNormalizer.normalizeWithReport(data, sourceContentType: sourceContentType) {
                 stage, succeeded, metadata, error, duration in
                 recordBackgroundDiagnostic(stage: stage, succeeded: succeeded, sourceContentType: sourceContentType,
-                                           metadata: metadata, error: error, durationMilliseconds: duration)
+                                           metadata: metadata, error: error, durationMilliseconds: duration,
+                                           requestID: requestID)
             }
         } catch {
             if backgroundDiagnostics.last?.succeeded != false {
                 recordBackgroundDiagnostic(stage: (error as? BackgroundImageNormalizer.Failure)?.stage ?? "decodeImage",
                                            succeeded: false, sourceContentType: sourceContentType,
-                                           metadata: nil, error: error)
+                                           metadata: nil, error: error, requestID: requestID)
             }
             throw error
         }
@@ -138,31 +139,31 @@ final class AppAppearancePreference: ObservableObject {
             try result.data.write(to: destination, options: .atomic)
         } catch {
             recordBackgroundDiagnostic(stage: "persist", succeeded: false, sourceContentType: sourceContentType,
-                                       metadata: result.metadata, error: error)
+                                       metadata: result.metadata, error: error, requestID: requestID)
             throw error
         }
         recordBackgroundDiagnostic(stage: "reload", succeeded: true, sourceContentType: sourceContentType,
-                                   metadata: result.metadata)
+                                   metadata: result.metadata, requestID: requestID)
         guard UIImage(contentsOfFile: destination.path) != nil else {
             let error = BackgroundImageNormalizer.Failure.decode("Managed background could not be decoded for display")
             recordBackgroundDiagnostic(stage: "display", succeeded: false, sourceContentType: sourceContentType,
-                                       metadata: result.metadata, error: error)
+                                       metadata: result.metadata, error: error, requestID: requestID)
             throw error
         }
         defaults.set(destination.path, forKey: backgroundKey)
         backgroundImageURL = destination
         recordBackgroundDiagnostic(stage: "display", succeeded: true, sourceContentType: sourceContentType,
-                                   metadata: result.metadata)
+                                   metadata: result.metadata, requestID: requestID)
         recordBackgroundDiagnostic(stage: "persist", succeeded: true, sourceContentType: sourceContentType,
-                                   metadata: result.metadata)
+                                   metadata: result.metadata, requestID: requestID)
     }
 
     func recordBackgroundDiagnostic(stage: String, succeeded: Bool, sourceContentType: String? = nil,
                                     metadata: BackgroundImageMetadata? = nil, error: Error? = nil,
-                                    durationMilliseconds: Int? = nil) {
+                                    durationMilliseconds: Int? = nil, requestID: UUID? = nil) {
         let nsError = error as NSError?
         let record = BackgroundImportDiagnostic(
-            stage: stage, succeeded: succeeded, durationMilliseconds: durationMilliseconds,
+            stage: stage, succeeded: succeeded, durationMilliseconds: durationMilliseconds, requestID: requestID,
             contentType: sourceContentType ?? metadata?.contentType,
             fileExtension: (sourceContentType.flatMap(UTType.init)?.preferredFilenameExtension) ?? metadata?.fileExtension,
             mimeType: sourceContentType.flatMap(UTType.init)?.preferredMIMEType ?? metadata?.mimeType,
@@ -216,6 +217,7 @@ struct BackgroundImportDiagnostic {
     let stage: String
     let succeeded: Bool
     let durationMilliseconds: Int?
+    let requestID: UUID?
     let contentType: String?
     let fileExtension: String?
     let mimeType: String?
@@ -236,6 +238,7 @@ struct BackgroundImportDiagnostic {
 
     var exportLine: String {
         var values = ["\(stage): \(succeeded ? "success" : "failed")"]
+        if let requestID { values.append("request=\(requestID.uuidString.prefix(8))") }
         if let durationMilliseconds { values.append("\(durationMilliseconds) ms") }
         if let contentType { values.append("type=\(contentType)") }
         if let fileExtension { values.append("ext=\(fileExtension)") }

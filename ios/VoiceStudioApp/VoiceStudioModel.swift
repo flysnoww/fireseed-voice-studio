@@ -58,6 +58,8 @@ final class VoiceStudioModel: ObservableObject {
     @Published private(set) var preparedVoiceID: UUID?
     @Published private(set) var preparationVoiceID: UUID?
     @Published private(set) var generatedAudio: AudioAsset?
+    @Published private(set) var savedGeneratedAudio: [AudioAsset] = []
+    @Published private(set) var generatedAudioPage = 0
     @Published private(set) var currentReference: CurrentReferenceAudio?
     @Published private(set) var savedVoices: [VoiceAsset] = []
     @Published private(set) var mostRecentlySavedVoiceID: UUID?
@@ -80,6 +82,8 @@ final class VoiceStudioModel: ObservableObject {
         SavedVoiceLibrary.page(filteredSavedVoices, index: savedVoicePage)
     }
     var savedVoicePageCount: Int { SavedVoiceLibrary.pageCount(for: filteredSavedVoices.count) }
+    var pagedGeneratedAudio: [AudioAsset] { GeneratedAudioLibrary.page(savedGeneratedAudio, index: generatedAudioPage) }
+    var generatedAudioPageCount: Int { GeneratedAudioLibrary.pageCount(for: savedGeneratedAudio.count) }
 
     func preparationState(for selection: VoiceSelection) -> VoicePreparationState {
         guard let id = selection.savedVoiceID else { return .none }
@@ -128,6 +132,7 @@ final class VoiceStudioModel: ObservableObject {
         self.importer = audioImporter ?? AudioImporter(fileStore: fileStore)
         self.player = AudioPlayer(fileStore: fileStore)
         self.savedVoices = SavedVoiceLibrary.voices(fileStore.savedVoices(), matching: .time)
+        self.savedGeneratedAudio = GeneratedAudioLibrary.assets(fileStore.savedAudioAssets())
         self.player.stateHandler = { [weak self] playing in self?.isPlaying = playing }
         activeRecorder.interruptionHandler = { [weak self] result in
             guard let self else { return }
@@ -197,7 +202,7 @@ final class VoiceStudioModel: ObservableObject {
     func capabilities(for selection: VoiceSelection) -> CapabilityProfile {
         let providerID: SpeechProviderID
         switch selection {
-        case .systemDefault: providerID = .system
+        case .systemDefault, .systemVoice: providerID = .system
         case .tinyLocal: providerID = .tinyLocal
         case .saved: providerID = .local
         }
@@ -368,6 +373,9 @@ final class VoiceStudioModel: ObservableObject {
             case .systemDefault:
                 $0.provider = "System"; $0.rendererID = nil; $0.backend = "System"; $0.voice = "system"
                 $0.rendererLoadDurationMilliseconds = nil; $0.rendererGenerationDurationMilliseconds = nil
+            case .systemVoice(let identifier):
+                $0.provider = "System"; $0.rendererID = nil; $0.backend = "System"; $0.voice = "system · \(identifier)"
+                $0.rendererLoadDurationMilliseconds = nil; $0.rendererGenerationDurationMilliseconds = nil
             case .tinyLocal:
                 $0.provider = "Tiny local"; $0.rendererID = "KittenTTS-Nano-int8"
                 $0.backend = "ONNX Runtime · CPU"; $0.voice = "built-in"
@@ -473,8 +481,15 @@ final class VoiceStudioModel: ObservableObject {
                 activeStage = .output
                 activeStageStartedAt = outputStarted
                 diagnostics.start(.output)
+                let source: GeneratedAudioVoiceSource = switch selection {
+                case .saved(let id): .savedVoice(id)
+                case .systemDefault: .systemVoice(nil)
+                case .systemVoice(let id): .systemVoice(id)
+                case .tinyLocal: .tinyLocalVoice("tiny-local")
+                }
                 let asset = try audioFileStore.registerGeneratedAudio(from: shapedURL, duration: duration,
-                                                                     sourceVoiceID: voice?.id, text: text)
+                                                                     sourceVoiceID: voice?.id, sourceVoice: source,
+                                                                     language: language, text: text)
                 try audioLifecycle.cache(asset, as: .generated)
                 generatedAudio = asset
                 diagnostics.finish(.output, startedAt: outputStarted)
@@ -525,15 +540,23 @@ final class VoiceStudioModel: ObservableObject {
         play(generatedAudio)
     }
 
+    func playAudioAsset(_ asset: AudioAsset) { play(asset) }
+
+    func managedURL(for asset: AudioAsset) -> URL? { try? audioFileStore.managedURL(for: asset) }
+
     func saveGeneratedAudio() {
         guard let generatedAudio, generatedAudio.persistenceState == .temporary else { return }
         do {
             self.generatedAudio = try audioLifecycle.save(id: generatedAudio.id, from: .generated)
-            statusMessage = "Audio saved."
+            savedGeneratedAudio = GeneratedAudioLibrary.assets(audioFileStore.savedAudioAssets())
+            generatedAudioPage = 0
+            statusMessage = "Audio saved to Generation History."
         } catch {
             statusMessage = "Could not save audio. Please try again."
         }
     }
+
+    func shareURL(for asset: AudioAsset) -> URL? { managedURL(for: asset) }
 
     func stopPlayback() {
         player.stop()
@@ -580,6 +603,55 @@ final class VoiceStudioModel: ObservableObject {
         } catch {
             statusMessage = "Could not delete voice. Please try again."
         }
+    }
+
+    func renameSavedVoice(id: UUID, name: String) {
+        do {
+            let updated = try audioFileStore.renameVoice(id: id, name: name)
+            savedVoices = SavedVoiceLibrary.voices(savedVoices.map { $0.id == id ? updated : $0 }, matching: .time)
+        } catch { statusMessage = "Could not update voice. Please try again." }
+    }
+
+    func setSavedVoiceFavorite(id: UUID, isFavorite: Bool) {
+        do {
+            let updated = try audioFileStore.setVoiceFavorite(id: id, isFavorite: isFavorite)
+            savedVoices = SavedVoiceLibrary.voices(savedVoices.map { $0.id == id ? updated : $0 }, matching: .time)
+        } catch { statusMessage = "Could not update voice. Please try again." }
+    }
+
+    func setGeneratedAudioPage(_ page: Int) {
+        generatedAudioPage = GeneratedAudioLibrary.validPage(page, count: savedGeneratedAudio.count)
+    }
+
+    func renameGeneratedAudio(id: UUID, name: String) {
+        do {
+            let updated = try audioFileStore.updateSavedAudio(id: id, displayName: name)
+            refreshGeneratedAudio(updated)
+        } catch { statusMessage = "Could not update audio. Please try again." }
+    }
+
+    func setGeneratedAudioFavorite(id: UUID, isFavorite: Bool) {
+        do {
+            let updated = try audioFileStore.updateSavedAudio(id: id, isFavorite: isFavorite)
+            refreshGeneratedAudio(updated)
+        } catch { statusMessage = "Could not update audio. Please try again." }
+    }
+
+    func deleteGeneratedAudio(id: UUID) {
+        do {
+            try audioFileStore.deleteSavedAudio(id: id)
+            savedGeneratedAudio = GeneratedAudioLibrary.assets(audioFileStore.savedAudioAssets())
+            if generatedAudio?.id == id { generatedAudio = nil }
+            generatedAudioPage = GeneratedAudioLibrary.validPage(generatedAudioPage, count: savedGeneratedAudio.count)
+            statusMessage = "Audio deleted."
+        } catch VoiceStudioError.assetIsReferenced {
+            statusMessage = "This audio is still used by a saved voice."
+        } catch { statusMessage = "Could not delete audio. Please try again." }
+    }
+
+    private func refreshGeneratedAudio(_ updated: AudioAsset) {
+        savedGeneratedAudio = GeneratedAudioLibrary.assets(savedGeneratedAudio.map { $0.id == updated.id ? updated : $0 })
+        if generatedAudio?.id == updated.id { generatedAudio = updated }
     }
 
     func report(_ error: Error) { statusMessage = error.localizedDescription }

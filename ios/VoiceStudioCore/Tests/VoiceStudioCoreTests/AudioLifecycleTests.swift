@@ -76,6 +76,67 @@ final class AudioLifecycleTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: try relaunched.managedURL(for: saved).path))
     }
 
+    func testGeneratedAudioMetadataCanBeRenamedFavoritedSharedAndDeletedSafely() throws {
+        let source = temporaryRoot.appendingPathComponent("renderer-output.wav")
+        try Data([0x10, 0x20, 0x30]).write(to: source)
+        let generated = try store.registerGeneratedAudio(from: source, duration: 2.5,
+                                                        sourceVoice: .systemVoice("voice.id"),
+                                                        language: "en-US", text: "A generated line")
+        let lifecycle = AudioLifecycle(fileStore: store)
+        try lifecycle.cache(generated, as: .generated)
+        let saved = try XCTUnwrap(lifecycle.save(id: generated.id, from: .generated))
+        let shareURL = try store.managedURL(for: saved)
+        XCTAssertEqual(try Data(contentsOf: shareURL), Data([0x10, 0x20, 0x30]))
+
+        let renamed = try store.updateSavedAudio(id: saved.id, displayName: "Greeting", isFavorite: true)
+        XCTAssertEqual(renamed.displayName, "Greeting")
+        XCTAssertTrue(renamed.isFavorite)
+        let restored = try AudioFileStore(rootDirectory: temporaryRoot).savedAudioAssets()
+        XCTAssertEqual(restored, [renamed])
+        XCTAssertEqual(restored.first?.sourceVoice, .systemVoice("voice.id"))
+        XCTAssertEqual(restored.first?.language, "en-US")
+
+        try store.deleteSavedAudio(id: saved.id)
+        XCTAssertTrue(store.savedAudioAssets().isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: shareURL.path))
+    }
+
+    func testGeneratedAudioDeletionPreservesFileReferencedBySavedVoice() throws {
+        let source = temporaryRoot.appendingPathComponent("renderer-output.wav")
+        try Data([0x10, 0x20, 0x30]).write(to: source)
+        let generated = try store.registerGeneratedAudio(from: source, duration: 2.5,
+                                                        sourceVoice: .tinyLocalVoice("tiny-local"), text: "Hello")
+        let lifecycle = AudioLifecycle(fileStore: store)
+        try lifecycle.cache(generated, as: .generated)
+        let savedAudio = try XCTUnwrap(lifecycle.save(id: generated.id, from: .generated))
+        _ = try store.saveVoice(VoiceAsset(name: "Uses audio", sourceType: .record, referenceAudio: savedAudio))
+        let audioURL = try store.managedURL(for: savedAudio)
+
+        XCTAssertThrowsError(try store.deleteSavedAudio(id: savedAudio.id)) { error in
+            XCTAssertEqual(error as? VoiceStudioError, .assetIsReferenced)
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: audioURL.path))
+    }
+
+    func testGeneratedAudioLibrarySortsNewestFirstAndPagesTenItems() throws {
+        var assets: [AudioAsset] = []
+        for index in 0..<12 {
+            let source = temporaryRoot.appendingPathComponent("generated-\(index).wav")
+            try Data([UInt8(index + 1)]).write(to: source)
+            assets.append(try store.registerGeneratedAudio(from: source, duration: 1,
+                                                           text: "Clip \(index)"))
+        }
+        let saved = try assets.map { asset -> AudioAsset in
+            try AudioLifecycle(fileStore: store).cache(asset, as: .generated)
+            return try XCTUnwrap(AudioLifecycle(fileStore: store).save(id: asset.id, from: .generated))
+        }
+        let ordered = saved.sorted { $0.createdAt > $1.createdAt }
+        XCTAssertEqual(GeneratedAudioLibrary.pageSize, 10)
+        XCTAssertEqual(GeneratedAudioLibrary.assets(saved).first?.id, ordered.first?.id)
+        XCTAssertEqual(GeneratedAudioLibrary.page(GeneratedAudioLibrary.assets(saved), index: 0).count, 10)
+        XCTAssertEqual(GeneratedAudioLibrary.page(GeneratedAudioLibrary.assets(saved), index: 1).count, 2)
+    }
+
     func testRemovingRendererPackDoesNotAffectSavedVoiceOrReference() throws {
         let saved = try store.saveVoice(VoiceAsset(name: "Independent voice", sourceType: .record,
                                                    referenceAudio: makeStagedAsset()))

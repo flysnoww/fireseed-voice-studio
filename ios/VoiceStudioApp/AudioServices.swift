@@ -339,9 +339,11 @@ actor AppleSystemSpeechProvider: SpeechProvider {
     nonisolated let id: SpeechProviderID = .system
     nonisolated let capabilities: CapabilityProfile
     private let availableVoiceTags: Set<String>
+    private let voicesByIdentifier: [String: AVSpeechSynthesisVoice]
 
     init(voices: [AVSpeechSynthesisVoice] = AVSpeechSynthesisVoice.speechVoices()) {
         let tags = Set(voices.map(\.language))
+        voicesByIdentifier = Dictionary(uniqueKeysWithValues: voices.map { ($0.identifier, $0) })
         let groups = Dictionary(grouping: tags) { $0.split(separator: "-").first.map(String.init) ?? $0 }
         availableVoiceTags = tags
         capabilities = CapabilityProfile(
@@ -352,11 +354,20 @@ actor AppleSystemSpeechProvider: SpeechProvider {
     }
 
     func generate(_ request: VoiceRequest, voice: VoiceAsset?, referenceAudioURL: URL?) async -> SpeechResult {
-        guard case .systemDefault = request.voice else { return .unsupported(.voiceCloning) }
         guard request.renderMode == .generate else { return .unsupported(.speechGeneration) }
-        let tag = request.accent ?? request.language
-        guard let tag, availableVoiceTags.contains(tag), let speechVoice = AVSpeechSynthesisVoice(language: tag) else {
-            return .unsupported(.accentSelection)
+        let speechVoice: AVSpeechSynthesisVoice
+        switch request.voice {
+        case .systemDefault:
+            let tag = request.accent ?? request.language
+            guard let tag, availableVoiceTags.contains(tag), let resolved = AVSpeechSynthesisVoice(language: tag) else {
+                return .unsupported(.accentSelection)
+            }
+            speechVoice = resolved
+        case .systemVoice(let identifier):
+            guard let resolved = voicesByIdentifier[identifier] else { return .unsupported(.speechGeneration) }
+            speechVoice = resolved
+        default:
+            return .unsupported(.voiceCloning)
         }
         let utterance = AVSpeechUtterance(string: request.text)
         utterance.voice = speechVoice

@@ -60,14 +60,16 @@ public final class AudioFileStore {
 
     /// Copies renderer output into managed staging so it follows the generated-audio cache policy.
     public func registerGeneratedAudio(from source: URL, duration: TimeInterval,
-                                       sourceVoiceID: UUID? = nil, text: String) throws -> AudioAsset {
+                                       sourceVoiceID: UUID? = nil, sourceVoice: GeneratedAudioVoiceSource? = nil,
+                                       language: String? = nil, text: String) throws -> AudioAsset {
         try validateFile(at: source, duration: duration)
         let id = UUID()
         let fileName = "\(id.uuidString.lowercased()).wav"
         let destination = stagingDirectory.appendingPathComponent(fileName)
         try fileManager.copyItem(at: source, to: destination)
         return AudioAsset(id: id, fileName: fileName, duration: duration,
-                          sourceVoiceID: sourceVoiceID, text: text)
+                          sourceVoiceID: sourceVoiceID, sourceVoice: sourceVoice,
+                          language: language, text: text)
     }
 
     public func managedURL(for asset: AudioAsset) throws -> URL {
@@ -98,7 +100,9 @@ public final class AudioFileStore {
         try fileManager.copyItem(at: source, to: destination)
         let saved = AudioAsset(id: asset.id, fileName: asset.fileName, duration: asset.duration,
                                createdAt: asset.createdAt, sourceVoiceID: asset.sourceVoiceID,
-                               text: asset.text, persistenceState: .persistent)
+                               sourceVoice: asset.sourceVoice, language: asset.language,
+                               text: asset.text, displayName: asset.displayName,
+                               isFavorite: asset.isFavorite, persistenceState: .persistent)
         try write(saved, named: "audio-\(saved.id.uuidString.lowercased()).json")
         try fileManager.removeItem(at: source)
         return saved
@@ -116,7 +120,7 @@ public final class AudioFileStore {
         let saved = VoiceAsset(id: voice.id, name: voice.name, sourceType: voice.sourceType,
                                referenceAudio: reference, languageHint: voice.languageHint,
                                defaultAccent: voice.defaultAccent, defaultAttributes: voice.defaultAttributes,
-                               createdAt: voice.createdAt, updatedAt: Date())
+                               createdAt: voice.createdAt, updatedAt: Date(), isFavorite: voice.isFavorite)
         try write(saved, named: "voice-\(saved.id.uuidString.lowercased()).json")
         return saved
     }
@@ -124,6 +128,61 @@ public final class AudioFileStore {
     public func savedAudioAssets() -> [AudioAsset] {
         loadRecords(AudioAsset.self, prefix: "audio-").filter {
             $0.persistenceState == .persistent && (try? managedURL(for: $0)) != nil
+        }
+    }
+
+    public func renameVoice(id: UUID, name: String) throws -> VoiceAsset {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let voice = savedVoices().first(where: { $0.id == id }) else {
+            throw VoiceStudioError.missingManagedAudio
+        }
+        let updated = voice.updating(name: trimmed)
+        try write(updated, named: "voice-\(id.uuidString.lowercased()).json")
+        return updated
+    }
+
+    public func setVoiceFavorite(id: UUID, isFavorite: Bool) throws -> VoiceAsset {
+        guard let voice = savedVoices().first(where: { $0.id == id }) else {
+            throw VoiceStudioError.missingManagedAudio
+        }
+        let updated = voice.updating(isFavorite: isFavorite)
+        try write(updated, named: "voice-\(id.uuidString.lowercased()).json")
+        return updated
+    }
+
+    public func updateSavedAudio(id: UUID, displayName: String? = nil,
+                                 isFavorite: Bool? = nil) throws -> AudioAsset {
+        guard let asset = savedAudioAssets().first(where: { $0.id == id }) else {
+            throw VoiceStudioError.missingManagedAudio
+        }
+        let name = displayName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard name == nil || name?.isEmpty == false else { throw VoiceStudioError.invalidAudioFile }
+        let updated = AudioAsset(id: asset.id, fileName: asset.fileName, duration: asset.duration,
+                                createdAt: asset.createdAt, sourceVoiceID: asset.sourceVoiceID,
+                                sourceVoice: asset.sourceVoice, language: asset.language, text: asset.text,
+                                displayName: name ?? asset.displayName,
+                                isFavorite: isFavorite ?? asset.isFavorite,
+                                persistenceState: .persistent)
+        try write(updated, named: "audio-\(id.uuidString.lowercased()).json")
+        return updated
+    }
+
+    /// Refuses to delete audio if any saved voice still references its durable file.
+    public func deleteSavedAudio(id: UUID) throws {
+        guard let asset = savedAudioAssets().first(where: { $0.id == id }) else {
+            throw VoiceStudioError.missingManagedAudio
+        }
+        let referenced = savedVoices().contains { $0.referenceAudio.id == id }
+        guard !referenced else { throw VoiceStudioError.assetIsReferenced }
+        let metadataURL = metadataDirectory.appendingPathComponent("audio-\(id.uuidString.lowercased()).json")
+        let audioURL = try managedURL(for: asset)
+        let metadata = try Data(contentsOf: metadataURL)
+        try fileManager.removeItem(at: metadataURL)
+        do {
+            try fileManager.removeItem(at: audioURL)
+        } catch {
+            try? metadata.write(to: metadataURL, options: .atomic)
+            throw error
         }
     }
 
@@ -139,7 +198,8 @@ public final class AudioFileStore {
             return VoiceAsset(id: voice.id, name: voice.name, sourceType: voice.sourceType,
                               referenceAudio: reference, languageHint: voice.languageHint,
                               defaultAccent: voice.defaultAccent, defaultAttributes: voice.defaultAttributes,
-                              createdAt: voice.createdAt, updatedAt: voice.updatedAt)
+                              createdAt: voice.createdAt, updatedAt: voice.updatedAt,
+                              isFavorite: voice.isFavorite)
         }
     }
 

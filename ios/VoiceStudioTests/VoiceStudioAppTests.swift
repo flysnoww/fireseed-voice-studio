@@ -146,6 +146,50 @@ final class VoiceStudioAppTests: XCTestCase {
         XCTAssertFalse(report.localizedCaseInsensitiveContains("gps"))
     }
 
+    func testBackgroundImportRequestGateRejectsStaleAndRepeatedSelections() {
+        var gate = BackgroundImportRequestGate()
+        for _ in 0..<5 {
+            let current = gate.begin()
+            XCTAssertTrue(gate.accepts(current))
+            XCTAssertTrue(gate.finish(current))
+            XCTAssertFalse(gate.accepts(current))
+        }
+
+        let requestA = gate.begin()
+        let requestB = gate.begin()
+        XCTAssertFalse(gate.accepts(requestA))
+        XCTAssertTrue(gate.accepts(requestB))
+        XCTAssertFalse(gate.finish(requestA))
+        XCTAssertTrue(gate.accepts(requestB))
+        XCTAssertTrue(gate.finish(requestB))
+
+        let aAgain = gate.begin()
+        XCTAssertNotEqual(aAgain, requestA)
+        XCTAssertTrue(gate.accepts(aAgain))
+        gate.cancel()
+        XCTAssertFalse(gate.accepts(aAgain))
+        XCTAssertFalse(gate.finish(aAgain))
+    }
+
+    @MainActor
+    func testRepeatedBackgroundReplacementIsAtomicAndDiagnosticsIdentifyRequest() throws {
+        let defaults = makeLanguageDefaults()
+        let folder = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let appearance = AppAppearancePreference(defaults: defaults, skinKey: UUID().uuidString,
+                                                 backgroundKey: UUID().uuidString,
+                                                 appearanceDirectory: folder)
+        for _ in 0..<5 {
+            let requestID = UUID()
+            try appearance.saveBackgroundImage(makeBackgroundImage(orientation: 1, color: .systemBlue),
+                                               sourceContentType: UTType.jpeg.identifier, requestID: requestID)
+            let url = try XCTUnwrap(appearance.backgroundImageURL)
+            XCTAssertNotNil(UIImage(contentsOfFile: url.path))
+            XCTAssertTrue(appearance.backgroundDiagnosticsText.contains(requestID.uuidString.prefix(8)))
+            XCTAssertFalse(appearance.backgroundDiagnosticsText.contains(folder.path))
+        }
+    }
+
     @MainActor
     func testVoicePrepareBreadcrumbSurvivesRestartAndDoesNotStorePrivateContent() {
         let suite = UUID().uuidString
@@ -386,6 +430,13 @@ final class VoiceStudioAppTests: XCTestCase {
         XCTAssertEqual(model.diagnostics.snapshot.provider, "Tiny local")
         XCTAssertEqual(model.diagnostics.snapshot.generation, "success")
         XCTAssertNotNil(model.diagnostics.snapshot.realTimeFactor)
+        XCTAssertTrue(model.savedGeneratedAudio.isEmpty)
+        XCTAssertNotNil(model.shareURL(for: generated))
+        model.saveGeneratedAudio()
+        XCTAssertEqual(model.savedGeneratedAudio.count, 1)
+        XCTAssertEqual(model.savedGeneratedAudio.first?.id, generated.id)
+        XCTAssertEqual(model.savedGeneratedAudio.first?.sourceVoice, .tinyLocalVoice("tiny-local"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: try XCTUnwrap(model.shareURL(for: generated)).path))
     }
 
     @MainActor
@@ -513,11 +564,14 @@ final class VoiceStudioAppTests: XCTestCase {
         await model.installLocalSpeechResource(from: root)
 
         await model.prepareVoice(.systemDefault, language: "en")
+        let systemIdentifier = AVSpeechSynthesisVoice.speechVoices().first?.identifier ?? "system.test"
+        await model.prepareVoice(.systemVoice(systemIdentifier), language: "en")
         await model.prepareVoice(.tinyLocal, language: "en")
 
         let prepareCount = await local.prepareCallCount()
         XCTAssertEqual(prepareCount, 0)
         XCTAssertEqual(model.preparationState(for: .systemDefault), .none)
+        XCTAssertEqual(model.preparationState(for: .systemVoice(systemIdentifier)), .none)
         XCTAssertEqual(model.preparationState(for: .tinyLocal), .none)
         XCTAssertTrue(FileManager.default.fileExists(atPath: try store.managedURL(for: saved.referenceAudio).path))
     }
