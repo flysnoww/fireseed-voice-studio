@@ -520,14 +520,17 @@ struct AudioTimePitchProcessor {
             let renderBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4096)!
             var renderedFrames: AVAudioFramePosition = 0
             var sourceFinished = false
+            let sourceRendered = DispatchSemaphore(value: 0)
             engine.prepare()
             try engine.start()
-            _ = engine.inputNode
-            player.scheduleFile(input, at: nil, completionCallbackType: .dataRendered) { _ in }
+            player.scheduleFile(input, at: nil, completionCallbackType: .dataRendered) { _ in
+                sourceRendered.signal()
+            }
             player.play()
             var attempts = 0
             while attempts < 100_000 {
                 attempts += 1
+                if sourceRendered.wait(timeout: .now()) == .success { sourceFinished = true }
                 let framesToRender: AVAudioFrameCount = 4096
                 switch try engine.renderOffline(framesToRender, to: renderBuffer) {
                 case .success:
@@ -541,10 +544,11 @@ struct AudioTimePitchProcessor {
                         return outputURL
                     }
                 case .insufficientDataFromInputNode:
-                    sourceFinished = true
-                    continue
+                    if sourceFinished { continue }
                 case .cannotDoInCurrentContext:
                     continue
+                case .error:
+                    throw VoiceStudioError.invalidAudioFile
                 @unknown default:
                     throw VoiceStudioError.invalidAudioFile
                 }

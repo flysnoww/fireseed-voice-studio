@@ -441,13 +441,15 @@ final class VoiceStudioAppTests: XCTestCase {
     }
 
     @MainActor
-    func testShapingAndExpressionStayUnavailableUntilProviderSupportsThem() throws {
+    func testSystemShapingCapabilitiesMatchSharedDSPAndExpressionRemainsUnsupported() throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let model = try VoiceStudioModel(rootDirectory: root)
         let capabilities = model.capabilities(for: .systemDefault)
 
-        XCTAssertTrue(capabilities.shaping.isEmpty)
+        XCTAssertEqual(capabilities.shaping[.brightness], .supported)
+        XCTAssertEqual(capabilities.shaping[.clarity], .supported)
+        XCTAssertEqual(capabilities.shaping[.softness], .supported)
         XCTAssertTrue(capabilities.expressions.isEmpty)
         XCTAssertEqual(capabilities.status(for: .speed), .supported)
         XCTAssertEqual(capabilities.status(for: .pitch), .supported)
@@ -654,7 +656,9 @@ final class VoiceStudioAppTests: XCTestCase {
         XCTAssertTrue(system.expressions.isEmpty)
 
         let saved = model.capabilities(for: .saved(UUID()))
-        XCTAssertTrue(saved.shaping.isEmpty)
+        XCTAssertEqual(saved.shaping[.brightness], .supported)
+        XCTAssertEqual(saved.shaping[.clarity], .supported)
+        XCTAssertEqual(saved.shaping[.softness], .supported)
     }
 
     func testSharedDSPParameterBoundsRejectUnsupportedAndNonFiniteValues() {
