@@ -432,17 +432,7 @@ struct VoiceStudioHome: View {
         let state = model.preparationState(for: generationVoice)
         let converterReady = generationVoice.savedVoiceID == model.preparedOpenVoiceID &&
             model.hasPreparedOpenVoiceReference
-        let buttonTitle: LocalizedStringKey
-        if useSystemVoiceConverter {
-            buttonTitle = model.isPreparingOpenVoiceTarget ? "Preparing voice…" : (converterReady ? "Voice Ready" : "Prepare Voice")
-        } else {
-            buttonTitle = switch state {
-                case .none: "Confirm Voice"
-                case .preparing: "Preparing voice…"
-                case .ready: "Voice Ready"
-                case .failed: "Preparation failed · Retry"
-            }
-        }
+        let buttonTitle = prepareVoiceButtonTitle(state: state, converterReady: converterReady)
         let isReady = useSystemVoiceConverter ? converterReady : state == .ready
         let buttonTint: Color = isReady ? .green : appearance.skin.accent
         Button {
@@ -465,6 +455,18 @@ struct VoiceStudioHome: View {
         .tint(buttonTint)
         .disabled(model.isInstallingLocalSpeech || state == .preparing || model.isPreparingOpenVoiceTarget || model.isGeneratingSpeech)
         .accessibilityIdentifier("prepareVoiceButton")
+    }
+
+    private func prepareVoiceButtonTitle(state: VoicePreparationState, converterReady: Bool) -> LocalizedStringKey {
+        if useSystemVoiceConverter {
+            return model.isPreparingOpenVoiceTarget ? "Preparing voice…" : (converterReady ? "Voice Ready" : "Prepare Voice")
+        }
+        switch state {
+        case .none: return "Confirm Voice"
+        case .preparing: return "Preparing voice…"
+        case .ready: return "Voice Ready"
+        case .failed: return "Preparation failed · Retry"
+        }
     }
 
     private var textCard: some View {
