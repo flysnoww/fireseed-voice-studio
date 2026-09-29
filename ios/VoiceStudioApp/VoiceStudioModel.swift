@@ -54,6 +54,12 @@ final class VoiceStudioModel: ObservableObject {
     @Published private(set) var isLocalSpeechReady = false
     @Published private(set) var isTinyLocalModelReady = false
     @Published private(set) var isDeletingTinyLocalModel = false
+    @Published private(set) var isOpenVoicePackReady = false
+    @Published private(set) var hasPreparedOpenVoiceReference = false
+    @Published private(set) var isInstallingOpenVoicePack = false
+    @Published private(set) var isDeletingOpenVoicePack = false
+    @Published private(set) var isPreparingOpenVoiceTarget = false
+    @Published private(set) var preparedOpenVoiceID: UUID?
     @Published private(set) var voicePreparationState: VoicePreparationState = .none
     @Published private(set) var preparedVoiceID: UUID?
     @Published private(set) var preparationVoiceID: UUID?
@@ -97,6 +103,8 @@ final class VoiceStudioModel: ObservableObject {
     private let localPackProvider: any InstallableSpeechProvider
     private let voicePreparingProvider: (any VoicePreparingSpeechProvider)?
     private let timePitchProcessor = AudioTimePitchProcessor()
+    private let openVoicePackStore: OpenVoicePackStore
+    private let openVoiceConverter: any VoiceConverterProvider = OpenVoiceCoreMLConverter()
 
     private let recorder: any AudioRecording
     private let importer: any AudioImporting
@@ -119,6 +127,7 @@ final class VoiceStudioModel: ObservableObject {
         let fileStore = try AudioFileStore(rootDirectory: storeRoot)
         self.audioFileStore = fileStore
         self.audioLifecycle = AudioLifecycle(fileStore: fileStore)
+        self.openVoicePackStore = OpenVoicePackStore(rootDirectory: storeRoot.appendingPathComponent("RendererPacks", isDirectory: true))
         let diagnostics = suppliedDiagnostics ?? VoiceStudioDiagnostics()
         let assembly = providerAssembly ?? SpeechProviderAssembly.production(diagnostics: diagnostics)
         self.diagnostics = diagnostics
@@ -199,33 +208,63 @@ final class VoiceStudioModel: ObservableObject {
 
     func playVoiceReference(_ voice: VoiceAsset) { play(voice.referenceAudio) }
 
-    func capabilities(for selection: VoiceSelection) -> CapabilityProfile {
-        let providerID: SpeechProviderID
-        switch selection {
-        case .systemDefault, .systemVoice: providerID = .system
-        case .tinyLocal: providerID = .tinyLocal
-        case .saved: providerID = .local
+    func capabilities(for selection: VoiceSelection, usingVoiceConverter: Bool = false) -> CapabilityProfile {
+        if usingVoiceConverter {
+            guard selection.savedVoiceID != nil, isOpenVoicePackReady,
+                  let system = providers[.system]?.capabilities else { return CapabilityProfile() }
+            var support = system.support
+            support[.voiceConversion] = openVoiceConverter.capabilities.status(for: .voiceConversion)
+            support[.voiceCloning] = .supported
+            return CapabilityProfile(support: support, shaping: system.shaping,
+                                     expressions: system.expressions,
+                                     languages: system.languages,
+                                     accentsByLanguage: system.accentsByLanguage)
+        }
+        let providerID: SpeechProviderID = switch selection {
+        case .systemDefault, .systemVoice: .system
+        case .tinyLocal: .tinyLocal
+        case .saved: .local
         }
         guard let provider = providers[providerID] else { return CapabilityProfile() }
         var support = provider.capabilities.support
-        support[.speed] = .supported
-        support[.pitch] = .supported
-        return CapabilityProfile(support: support, shaping: provider.capabilities.shaping,
+        var shaping = provider.capabilities.shaping
+        if support[.speechGeneration] == .supported {
+            support[.speed] = .supported
+            support[.pitch] = .supported
+            shaping[.brightness] = .supported
+            shaping[.clarity] = .supported
+            shaping[.softness] = .supported
+        }
+        return CapabilityProfile(support: support, shaping: shaping,
                                  expressions: provider.capabilities.expressions,
                                  languages: provider.capabilities.languages,
                                  accentsByLanguage: provider.capabilities.accentsByLanguage)
     }
 
-    func availableLanguages(for selection: VoiceSelection) -> [String] {
-        capabilities(for: selection).languages
+    func availableLanguages(for selection: VoiceSelection, usingVoiceConverter: Bool = false) -> [String] {
+        capabilities(for: selection, usingVoiceConverter: usingVoiceConverter).languages
     }
 
-    func availableAccents(for selection: VoiceSelection, language: String?) -> [String] {
-        capabilities(for: selection).accents(for: language)
+    func availableAccents(for selection: VoiceSelection, language: String?,
+                          usingVoiceConverter: Bool = false) -> [String] {
+        capabilities(for: selection, usingVoiceConverter: usingVoiceConverter).accents(for: language)
     }
 
-    func canGenerate(text: String, voice: VoiceSelection, language: String) -> Bool {
+    func canGenerate(text: String, voice: VoiceSelection, language: String,
+                     usingVoiceConverter: Bool = false) -> Bool {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        if usingVoiceConverter {
+            guard let voiceID = voice.savedVoiceID, isOpenVoicePackReady,
+                  preparedOpenVoiceID == voiceID, hasPreparedOpenVoiceReference,
+                  let system = providers[.system]?.capabilities else { return false }
+            return SpeechProviderSelection.select(
+                voice: voice, language: language, system: system,
+                local: providers[.local]?.capabilities, localIsReady: isLocalSpeechReady,
+                tinyLocal: providers[.tinyLocal]?.capabilities,
+                tinyLocalIsReady: providers[.tinyLocal] != nil,
+                voiceConverter: openVoiceConverter.capabilities,
+                voiceConverterIsReady: true, useVoiceConverter: true) == .voiceConverter
+        }
         if let voiceID = voice.savedVoiceID, preparedVoiceID != voiceID { return false }
         return SpeechProviderSelection.select(voice: voice, language: language,
                                               system: providers[.system]?.capabilities ?? CapabilityProfile(),
@@ -245,6 +284,106 @@ final class VoiceStudioModel: ObservableObject {
     func refreshTinyLocalModelState() async {
         guard let tinyProvider = providers[.tinyLocal] as? KittenLocalSpeechProvider else { return }
         isTinyLocalModelReady = await tinyProvider.isInstalled()
+    }
+
+    func refreshOpenVoicePackState() async {
+        let packStore = openVoicePackStore
+        let filesValid = await Task.detached(priority: .utility) {
+            (try? packStore.validateInstalled()) != nil
+        }.value
+        guard filesValid else {
+            isOpenVoicePackReady = false
+            preparedOpenVoiceID = nil
+            hasPreparedOpenVoiceReference = false
+            return
+        }
+        do {
+            try await openVoiceConverter.validateModels(packDirectory: packStore.installedPackURL,
+                                                        cacheDirectory: packStore.cacheDirectory)
+            isOpenVoicePackReady = true
+        } catch {
+            isOpenVoicePackReady = false
+            preparedOpenVoiceID = nil
+            hasPreparedOpenVoiceReference = false
+        }
+    }
+
+    func installOpenVoicePack(from folder: URL) async {
+        guard !isInstallingOpenVoicePack, !isGeneratingSpeech else { return }
+        let didStartScope = folder.startAccessingSecurityScopedResource()
+        defer { if didStartScope { folder.stopAccessingSecurityScopedResource() } }
+        isInstallingOpenVoicePack = true
+        defer { isInstallingOpenVoicePack = false }
+        let packStore = openVoicePackStore
+        do {
+            try await Task.detached(priority: .userInitiated) { try packStore.install(from: folder) }.value
+            preparedOpenVoiceID = nil
+            try? FileManager.default.removeItem(at: packStore.cacheDirectory)
+            hasPreparedOpenVoiceReference = false
+            try await openVoiceConverter.validateModels(packDirectory: packStore.installedPackURL,
+                                                        cacheDirectory: packStore.cacheDirectory)
+            isOpenVoicePackReady = true
+            statusMessage = "OpenVoice pack installed and validated."
+        } catch {
+            isOpenVoicePackReady = false
+            preparedOpenVoiceID = nil
+            hasPreparedOpenVoiceReference = false
+            statusMessage = "OpenVoice pack is invalid or incompatible."
+        }
+    }
+
+    func deleteOpenVoicePack() async {
+        guard !isDeletingOpenVoicePack, !isGeneratingSpeech, !isPreparingOpenVoiceTarget else { return }
+        isDeletingOpenVoicePack = true
+        defer { isDeletingOpenVoicePack = false }
+        let packStore = openVoicePackStore
+        do {
+            try await Task.detached(priority: .userInitiated) { try packStore.deleteInstalledPack() }.value
+            isOpenVoicePackReady = false
+            preparedOpenVoiceID = nil
+            hasPreparedOpenVoiceReference = false
+            statusMessage = "OpenVoice pack and disposable speaker cache removed."
+        } catch {
+            statusMessage = "Could not remove OpenVoice pack. Please try again."
+        }
+    }
+
+    func prepareOpenVoiceTarget(_ selection: VoiceSelection) async {
+        guard !isGeneratingSpeech, !isPreparingOpenVoiceTarget else { return }
+        guard let voiceID = selection.savedVoiceID,
+              let voice = savedVoices.first(where: { $0.id == voiceID }),
+              isOpenVoicePackReady else {
+            statusMessage = "Choose a saved voice and validate the optional converter pack first."
+            return
+        }
+        if isLocalSpeechReady, let runtimeManager = localPackProvider as? any SpeechRuntimeManaging {
+            isLocalSpeechReady = false
+            await runtimeManager.unloadRuntime()
+        }
+        await prepareOpenVoiceReference(voice)
+    }
+
+    private func prepareOpenVoiceReference(_ voice: VoiceAsset) async {
+        guard isOpenVoicePackReady else { return }
+        if preparedOpenVoiceID == voice.id, hasPreparedOpenVoiceReference { return }
+        isPreparingOpenVoiceTarget = true
+        preparedOpenVoiceID = nil
+        hasPreparedOpenVoiceReference = false
+        defer { isPreparingOpenVoiceTarget = false }
+        do {
+            let referenceURL = try audioFileStore.managedURL(for: voice.referenceAudio)
+            try await openVoiceConverter.prepareReference(
+                referenceURL: referenceURL, voiceID: voice.id, referenceAudioID: voice.referenceAudio.id,
+                packDirectory: openVoicePackStore.installedPackURL,
+                cacheDirectory: openVoicePackStore.cacheDirectory)
+            preparedOpenVoiceID = voice.id
+            hasPreparedOpenVoiceReference = true
+            statusMessage = "Saved voice is ready for the experimental converter."
+        } catch {
+            preparedOpenVoiceID = nil
+            hasPreparedOpenVoiceReference = false
+            statusMessage = "Could not prepare this voice for experimental conversion."
+        }
     }
 
     func deleteTinyLocalModel() async {
@@ -356,14 +495,19 @@ final class VoiceStudioModel: ObservableObject {
     }
 
     func activateVoice(_ selection: VoiceSelection) async {
-        guard selection.savedVoiceID == nil, isLocalSpeechReady,
-              let runtimeManager = localPackProvider as? any SpeechRuntimeManaging else { return }
+        guard selection.savedVoiceID == nil else { return }
+        preparedOpenVoiceID = nil
+        hasPreparedOpenVoiceReference = false
+        let wasRuntimeLoaded = isLocalSpeechReady
         isLocalSpeechReady = false
         preparedVoiceID = nil
         preparationVoiceID = nil
         voicePreparationState = .none
         diagnostics.update { $0.runtime = "not loaded"; $0.reference = "none" }
-        await runtimeManager.unloadRuntime()
+        if wasRuntimeLoaded,
+           let runtimeManager = localPackProvider as? any SpeechRuntimeManaging {
+            await runtimeManager.unloadRuntime()
+        }
     }
 
     func updateDiagnosticContext(voice: VoiceSelection, language: String, accent: String?,
@@ -402,6 +546,108 @@ final class VoiceStudioModel: ObservableObject {
         statusMessage = "Could not load local speech. Please try again."
     }
 
+    func generateOpenVoiceSpeech(text: String, target selection: VoiceSelection,
+                                 systemSource: VoiceSelection, language: String, accent: String?,
+                                 shaping: VoiceShaping = VoiceShaping(), speed: Double = 1,
+                                 pitch: Double = 0) async {
+        guard !isGeneratingSpeech, !isPreparingOpenVoiceTarget,
+              canGenerate(text: text, voice: selection, language: language, usingVoiceConverter: true),
+              hasPreparedOpenVoiceReference,
+              systemSource == .systemDefault || isSystemVoiceSelection(systemSource),
+              AudioTimePitchProcessor.accepts(speed: speed, pitch: pitch, shaping: shaping),
+              let voiceID = selection.savedVoiceID,
+              let targetVoice = savedVoices.first(where: { $0.id == voiceID }),
+              let systemProvider = providers[.system] else { return }
+
+        let route = SpeechProviderSelection.select(
+            voice: selection, language: language, system: systemProvider.capabilities,
+            local: providers[.local]?.capabilities, localIsReady: isLocalSpeechReady,
+            tinyLocal: providers[.tinyLocal]?.capabilities,
+            tinyLocalIsReady: providers[.tinyLocal] != nil,
+            voiceConverter: openVoiceConverter.capabilities,
+            voiceConverterIsReady: isOpenVoicePackReady, useVoiceConverter: true)
+        guard route == .voiceConverter else { return }
+
+        if isLocalSpeechReady { await activateVoice(.systemDefault) }
+        isGeneratingSpeech = true
+        defer { isGeneratingSpeech = false }
+        stopPlayback()
+        diagnostics.update {
+            $0.provider = "Experimental voice converter"
+            $0.rendererID = "OpenVoice V2 Core ML"
+            $0.backend = "Core ML · CPU/GPU"
+            $0.generation = "running"
+            $0.outputFileName = nil
+            $0.outputDuration = nil
+            $0.realTimeFactor = nil
+            $0.generationDurationMilliseconds = nil
+            $0.rendererGenerationDurationMilliseconds = nil
+        }
+        let started = ProcessInfo.processInfo.systemUptime
+        diagnostics.start(.synthesis)
+        var temporaryURLs: [URL] = []
+        defer { temporaryURLs.forEach { try? FileManager.default.removeItem(at: $0) } }
+        do {
+            let systemRequest = VoiceRequest(text: text, voice: systemSource, language: language,
+                                            accent: accent, speed: speed, renderMode: .generate)
+            let speechResult = await systemProvider.generate(systemRequest, voice: nil, referenceAudioURL: nil)
+            guard case .renderedFile(let rawURL, _, _) = speechResult else {
+                throw NSError(domain: "OpenVoice.SourceSpeech", code: 1,
+                              userInfo: [NSLocalizedDescriptionKey: "System speech could not produce source audio."])
+            }
+            temporaryURLs.append(rawURL)
+            diagnostics.finish(.synthesis, startedAt: started)
+            let referenceURL = try audioFileStore.managedURL(for: targetVoice.referenceAudio)
+            let conversionStarted = ProcessInfo.processInfo.systemUptime
+            diagnostics.start(.voicePrepare)
+            let convertedURL = try await openVoiceConverter.convert(
+                sourceURL: rawURL, targetReferenceURL: referenceURL,
+                targetVoiceID: targetVoice.id, targetReferenceID: targetVoice.referenceAudio.id,
+                packDirectory: openVoicePackStore.installedPackURL,
+                cacheDirectory: openVoicePackStore.cacheDirectory)
+            temporaryURLs.append(convertedURL)
+            let conversionMilliseconds = max(0, Int((ProcessInfo.processInfo.systemUptime - conversionStarted) * 1000))
+            diagnostics.finish(.voicePrepare, startedAt: conversionStarted)
+            let dspStarted = ProcessInfo.processInfo.systemUptime
+            diagnostics.start(.dsp)
+            let shapedURL = try timePitchProcessor.process(convertedURL, speed: 1, pitch: pitch, shaping: shaping)
+            diagnostics.finish(.dsp, startedAt: dspStarted)
+            if shapedURL != convertedURL { temporaryURLs.append(shapedURL) }
+            let output = try AVAudioFile(forReading: shapedURL)
+            let duration = Double(output.length) / output.processingFormat.sampleRate
+            let asset = try audioFileStore.registerGeneratedAudio(from: shapedURL, duration: duration,
+                                                                  sourceVoiceID: targetVoice.id,
+                                                                  sourceVoice: .savedVoice(targetVoice.id),
+                                                                  language: language, text: text)
+            try audioLifecycle.cache(asset, as: .generated)
+            generatedAudio = asset
+            let runtimeMilliseconds = max(0, Int((ProcessInfo.processInfo.systemUptime - started) * 1000))
+            diagnostics.update {
+                $0.generation = "success"
+                $0.rendererGenerationDurationMilliseconds = conversionMilliseconds
+                $0.generationDurationMilliseconds = runtimeMilliseconds
+                $0.outputFileName = asset.fileName
+                $0.outputDuration = duration
+                $0.realTimeFactor = OpenVoiceRuntimeMetrics.realTimeFactor(
+                    elapsedMilliseconds: runtimeMilliseconds, audioDuration: duration)
+            }
+            diagnostics.finish(.output, startedAt: started)
+            statusMessage = "Speech generated."
+        } catch {
+            diagnostics.finish(.output, startedAt: started,
+                               error: NSError(domain: "OpenVoice.Pipeline", code: 1,
+                                              userInfo: [NSLocalizedDescriptionKey: "Voice conversion pipeline failed."]),
+                               friendlyError: "Experimental voice conversion failed.")
+            diagnostics.update { $0.generation = "failed" }
+            statusMessage = "Experimental voice conversion failed. Please try again."
+        }
+    }
+
+    private func isSystemVoiceSelection(_ selection: VoiceSelection) -> Bool {
+        if case .systemVoice = selection { return true }
+        return false
+    }
+
     func generateSpeech(text: String, voice selection: VoiceSelection, language: String,
                         accent: String?, shaping: VoiceShaping = VoiceShaping(),
                         expression: VoiceExpression? = nil, speed: Double = 1,
@@ -416,6 +662,10 @@ final class VoiceStudioModel: ObservableObject {
             diagnostics.update { $0.request = "invalid"; $0.generation = "idle" }
             return
         }
+        guard selection.savedVoiceID == nil else {
+            statusMessage = "Choose the system voice conversion method for this saved voice."
+            return
+        }
         guard canGenerate(text: text, voice: selection, language: language) else { return }
         let effectiveCapabilities = capabilities(for: selection)
         guard shaping.values.keys.allSatisfy({ effectiveCapabilities.shaping[$0] != nil && effectiveCapabilities.shaping[$0] != .unsupported }),
@@ -423,6 +673,10 @@ final class VoiceStudioModel: ObservableObject {
               effectiveCapabilities.status(for: .speed) == .supported,
               effectiveCapabilities.status(for: .pitch) == .supported else {
             statusMessage = "Some selected voice controls are not available."
+            return
+        }
+        guard AudioTimePitchProcessor.accepts(speed: speed, pitch: pitch, shaping: shaping) else {
+            statusMessage = "Some selected voice controls are outside the supported range."
             return
         }
         guard let providerID = SpeechProviderSelection.select(
@@ -471,7 +725,8 @@ final class VoiceStudioModel: ObservableObject {
                 activeStage = .dsp
                 activeStageStartedAt = dspStarted
                 diagnostics.start(.dsp)
-                let shapedURL = try timePitchProcessor.process(rawURL, speed: speed, pitch: pitch)
+                let shapedURL = try timePitchProcessor.process(rawURL, speed: speed, pitch: pitch,
+                                                               shaping: shaping)
                 diagnostics.finish(.dsp, startedAt: dspStarted)
                 activeStage = nil
                 defer { if shapedURL != rawURL { try? FileManager.default.removeItem(at: shapedURL) } }

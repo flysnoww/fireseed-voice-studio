@@ -177,6 +177,9 @@ public enum VoiceSelection: Codable, Equatable, Hashable, Sendable {
 }
 
 public enum VoiceShape: String, Codable, CaseIterable, Sendable {
+    case brightness, clarity, softness
+    // Legacy keys remain decodable for saved requests, but are not advertised
+    // until an implementation can support them safely.
     case bright, deep, soft, powerful, youthful, mature, thin, clear, rough
 }
 
@@ -232,6 +235,7 @@ public enum CapabilitySupport: String, Codable, Sendable {
 public enum VoiceCapability: String, Codable, CaseIterable, Sendable {
     case speechGeneration
     case voiceCloning
+    case voiceConversion
     case languageSelection
     case accentSelection
     case speed
@@ -281,13 +285,17 @@ public enum SpeechProviderID: String, Codable, Sendable {
     case system
     case tinyLocal
     case local
+    case voiceConverter
 }
 
 public enum SpeechProviderSelection {
     public static func select(voice: VoiceSelection, language: String?,
                               system: CapabilityProfile, local: CapabilityProfile?,
                               localIsReady: Bool, tinyLocal: CapabilityProfile? = nil,
-                              tinyLocalIsReady: Bool = true) -> SpeechProviderID? {
+                              tinyLocalIsReady: Bool = true,
+                              voiceConverter: CapabilityProfile? = nil,
+                              voiceConverterIsReady: Bool = false,
+                              useVoiceConverter: Bool = false) -> SpeechProviderID? {
         switch voice {
         case .systemDefault:
             guard system.status(for: .speechGeneration) == .supported,
@@ -303,12 +311,30 @@ public enum SpeechProviderSelection {
                   tinyLocal.supports(language: language) else { return nil }
             return .tinyLocal
         case .saved:
+            if useVoiceConverter {
+                guard voiceConverterIsReady, let voiceConverter,
+                      voiceConverter.status(for: .voiceConversion) == .supported,
+                      voiceConverter.supports(language: language),
+                      system.status(for: .speechGeneration) == .supported,
+                      system.supports(language: language) else { return nil }
+                return .voiceConverter
+            }
             guard localIsReady, let local,
                   local.status(for: .speechGeneration) == .supported,
                   local.status(for: .voiceCloning) == .supported,
                   local.supports(language: language) else { return nil }
             return .local
         }
+    }
+}
+
+public enum VoiceCapabilityVisibility {
+    public static func visibleShaping(in profile: CapabilityProfile) -> [VoiceShape] {
+        VoiceShape.allCases.filter { profile.shaping[$0] == .supported || profile.shaping[$0] == .approximate }
+    }
+
+    public static func visibleExpressions(in profile: CapabilityProfile) -> [VoiceExpression] {
+        VoiceExpression.allCases.filter { profile.expressions[$0] == .supported || profile.expressions[$0] == .approximate }
     }
 }
 

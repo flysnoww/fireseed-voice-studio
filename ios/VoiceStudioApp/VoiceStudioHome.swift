@@ -17,6 +17,12 @@ struct VoiceStudioHome: View {
     @State private var generationAccent: String?
     @State private var speed = 1.0
     @State private var pitch = 0.0
+    @State private var brightness = 0.0
+    @State private var clarity = 0.0
+    @State private var softness = 0.0
+    @State private var personalVoiceRefresh = 0
+    @State private var useSystemVoiceConverter = false
+    @State private var converterSourceVoiceIdentifier: String?
     @State private var voiceToDelete: VoiceAsset?
     @State private var generatedAudioToDelete: AudioAsset?
     @State private var voiceToEdit: VoiceAsset?
@@ -105,9 +111,15 @@ struct VoiceStudioHome: View {
             .onChange(of: model.savedVoices.map(\.id)) { _, _ in syncGenerationOptions(); updateDiagnosticContext() }
             .onChange(of: generationVoice) { _, _ in
                 focusedInput = nil
+                if generationVoice.savedVoiceID == nil { useSystemVoiceConverter = false }
                 syncGenerationOptions()
                 updateDiagnosticContext()
                 Task { await model.activateVoice(generationVoice) }
+            }
+            .onChange(of: useSystemVoiceConverter) { _, enabled in
+                guard enabled, generationVoice.savedVoiceID != nil else { return }
+                Task { await model.prepareOpenVoiceTarget(generationVoice) }
+                syncGenerationOptions()
             }
             .onChange(of: generationLanguage) { _, _ in focusedInput = nil; updateDiagnosticContext() }
             .onChange(of: generationAccent) { _, _ in updateDiagnosticContext() }
@@ -173,6 +185,29 @@ struct VoiceStudioHome: View {
                 .tint(model.isRecording ? .red : appearance.skin.accent)
                 .disabled(model.isRequestingPermission && !model.isRecording)
                 .accessibilityIdentifier("recordNewVoiceButton")
+            }
+            if generationVoice.savedVoiceID != nil {
+                Picker("Voice method", selection: $useSystemVoiceConverter) {
+                    Text("Quality Clone").tag(false)
+                    Text("System Voice Conversion").tag(true)
+                }
+                .disabled((!model.isOpenVoicePackReady && !useSystemVoiceConverter) ||
+                          model.isInstallingOpenVoicePack || model.isDeletingOpenVoicePack ||
+                          model.isPreparingOpenVoiceTarget || model.isGeneratingSpeech)
+                .accessibilityIdentifier("voiceRendererPicker")
+                if useSystemVoiceConverter {
+                    Picker("Source System Voice", selection: $converterSourceVoiceIdentifier) {
+                        Text("System Default").tag(Optional<String>.none)
+                        ForEach(SystemVoiceCatalog.voices(AVSpeechSynthesisVoice.speechVoices()), id: \.identifier) { voice in
+                            Text("\(voice.name) · \(languageDisplayName(voice.language))")
+                                .tag(Optional(voice.identifier))
+                        }
+                    }
+                    .accessibilityIdentifier("converterSourceVoicePicker")
+                } else if !model.isOpenVoicePackReady {
+                    Text("Install the optional voice converter pack in Settings to use this method.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
             }
             ImportAudioButton(model: model, onChoose: { focusedInput = nil }, onImported: { url in
                 let candidateName = url.deletingPathExtension().lastPathComponent
@@ -304,28 +339,48 @@ struct VoiceStudioHome: View {
                 } label: {
                     HStack { Text("System Default"); Spacer(); if generationVoice == .systemDefault { Image(systemName: "checkmark") } }
                 }
-                ForEach(AVSpeechSynthesisVoice.speechVoices(), id: \.identifier) { voice in
-                    Button {
-                        generationVoice = .systemVoice(voice.identifier)
-                        generationLanguage = voice.language
-                        generationAccent = voice.language
-                        isSystemVoicePickerPresented = false
-                    } label: {
-                        HStack {
-                            VStack(alignment: .leading) {
-                                Text(voice.name)
-                                Text(languageDisplayName(voice.language)).font(.caption).foregroundStyle(.secondary)
+                let systemVoices = SystemVoiceCatalog.voices(AVSpeechSynthesisVoice.speechVoices())
+                let personalVoices = SystemVoiceCatalog.personalVoices(systemVoices)
+                if !personalVoices.isEmpty {
+                    Section("Personal Voice") {
+                        ForEach(personalVoices, id: \.identifier, content: systemVoiceRow)
+                    }
+                } else if AVSpeechSynthesizer.personalVoiceAuthorizationStatus == .notDetermined {
+                    Section("Personal Voice") {
+                        Button("Enable Personal Voice") {
+                            AVSpeechSynthesizer.requestPersonalVoiceAuthorization { _ in
+                                Task { @MainActor in personalVoiceRefresh += 1 }
                             }
-                            Spacer()
-                            if generationVoice == .systemVoice(voice.identifier) { Image(systemName: "checkmark") }
                         }
-                    }.accessibilityIdentifier("systemVoice-\(voice.identifier)")
+                    }
+                }
+                Section("System Voices") {
+                    ForEach(SystemVoiceCatalog.nonPersonalVoices(systemVoices), id: \.identifier, content: systemVoiceRow)
                 }
             }
+            .id(personalVoiceRefresh)
             .navigationTitle("System Voices")
             .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { isSystemVoicePickerPresented = false } } }
         }
         .presentationDetents([.medium, .large])
+    }
+
+    private func systemVoiceRow(_ voice: AVSpeechSynthesisVoice) -> some View {
+        Button {
+            generationVoice = .systemVoice(voice.identifier)
+            generationLanguage = voice.language
+            generationAccent = voice.language
+            isSystemVoicePickerPresented = false
+        } label: {
+            HStack {
+                VStack(alignment: .leading) {
+                    Text(voice.name)
+                    Text(languageDisplayName(voice.language)).font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                if generationVoice == .systemVoice(voice.identifier) { Image(systemName: "checkmark") }
+            }
+        }.accessibilityIdentifier("systemVoice-\(voice.identifier)")
     }
 
     private var generatedAudioLibrary: some View {
@@ -375,24 +430,31 @@ struct VoiceStudioHome: View {
     @ViewBuilder
     private var prepareVoiceButton: some View {
         let state = model.preparationState(for: generationVoice)
-        let buttonTitle: LocalizedStringKey = switch state {
-        case .none: "Confirm Voice"
-        case .preparing: "Preparing voice…"
-        case .ready: "Voice Ready"
-        case .failed: "Preparation failed · Retry"
+        let converterReady = generationVoice.savedVoiceID == model.preparedOpenVoiceID &&
+            model.hasPreparedOpenVoiceReference
+        let buttonTitle: LocalizedStringKey
+        if useSystemVoiceConverter {
+            buttonTitle = model.isPreparingOpenVoiceTarget ? "Preparing voice…" : (converterReady ? "Voice Ready" : "Prepare Voice")
+        } else {
+            buttonTitle = switch state {
+                case .none: "Confirm Voice"
+                case .preparing: "Preparing voice…"
+                case .ready: "Voice Ready"
+                case .failed: "Preparation failed · Retry"
+            }
         }
-        let buttonTint: Color = switch state {
-        case .ready: .green
-        case .failed: .orange
-        case .none, .preparing: appearance.skin.accent
-        }
+        let isReady = useSystemVoiceConverter ? converterReady : state == .ready
+        let buttonTint: Color = isReady ? .green : appearance.skin.accent
         Button {
             focusedInput = nil
-            Task { await model.prepareVoice(generationVoice, language: generationLanguage) }
+            Task {
+                if useSystemVoiceConverter { await model.prepareOpenVoiceTarget(generationVoice) }
+                else { await model.prepareVoice(generationVoice, language: generationLanguage) }
+            }
         } label: {
             HStack {
-                if state == .preparing { ProgressView().controlSize(.small) }
-                if state == .ready { Image(systemName: "checkmark.circle.fill") }
+                if state == .preparing || model.isPreparingOpenVoiceTarget { ProgressView().controlSize(.small) }
+                if isReady { Image(systemName: "checkmark.circle.fill") }
                 Text(buttonTitle)
                 Spacer()
             }
@@ -401,7 +463,7 @@ struct VoiceStudioHome: View {
         }
         .buttonStyle(.bordered)
         .tint(buttonTint)
-        .disabled(model.isInstallingLocalSpeech || state == .preparing || model.isGeneratingSpeech)
+        .disabled(model.isInstallingLocalSpeech || state == .preparing || model.isPreparingOpenVoiceTarget || model.isGeneratingSpeech)
         .accessibilityIdentifier("prepareVoiceButton")
     }
 
@@ -419,7 +481,7 @@ struct VoiceStudioHome: View {
     }
 
     private var shapingCard: some View {
-        let capabilities = model.capabilities(for: generationVoice)
+        let capabilities = model.capabilities(for: generationVoice, usingVoiceConverter: useSystemVoiceConverter)
         return StudioCard(title: "Shaping", symbol: "slider.horizontal.3") {
             VStack(spacing: 14) {
                 if capabilities.status(for: .pitch) == .supported {
@@ -427,33 +489,49 @@ struct VoiceStudioHome: View {
                     Slider(value: $pitch, in: -1200...1200, step: 50, onEditingChanged: { _ in focusedInput = nil })
                         .accessibilityIdentifier("pitchSlider")
                 }
-                Text("Voice character controls will appear when a supported capability is available.")
-                    .font(.footnote).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
-                unavailableShapeLabels(capabilities: capabilities)
+                ForEach(VoiceCapabilityVisibility.visibleShaping(in: capabilities), id: \.self) { shape in
+                    switch shape {
+                    case .brightness:
+                        shapingControl(shape, title: "Brightness", value: $brightness, capabilities: capabilities)
+                    case .clarity:
+                        shapingControl(shape, title: "Clarity", value: $clarity, capabilities: capabilities)
+                    case .softness:
+                        shapingControl(shape, title: "Softness", value: $softness, capabilities: capabilities)
+                    default: EmptyView()
+                    }
+                }
             }
         }
     }
 
     @ViewBuilder
-    private func unavailableShapeLabels(capabilities: CapabilityProfile) -> some View {
-        let unavailable = VoiceShape.allCases.filter { capabilities.shaping[$0] == nil || capabilities.shaping[$0] == .unsupported }
-        if !unavailable.isEmpty {
-            Text("Bright · Deep · Soft · Powerful · Youthful · Mature · Thin · Clear · Rough")
-                .font(.caption).foregroundStyle(.tertiary)
-                .accessibilityLabel("Voice shaping presets unavailable")
+    private func shapingControl(_ shape: VoiceShape, title: LocalizedStringKey, value: Binding<Double>,
+                                capabilities: CapabilityProfile) -> some View {
+        if capabilities.shaping[shape] == .supported || capabilities.shaping[shape] == .approximate {
+            LabeledContent(title, value: value.wrappedValue.formatted(.number.precision(.fractionLength(1))))
+            Slider(value: value, in: -1...1, step: 0.1, onEditingChanged: { _ in focusedInput = nil })
+                .accessibilityIdentifier("shaping-\(shape.rawValue)-slider")
         }
     }
 
     private var expressionCard: some View {
-        let capabilities = model.capabilities(for: generationVoice)
+        let capabilities = model.capabilities(for: generationVoice, usingVoiceConverter: useSystemVoiceConverter)
         return StudioCard(title: "Expression", symbol: "waveform") {
-            let supported = VoiceExpression.allCases.filter { capabilities.expressions[$0] == .supported || capabilities.expressions[$0] == .approximate }
+            let supported = VoiceCapabilityVisibility.visibleExpressions(in: capabilities)
             if capabilities.status(for: .speed) == .supported {
                 LabeledContent("Pace", value: speed.formatted(.number.precision(.fractionLength(2))) + "×")
                 Slider(value: $speed, in: 0.5...2, step: 0.05, onEditingChanged: { _ in focusedInput = nil })
                     .accessibilityIdentifier("speedSlider")
             }
-            if supported.isEmpty {
+            if !supported.isEmpty {
+                Picker("Expression", selection: Binding(
+                    get: { supported[0] },
+                    set: { _ in focusedInput = nil }
+                )) {
+                    ForEach(supported, id: \.self) { expression in Text(String(describing: expression)).tag(expression) }
+                }
+                .accessibilityIdentifier("expressionPicker")
+            } else {
                 Text("Expression controls will appear when a supported capability is available.")
                     .font(.footnote).foregroundStyle(.secondary)
                 Text("Lively · Melancholic · Serious · Gentle · Excited · Calm · Angry · Whisper")
@@ -464,8 +542,9 @@ struct VoiceStudioHome: View {
     }
 
     private var languageCard: some View {
-        let languages = model.availableLanguages(for: generationVoice)
-        let accents = model.availableAccents(for: generationVoice, language: generationLanguage)
+        let languages = model.availableLanguages(for: generationVoice, usingVoiceConverter: useSystemVoiceConverter)
+        let accents = model.availableAccents(for: generationVoice, language: generationLanguage,
+                                             usingVoiceConverter: useSystemVoiceConverter)
         return StudioCard(title: "Language & Accent", symbol: "globe") {
             Picker("Language", selection: $generationLanguage) {
                 ForEach(languages, id: \.self) { language in
@@ -490,16 +569,29 @@ struct VoiceStudioHome: View {
             Button {
                 focusedInput = nil
                 Task {
-                    await model.generateSpeech(text: generationText, voice: generationVoice,
-                                               language: generationLanguage, accent: generationAccent,
-                                               speed: speed, pitch: pitch)
+                    let shaping = VoiceShaping(values: [.brightness: brightness,
+                                                        .clarity: clarity,
+                                                        .softness: softness])
+                    if useSystemVoiceConverter {
+                        let sourceVoice = converterSourceVoiceIdentifier.map(VoiceSelection.systemVoice) ?? .systemDefault
+                        await model.generateOpenVoiceSpeech(text: generationText, target: generationVoice,
+                                                            systemSource: sourceVoice, language: generationLanguage,
+                                                            accent: generationAccent, shaping: shaping,
+                                                            speed: speed, pitch: pitch)
+                    } else {
+                        await model.generateSpeech(text: generationText, voice: generationVoice,
+                                                   language: generationLanguage, accent: generationAccent,
+                                                   shaping: shaping, speed: speed, pitch: pitch)
+                    }
                 }
             } label: {
                 Label(model.isGeneratingSpeech ? "Generating…" : "Generate", systemImage: "waveform")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
-            .disabled(!model.canGenerate(text: generationText, voice: generationVoice, language: generationLanguage) || model.isGeneratingSpeech)
+            .disabled(!model.canGenerate(text: generationText, voice: generationVoice,
+                                         language: generationLanguage,
+                                         usingVoiceConverter: useSystemVoiceConverter) || model.isGeneratingSpeech)
             .accessibilityIdentifier("generateSpeechButton")
 
             if model.generatedAudio != nil {
@@ -637,11 +729,15 @@ struct VoiceStudioHome: View {
     }
 
     private func syncGenerationOptions() {
-        let choices = [VoiceSelection.systemDefault, .tinyLocal] + model.savedVoices.map { VoiceSelection.saved($0.id) }
+        let systemChoices = SystemVoiceCatalog.voices(AVSpeechSynthesisVoice.speechVoices()).map {
+            VoiceSelection.systemVoice($0.identifier)
+        }
+        let choices = [VoiceSelection.systemDefault, .tinyLocal] + systemChoices + model.savedVoices.map { VoiceSelection.saved($0.id) }
         if !choices.contains(generationVoice) { generationVoice = .systemDefault }
-        let languages = model.availableLanguages(for: generationVoice)
+        let languages = model.availableLanguages(for: generationVoice, usingVoiceConverter: useSystemVoiceConverter)
         if !languages.contains(generationLanguage) { generationLanguage = languages.first ?? "en" }
-        let accents = model.availableAccents(for: generationVoice, language: generationLanguage)
+        let accents = model.availableAccents(for: generationVoice, language: generationLanguage,
+                                             usingVoiceConverter: useSystemVoiceConverter)
         if !accents.contains(generationAccent ?? "") { generationAccent = accents.first }
     }
 
@@ -785,6 +881,7 @@ private struct SettingsView: View {
     @State private var backgroundError: String?
     @State private var isLoadingBackground = false
     @State private var isSpeechComponentImporterPresented = false
+    @State private var isOpenVoicePackImporterPresented = false
     @State private var backgroundImportTask: Task<Void, Never>?
     @State private var backgroundImportGate = BackgroundImportRequestGate()
 
@@ -852,6 +949,23 @@ private struct SettingsView: View {
                     .disabled(model.isInstallingLocalSpeech || model.isGeneratingSpeech)
                     .accessibilityIdentifier("speechComponentImportButton")
                 }.listRowBackground(Rectangle().fill(appearance.skin.material))
+                Section("Experimental Voice Converter") {
+                    Label(model.isOpenVoicePackReady ? "Optional pack validated" : "Optional pack not installed",
+                          systemImage: model.isOpenVoicePackReady ? "checkmark.circle" : "arrow.down.circle")
+                        .font(.footnote).foregroundStyle(.secondary)
+                    Button(model.isInstallingOpenVoicePack ? "Validating…" : "Install or Replace OpenVoice Pack") {
+                        isOpenVoicePackImporterPresented = true
+                    }.disabled(model.isInstallingOpenVoicePack || model.isGeneratingSpeech || model.isPreparingOpenVoiceTarget)
+                    Button("Validate OpenVoice Pack") { Task { await model.refreshOpenVoicePackState() } }
+                        .disabled(model.isInstallingOpenVoicePack || model.isPreparingOpenVoiceTarget)
+                    Button(model.isDeletingOpenVoicePack ? "Removing…" : "Remove OpenVoice Pack", role: .destructive) {
+                        Task { await model.deleteOpenVoicePack() }
+                    }.disabled(!model.isOpenVoicePackReady || model.isDeletingOpenVoicePack || model.isGeneratingSpeech || model.isPreparingOpenVoiceTarget)
+                    Text("Experimental voice conversion. Device quality and performance still need validation.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                    Text("Use an approximately 10-second saved voice reference for this experimental converter.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }.listRowBackground(Rectangle().fill(appearance.skin.material))
             }
             .scrollContentBackground(.hidden)
             .background(.clear)
@@ -868,6 +982,17 @@ private struct SettingsView: View {
             case .failure(let error): model.reportLocalSpeechImportError(error)
             }
         }
+        .fileImporter(isPresented: $isOpenVoicePackImporterPresented,
+                      allowedContentTypes: [.folder], allowsMultipleSelection: false) { result in
+            switch result {
+            case .success(let urls):
+                guard let folder = urls.first else { return }
+                Task { await model.installOpenVoicePack(from: folder) }
+            case .failure:
+                model.statusMessage = "OpenVoice pack could not be imported."
+            }
+        }
+        .task { await model.refreshOpenVoicePackState() }
         .onChange(of: selectedBackground) { _, item in
             guard let item else { return }
             backgroundImportTask?.cancel()

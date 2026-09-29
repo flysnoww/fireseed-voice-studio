@@ -30,6 +30,7 @@ final class SpeechCapabilityTests: XCTestCase {
                                                 .voiceCloning: .supported], languages: ["en", "zh"])
         let tiny = CapabilityProfile(support: [.speechGeneration: .supported,
                                               .voiceCloning: .unsupported], languages: ["en"])
+        let converter = CapabilityProfile(support: [.voiceConversion: .supported])
 
         XCTAssertEqual(SpeechProviderSelection.select(voice: .systemDefault, language: "zh-CN",
                                                        system: system, local: local, localIsReady: true), .system)
@@ -45,6 +46,18 @@ final class SpeechCapabilityTests: XCTestCase {
         XCTAssertNil(SpeechProviderSelection.select(voice: .tinyLocal, language: "zh",
                                                     system: system, local: local, localIsReady: true,
                                                     tinyLocal: tiny))
+        XCTAssertEqual(SpeechProviderSelection.select(
+            voice: .saved(UUID()), language: "zh-CN", system: system, local: local,
+            localIsReady: false, voiceConverter: converter, voiceConverterIsReady: true,
+            useVoiceConverter: true), .voiceConverter)
+        XCTAssertNil(SpeechProviderSelection.select(
+            voice: .saved(UUID()), language: "zh-CN", system: system, local: local,
+            localIsReady: false, voiceConverter: converter, voiceConverterIsReady: false,
+            useVoiceConverter: true))
+        XCTAssertNil(SpeechProviderSelection.select(
+            voice: .saved(UUID()), language: "ja", system: system, local: local,
+            localIsReady: false, voiceConverter: converter, voiceConverterIsReady: true,
+            useVoiceConverter: true))
     }
 
     func testVoiceRequestCarriesOnlyCanonicalUserIntent() throws {
@@ -69,5 +82,13 @@ final class SpeechCapabilityTests: XCTestCase {
         XCTAssertNil(json["provider"])
         XCTAssertNil(json["renderer"])
         XCTAssertEqual(try JSONDecoder().decode(VoiceAsset.self, from: JSONEncoder().encode(voice)), voice)
+    }
+
+    func testCapabilityVisibilityOnlyExposesSupportedShapingAndExpressions() {
+        let profile = CapabilityProfile(
+            shaping: [.brightness: .supported, .clarity: .approximate, .softness: .unsupported],
+            expressions: [.gentle: .supported, .calm: .unsupported])
+        XCTAssertEqual(VoiceCapabilityVisibility.visibleShaping(in: profile), [.brightness, .clarity])
+        XCTAssertEqual(VoiceCapabilityVisibility.visibleExpressions(in: profile), [.gentle])
     }
 }

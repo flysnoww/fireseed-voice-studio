@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import XCTest
 @testable import VoiceStudioCore
 
@@ -308,6 +309,93 @@ final class AudioLifecycleTests: XCTestCase {
         XCTAssertNil(json["temperature"])
         XCTAssertNil(json["cfg"])
         XCTAssertNil(json["seed"])
+    }
+
+    func testOpenVoicePackValidatesPinnedFilesInstallsAndDeletesOnlyPackAndCache() throws {
+        let source = temporaryRoot.appendingPathComponent("openvoice-source", isDirectory: true)
+        let encoderFile = source.appendingPathComponent("OpenVoice_SpeakerEncoder.mlpackage/Manifest.json")
+        let converterFile = source.appendingPathComponent("OpenVoice_VoiceConverter.mlpackage/Manifest.json")
+        try FileManager.default.createDirectory(at: encoderFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: converterFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("encoder fixture".utf8).write(to: encoderFile)
+        try Data("converter fixture".utf8).write(to: converterFile)
+        let manifest = OpenVoicePackManifest(
+            sourceRepository: OpenVoicePackStore.sourceRepository,
+            sourceRevision: OpenVoicePackStore.sourceRevision,
+            converterRepository: OpenVoicePackStore.converterRepository,
+            converterRevision: OpenVoicePackStore.converterRevision,
+            license: "MIT", computeUnits: "cpuAndGPU",
+            files: [fileEntry(encoderFile, relativeTo: source), fileEntry(converterFile, relativeTo: source)])
+        try JSONEncoder().encode(manifest).write(to: source.appendingPathComponent("manifest.json"))
+
+        let packStore = makeOpenVoicePackStore(for: manifest)
+        XCTAssertEqual(try packStore.validate(at: source), manifest)
+        try packStore.install(from: source)
+        XCTAssertEqual(try packStore.validateInstalled(), manifest)
+
+        let stagedReference = try makeStagedAsset()
+        let savedVoice = try store.saveVoice(VoiceAsset(name: "Durable", sourceType: .record,
+                                                        referenceAudio: stagedReference))
+        let referenceURL = try store.managedURL(for: savedVoice.referenceAudio)
+        let cache = OpenVoiceSpeakerEmbeddingCache(rootDirectory: packStore.cacheDirectory)
+        let packRevision = OpenVoicePackStore.converterRevision
+        try cache.store([0.1, -0.2, 0.3], voiceID: savedVoice.id,
+                        referenceAudioID: savedVoice.referenceAudio.id, packRevision: packRevision)
+        XCTAssertEqual(cache.load(voiceID: savedVoice.id,
+                                  referenceAudioID: savedVoice.referenceAudio.id,
+                                  packRevision: packRevision), [0.1, -0.2, 0.3])
+        XCTAssertNil(cache.load(voiceID: savedVoice.id,
+                                referenceAudioID: UUID(), packRevision: packRevision))
+
+        try packStore.deleteInstalledPack()
+        XCTAssertThrowsError(try packStore.validateInstalled())
+        XCTAssertNil(cache.load(voiceID: savedVoice.id,
+                                referenceAudioID: savedVoice.referenceAudio.id,
+                                packRevision: packRevision))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: referenceURL.path))
+        XCTAssertEqual(try store.savedVoices().first?.referenceAudio.id, savedVoice.referenceAudio.id)
+    }
+
+    func testOpenVoicePackRejectsTamperingAndUnsafePaths() throws {
+        let source = temporaryRoot.appendingPathComponent("openvoice-invalid", isDirectory: true)
+        let encoderFile = source.appendingPathComponent("OpenVoice_SpeakerEncoder.mlpackage/Manifest.json")
+        let converterFile = source.appendingPathComponent("OpenVoice_VoiceConverter.mlpackage/Manifest.json")
+        try FileManager.default.createDirectory(at: encoderFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: converterFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("encoder".utf8).write(to: encoderFile)
+        try Data("converter".utf8).write(to: converterFile)
+        var files = [fileEntry(encoderFile, relativeTo: source), fileEntry(converterFile, relativeTo: source)]
+        files[0] = OpenVoicePackManifest.File(path: "OpenVoice_SpeakerEncoder.mlpackage/../escape", bytes: 1,
+                                             sha256: String(repeating: "0", count: 64))
+        let manifest = OpenVoicePackManifest(
+            sourceRepository: OpenVoicePackStore.sourceRepository,
+            sourceRevision: OpenVoicePackStore.sourceRevision,
+            converterRepository: OpenVoicePackStore.converterRepository,
+            converterRevision: OpenVoicePackStore.converterRevision,
+            license: "MIT", computeUnits: "cpuAndGPU", files: files)
+        try JSONEncoder().encode(manifest).write(to: source.appendingPathComponent("manifest.json"))
+        let packStore = makeOpenVoicePackStore(for: manifest)
+        XCTAssertThrowsError(try packStore.validate(at: source)) { error in
+            XCTAssertEqual(error as? OpenVoicePackError,
+                           .unsafePath("OpenVoice_SpeakerEncoder.mlpackage/../escape"))
+        }
+    }
+
+    private func fileEntry(_ url: URL, relativeTo root: URL) -> OpenVoicePackManifest.File {
+        let data = try! Data(contentsOf: url)
+        let relative = String(url.path.dropFirst(root.path.count + 1)).replacingOccurrences(of: "\\", with: "/")
+        let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        return OpenVoicePackManifest.File(path: relative, bytes: Int64(data.count), sha256: digest)
+    }
+
+    private func makeOpenVoicePackStore(for manifest: OpenVoicePackManifest) -> OpenVoicePackStore {
+        let contract = Dictionary(uniqueKeysWithValues: manifest.files.map {
+            ($0.path, OpenVoicePackStore.PinnedFile(bytes: $0.bytes, sha256: $0.sha256))
+        })
+        return OpenVoicePackStore(rootDirectory: temporaryRoot.appendingPathComponent("RendererPacks"),
+                                  sourceRevision: manifest.sourceRevision,
+                                  converterRevision: manifest.converterRevision,
+                                  expectedFiles: contract)
     }
 
     private func makeStagedAsset() throws -> AudioAsset {

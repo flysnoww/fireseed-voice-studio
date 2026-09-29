@@ -331,8 +331,31 @@ protocol VoicePreparingSpeechProvider: SpeechProvider {
     func prepareVoice(_ voice: VoiceAsset, referenceAudioURL: URL) async throws
 }
 
+protocol VoiceConverterProvider: Sendable {
+    var capabilities: CapabilityProfile { get }
+    func validateModels(packDirectory: URL, cacheDirectory: URL) async throws
+    func prepareReference(referenceURL: URL, voiceID: UUID, referenceAudioID: UUID,
+                         packDirectory: URL, cacheDirectory: URL) async throws
+    func convert(sourceURL: URL, targetReferenceURL: URL, targetVoiceID: UUID,
+                 targetReferenceID: UUID, packDirectory: URL, cacheDirectory: URL) async throws -> URL
+}
+
 protocol SpeechRuntimeManaging: SpeechProvider {
     func unloadRuntime() async
+}
+
+enum SystemVoiceCatalog {
+    static func voices(_ voices: [AVSpeechSynthesisVoice]) -> [AVSpeechSynthesisVoice] {
+        voices.sorted { $0.identifier.localizedStandardCompare($1.identifier) == .orderedAscending }
+    }
+
+    static func personalVoices(_ voices: [AVSpeechSynthesisVoice]) -> [AVSpeechSynthesisVoice] {
+        voices.filter { $0.traits.contains(.isPersonalVoice) }
+    }
+
+    static func nonPersonalVoices(_ voices: [AVSpeechSynthesisVoice]) -> [AVSpeechSynthesisVoice] {
+        voices.filter { !$0.traits.contains(.isPersonalVoice) }
+    }
 }
 
 actor AppleSystemSpeechProvider: SpeechProvider {
@@ -342,13 +365,15 @@ actor AppleSystemSpeechProvider: SpeechProvider {
     private let voicesByIdentifier: [String: AVSpeechSynthesisVoice]
 
     init(voices: [AVSpeechSynthesisVoice] = AVSpeechSynthesisVoice.speechVoices()) {
-        let tags = Set(voices.map(\.language))
-        voicesByIdentifier = Dictionary(uniqueKeysWithValues: voices.map { ($0.identifier, $0) })
+        let catalog = SystemVoiceCatalog.voices(voices)
+        let tags = Set(catalog.map(\.language))
+        voicesByIdentifier = Dictionary(uniqueKeysWithValues: catalog.map { ($0.identifier, $0) })
         let groups = Dictionary(grouping: tags) { $0.split(separator: "-").first.map(String.init) ?? $0 }
         availableVoiceTags = tags
         capabilities = CapabilityProfile(
             support: [.speechGeneration: .supported, .languageSelection: .supported,
-                      .accentSelection: .supported],
+                      .accentSelection: .supported, .speed: .supported, .pitch: .supported],
+            shaping: [.brightness: .supported, .clarity: .supported, .softness: .supported],
             languages: groups.keys.sorted(),
             accentsByLanguage: groups.mapValues { $0.sorted() })
     }
@@ -371,7 +396,7 @@ actor AppleSystemSpeechProvider: SpeechProvider {
         }
         let utterance = AVSpeechUtterance(string: request.text)
         utterance.voice = speechVoice
-        utterance.rate = AVSpeechUtteranceDefaultSpeechRate
+        utterance.rate = Float(AVSpeechUtteranceDefaultSpeechRate) * Float(request.speed)
         let synthesizer = AVSpeechSynthesizer()
         let outputURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("system-speech-\(UUID().uuidString).wav")
@@ -441,60 +466,88 @@ private final class SpeechBufferWriter: @unchecked Sendable {
 }
 
 struct AudioTimePitchProcessor {
-    func process(_ sourceURL: URL, speed: Double, pitch: Double) throws -> URL {
-        guard speed.isFinite, (0.5...2).contains(speed), pitch.isFinite, (-2400...2400).contains(pitch) else {
+    static func accepts(speed: Double, pitch: Double, shaping: VoiceShaping = VoiceShaping()) -> Bool {
+        speed.isFinite && (0.5...2).contains(speed) && pitch.isFinite && (-1200...1200).contains(pitch) &&
+            shaping.values.values.allSatisfy { $0.isFinite && (-1...1).contains($0) } &&
+            shaping.values.keys.allSatisfy { [.brightness, .clarity, .softness].contains($0) }
+    }
+
+    func process(_ sourceURL: URL, speed: Double, pitch: Double,
+                 shaping: VoiceShaping = VoiceShaping()) throws -> URL {
+        guard Self.accepts(speed: speed, pitch: pitch, shaping: shaping) else {
             throw VoiceStudioError.invalidAudioFile
         }
-        guard abs(speed - 1) > 0.001 || abs(pitch) > 0.5 else { return sourceURL }
+        guard abs(speed - 1) > 0.001 || abs(pitch) > 0.5 || !shaping.values.isEmpty else { return sourceURL }
         let input = try AVAudioFile(forReading: sourceURL)
         let format = input.processingFormat
         let engine = AVAudioEngine()
         let player = AVAudioPlayerNode()
         let timePitch = AVAudioUnitTimePitch()
+        let equalizer = AVAudioUnitEQ(numberOfBands: 2)
         timePitch.rate = Float(speed)
         timePitch.pitch = Float(pitch)
+        let brightness = shaping.values[.brightness, default: 0]
+        let softness = shaping.values[.softness, default: 0]
+        let clarity = shaping.values[.clarity, default: 0]
+        let highShelf = equalizer.bands[0]
+        highShelf.filterType = .highShelf
+        highShelf.frequency = 4_000
+        highShelf.bandwidth = 0.7
+        highShelf.gain = Float((brightness - softness) * 6)
+        highShelf.bypass = abs(brightness - softness) < 0.01
+        let presence = equalizer.bands[1]
+        presence.filterType = .parametric
+        presence.frequency = 2_800
+        presence.bandwidth = 0.8
+        presence.gain = Float(clarity * 4)
+        presence.bypass = abs(clarity) < 0.01
         engine.attach(player)
         engine.attach(timePitch)
+        engine.attach(equalizer)
         engine.connect(player, to: timePitch, format: format)
-        engine.connect(timePitch, to: engine.mainMixerNode, format: format)
+        engine.connect(timePitch, to: equalizer, format: format)
+        engine.connect(equalizer, to: engine.mainMixerNode, format: format)
         try engine.enableManualRenderingMode(.offline, format: format, maximumFrameCount: 4096)
         let outputURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("shaped-speech-\(UUID().uuidString).wav")
         do {
-            let output = try AVAudioFile(forWriting: outputURL, settings: input.fileFormat.settings)
+            var outputSettings = input.fileFormat.settings
+            outputSettings[AVLinearPCMIsFloatKey] = true
+            outputSettings[AVLinearPCMBitDepthKey] = 32
+            outputSettings[AVLinearPCMIsBigEndianKey] = false
+            outputSettings[AVLinearPCMIsNonInterleaved] = false
+            let output = try AVAudioFile(forWriting: outputURL, settings: outputSettings)
             let renderBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4096)!
-            let expectedFrames = AVAudioFramePosition(ceil(Double(input.length) / speed))
-            let outputFrameLimit = expectedFrames + AVAudioFramePosition(format.sampleRate * 0.25)
             var renderedFrames: AVAudioFramePosition = 0
+            var sourceFinished = false
             engine.prepare()
             try engine.start()
+            _ = engine.inputNode
             player.scheduleFile(input, at: nil, completionCallbackType: .dataRendered) { _ in }
             player.play()
             var attempts = 0
-            while renderedFrames < outputFrameLimit, attempts < 10_000 {
+            while attempts < 100_000 {
                 attempts += 1
-                let framesToRender = AVAudioFrameCount(min(4096, outputFrameLimit - renderedFrames))
+                let framesToRender: AVAudioFrameCount = 4096
                 switch try engine.renderOffline(framesToRender, to: renderBuffer) {
                 case .success:
                     if renderBuffer.frameLength > 0 {
                         try output.write(from: renderBuffer)
                         renderedFrames += AVAudioFramePosition(renderBuffer.frameLength)
                     }
-                case .insufficientDataFromInputNode:
-                    if renderedFrames >= expectedFrames {
+                    if sourceFinished, renderBuffer.frameLength == 0 {
                         engine.stop()
+                        guard renderedFrames > 0 else { throw VoiceStudioError.invalidAudioFile }
                         return outputURL
                     }
+                case .insufficientDataFromInputNode:
+                    sourceFinished = true
                     continue
                 case .cannotDoInCurrentContext:
                     continue
                 @unknown default:
                     throw VoiceStudioError.invalidAudioFile
                 }
-            }
-            if renderedFrames > 0 {
-                engine.stop()
-                return outputURL
             }
             throw VoiceStudioError.invalidAudioFile
         } catch {

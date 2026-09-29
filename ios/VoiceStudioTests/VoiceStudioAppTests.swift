@@ -584,7 +584,7 @@ final class VoiceStudioAppTests: XCTestCase {
             throw XCTSkip("This simulator has no English system speech voice.")
         }
         let request = VoiceRequest(text: "Hello from Voice Studio", voice: .systemDefault,
-                                   language: language, accent: accent, renderMode: .generate)
+                                   language: language, accent: accent, speed: 1.2, renderMode: .generate)
 
         let result = await provider.generate(request, voice: nil, referenceAudioURL: nil)
 
@@ -598,6 +598,14 @@ final class VoiceStudioAppTests: XCTestCase {
         XCTAssertGreaterThan(duration, 0)
     }
 
+    func testAppleSystemSpeechRejectsRendererSpecificVoiceSelections() async {
+        let provider = AppleSystemSpeechProvider()
+        let request = VoiceRequest(text: "Hello", voice: .saved(UUID()), language: "en",
+                                   renderMode: .generate)
+        let result = await provider.generate(request, voice: nil, referenceAudioURL: nil)
+        XCTAssertEqual(result, .unsupported(.voiceCloning))
+    }
+
     func testAppleTimePitchProcessorRendersAdjustedAudioFile() throws {
         let source = FileManager.default.temporaryDirectory.appendingPathComponent("time-pitch-\(UUID()).wav")
         defer { try? FileManager.default.removeItem(at: source) }
@@ -608,6 +616,77 @@ final class VoiceStudioAppTests: XCTestCase {
         defer { if rendered != source { try? FileManager.default.removeItem(at: rendered) } }
         XCTAssertNotEqual(rendered, source)
         XCTAssertGreaterThan(try AVAudioFile(forReading: rendered).length, 0)
+    }
+
+    func testSystemVoiceCatalogEnumeratesAndSeparatesPersonalVoices() {
+        let systemVoices = AVSpeechSynthesisVoice.speechVoices()
+        let catalog = SystemVoiceCatalog.voices(systemVoices)
+        XCTAssertEqual(catalog.map(\.identifier), catalog.map(\.identifier).sorted {
+            $0.localizedStandardCompare($1) == .orderedAscending
+        })
+        let personal = SystemVoiceCatalog.personalVoices(catalog)
+        let standard = SystemVoiceCatalog.nonPersonalVoices(catalog)
+        XCTAssertEqual(Set(personal.map(\.identifier)).union(standard.map(\.identifier)),
+                       Set(catalog.map(\.identifier)))
+        XCTAssertTrue(Set(personal.map(\.identifier)).isDisjoint(with: Set(standard.map(\.identifier))))
+        XCTAssertTrue(personal.allSatisfy { $0.traits.contains(.isPersonalVoice) })
+    }
+
+    func testSystemProviderAdvertisesOnlyImplementedPostProcessingAndNoExpression() {
+        let provider = AppleSystemSpeechProvider()
+        XCTAssertEqual(provider.capabilities.status(for: .speechGeneration), .supported)
+        XCTAssertEqual(provider.capabilities.shaping[.brightness], .supported)
+        XCTAssertEqual(provider.capabilities.shaping[.clarity], .supported)
+        XCTAssertEqual(provider.capabilities.shaping[.softness], .supported)
+        XCTAssertTrue(provider.capabilities.expressions.isEmpty)
+    }
+
+    @MainActor
+    func testCapabilityVisibilityReflectsSharedDSPButKeepsExpressionUnsupported() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = try VoiceStudioModel(rootDirectory: root)
+        let system = model.capabilities(for: .systemDefault)
+        XCTAssertEqual(system.status(for: .pitch), .supported)
+        XCTAssertEqual(system.shaping[.brightness], .supported)
+        XCTAssertEqual(system.shaping[.clarity], .supported)
+        XCTAssertEqual(system.shaping[.softness], .supported)
+        XCTAssertTrue(system.expressions.isEmpty)
+
+        let saved = model.capabilities(for: .saved(UUID()))
+        XCTAssertTrue(saved.shaping.isEmpty)
+    }
+
+    func testSharedDSPParameterBoundsRejectUnsupportedAndNonFiniteValues() {
+        XCTAssertTrue(AudioTimePitchProcessor.accepts(speed: 0.5, pitch: -1200,
+                                                      shaping: VoiceShaping(values: [.brightness: -1])))
+        XCTAssertTrue(AudioTimePitchProcessor.accepts(speed: 2, pitch: 1200,
+                                                      shaping: VoiceShaping(values: [.clarity: 1, .softness: 0.2])))
+        XCTAssertFalse(AudioTimePitchProcessor.accepts(speed: 0.49, pitch: 0))
+        XCTAssertFalse(AudioTimePitchProcessor.accepts(speed: 1, pitch: 1201))
+        XCTAssertFalse(AudioTimePitchProcessor.accepts(speed: 1, pitch: 0,
+                                                       shaping: VoiceShaping(values: [.clarity: .infinity])))
+        XCTAssertFalse(AudioTimePitchProcessor.accepts(speed: 1, pitch: 0,
+                                                       shaping: VoiceShaping(values: [.rough: 0.4])))
+    }
+
+    func testOpenVoiceModelFeatureContractsArePinnedAndDistinct() {
+        XCTAssertTrue(OpenVoiceModelContract.matches(inputs: ["spectrogram"],
+                                                     outputs: ["speaker_embedding"], converter: false))
+        XCTAssertTrue(OpenVoiceModelContract.matches(inputs: ["spectrogram", "spec_lengths",
+                                                              "source_speaker", "target_speaker"],
+                                                     outputs: ["audio"], converter: true))
+        XCTAssertFalse(OpenVoiceModelContract.matches(inputs: ["spectrogram"],
+                                                      outputs: ["audio"], converter: true))
+    }
+
+    func testOpenVoiceRealTimeFactorRequiresAValidAudioDuration() {
+        XCTAssertEqual(OpenVoiceRuntimeMetrics.realTimeFactor(elapsedMilliseconds: 2_500,
+                                                              audioDuration: 5), 0.5)
+        XCTAssertNil(OpenVoiceRuntimeMetrics.realTimeFactor(elapsedMilliseconds: 2_500,
+                                                            audioDuration: 0))
+        XCTAssertNil(OpenVoiceRuntimeMetrics.realTimeFactor(elapsedMilliseconds: -1,
+                                                            audioDuration: 5))
     }
 
     @MainActor
