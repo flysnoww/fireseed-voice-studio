@@ -6,18 +6,18 @@ from __future__ import annotations
 import argparse
 import pathlib
 import plistlib
-import re
-import subprocess
 import sys
+
+from ios_macho_metadata import read_build_metadata, version_tuple
 
 
 def run(*args: str) -> str:
-    result = subprocess.run(args, check=True, text=True, capture_output=True)
-    return result.stdout.strip()
+    from ios_macho_metadata import run as run_command
 
-
-def version_tuple(value: str) -> tuple[int, ...]:
-    return tuple(int(part) for part in value.split("."))
+    try:
+        return run_command(*args)
+    except RuntimeError as error:
+        raise SystemExit(str(error)) from error
 
 
 def find_app_executable(app: pathlib.Path) -> pathlib.Path:
@@ -36,14 +36,14 @@ def audit(app: pathlib.Path) -> int:
     print(run("file", str(app_binary)))
     print(run("lipo", "-info", str(app_binary)))
     print(run("otool", "-l", str(app_binary)))
-    app_build = run("xcrun", "vtool", "-show-build", str(app_binary))
-    print(app_build)
-    app_platform = re.search(r"^\s*platform\s+(\S+)", app_build, re.MULTILINE)
-    app_binary_min = re.search(r"^\s*minos\s+(\S+)", app_build, re.MULTILINE)
-    if not app_platform or app_platform.group(1) != "IOS":
-        raise SystemExit(f"App binary is not an iOS device binary: {app_platform.group(1) if app_platform else 'unknown'}")
-    if not app_binary_min or version_tuple(app_binary_min.group(1)) > version_tuple(app_min):
-        raise SystemExit(f"App binary minOS {app_binary_min.group(1) if app_binary_min else 'unknown'} exceeds app Info.plist minOS {app_min}")
+    app_builds = read_build_metadata(str(app_binary), "arm64")
+    app_platforms = {build.platform for build in app_builds}
+    app_binary_min = max((build.minos for build in app_builds), key=version_tuple)
+    print(f"APP_BUILD_METADATA: {app_builds}")
+    if app_platforms != {"IOS"}:
+        raise SystemExit(f"App binary is not an iOS device binary: {sorted(app_platforms)}")
+    if version_tuple(app_binary_min) > version_tuple(app_min):
+        raise SystemExit(f"App binary minOS {app_binary_min} exceeds app Info.plist minOS {app_min}")
 
     targets: list[tuple[pathlib.Path, pathlib.Path | None, str]] = []
     for framework in sorted(app.rglob("*.framework")):
@@ -91,29 +91,22 @@ def audit(app: pathlib.Path) -> int:
             failures.append(f"{label}: no readable Mach-O architectures")
         binary_mins: list[str] = []
         for arch in architectures:
-            print(f"--- ARCH {arch}: otool -l ---")
             load_commands = run("otool", "-arch", arch, "-l", str(binary))
-            print(load_commands)
-            print(f"--- ARCH {arch}: vtool -show-build ---")
-            build = run("xcrun", "vtool", "-arch", arch, "-show-build", str(binary))
-            print(build)
-            platform_match = re.search(r"^\s*platform\s+(\S+)", build, re.MULTILINE)
-            minos_match = re.search(r"^\s*minos\s+(\S+)", build, re.MULTILINE)
-            sdk_match = re.search(r"^\s*sdk\s+(\S+)", build, re.MULTILINE)
-            platform = platform_match.group(1) if platform_match else "UNKNOWN"
-            minos = minos_match.group(1) if minos_match else None
-            sdk = sdk_match.group(1) if sdk_match else "UNKNOWN"
-            print(f"SUMMARY arch={arch} platform={platform} minOS={minos} SDK={sdk}")
-            if platform != "IOS":
-                failures.append(f"{label} ({arch}): platform is {platform}, expected IOS device")
+            builds = read_build_metadata(str(binary), arch)
+            summary: dict[tuple[str, str, str | None], int] = {}
+            for build in builds:
+                key = (build.platform, build.minos, build.sdk)
+                summary[key] = summary.get(key, 0) + 1
+            print(f"BUILD_METADATA arch={arch} load_commands={load_commands.count('Load command ')} build_metadata_entries={len(builds)} unique_platform_minos_sdk={summary}")
+            platforms = {build.platform for build in builds}
+            if platforms != {"IOS"}:
+                failures.append(f"{label} ({arch}): platforms are {sorted(platforms)}, expected IOS device")
             if arch not in {"arm64", "arm64e"}:
                 failures.append(f"{label} ({arch}): architecture is not supported for iPhone device distribution")
-            if not minos:
-                failures.append(f"{label} ({arch}): LC_BUILD_VERSION minos unavailable")
-            else:
-                binary_mins.append(minos)
-                if version_tuple(minos) > version_tuple(app_min):
-                    failures.append(f"{label} ({arch}): binary minOS {minos} exceeds app minOS {app_min}")
+            for build in builds:
+                binary_mins.append(build.minos)
+                if version_tuple(build.minos) > version_tuple(app_min):
+                    failures.append(f"{label} ({arch}): binary minOS {build.minos} exceeds app minOS {app_min}")
 
         if plist_path and binary_mins and framework_min:
             actual_min = max(binary_mins, key=version_tuple)

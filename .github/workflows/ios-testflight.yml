@@ -52,6 +52,9 @@ jobs:
           xcodebuild -version
           xcrun simctl list devices available
 
+      - name: Test embedded binary metadata parser
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'
+
       - name: Swift domain and file lifecycle tests
         run: swift test --package-path ios/VoiceStudioCore -Xswiftc -strict-concurrency=complete
 
