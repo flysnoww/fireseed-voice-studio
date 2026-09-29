@@ -1,6 +1,8 @@
 name: Audit rejected TestFlight IPA
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       source_run_id:
@@ -21,7 +23,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: VoiceStudio-TestFlight-IPA
-          run-id: ${{ inputs.source_run_id }}
+          run-id: ${{ github.event.inputs.source_run_id || '36509813896' }}
           github-token: ${{ github.token }}
           path: rejected-build
       - name: Extract and audit original signed IPA
