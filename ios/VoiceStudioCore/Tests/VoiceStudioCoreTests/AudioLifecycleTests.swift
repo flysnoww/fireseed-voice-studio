@@ -118,23 +118,18 @@ final class AudioLifecycleTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: audioURL.path))
     }
 
-    func testGeneratedAudioLibrarySortsNewestFirstAndPagesTenItems() throws {
+    func testGeneratedAudioLibrarySortsNewestFirstAndPagesTenItems() {
         var assets: [AudioAsset] = []
         for index in 0..<12 {
-            let source = temporaryRoot.appendingPathComponent("generated-\(index).wav")
-            try Data([UInt8(index + 1)]).write(to: source)
-            assets.append(try store.registerGeneratedAudio(from: source, duration: 1,
-                                                           text: "Clip \(index)"))
+            assets.append(AudioAsset(fileName: "\(UUID().uuidString.lowercased()).wav", duration: 1,
+                                     createdAt: Date(timeIntervalSince1970: TimeInterval(index)),
+                                     text: "Clip \(index)", persistenceState: .persistent))
         }
-        let saved = try assets.map { asset -> AudioAsset in
-            try AudioLifecycle(fileStore: store).cache(asset, as: .generated)
-            return try XCTUnwrap(AudioLifecycle(fileStore: store).save(id: asset.id, from: .generated))
-        }
-        let ordered = saved.sorted { $0.createdAt > $1.createdAt }
+        let ordered = assets.sorted { $0.createdAt > $1.createdAt }
         XCTAssertEqual(GeneratedAudioOrdering.pageSize, 10)
-        XCTAssertEqual(GeneratedAudioOrdering.newestFirst(saved).first?.id, ordered.first?.id)
-        XCTAssertEqual(GeneratedAudioOrdering.page(GeneratedAudioOrdering.newestFirst(saved), index: 0).count, 10)
-        XCTAssertEqual(GeneratedAudioOrdering.page(GeneratedAudioOrdering.newestFirst(saved), index: 1).count, 2)
+        XCTAssertEqual(GeneratedAudioOrdering.newestFirst(assets).first?.id, ordered.first?.id)
+        XCTAssertEqual(GeneratedAudioOrdering.page(GeneratedAudioOrdering.newestFirst(assets), index: 0).count, 10)
+        XCTAssertEqual(GeneratedAudioOrdering.page(GeneratedAudioOrdering.newestFirst(assets), index: 1).count, 2)
     }
 
     func testRemovingRendererPackDoesNotAffectSavedVoiceOrReference() throws {
