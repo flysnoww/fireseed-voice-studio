@@ -186,7 +186,14 @@ jobs:
           grep -q '^Identifier=com.fireseed.voicestudio$' "$RUNNER_TEMP/voice-studio-codesign.txt"
           grep -q '^TeamIdentifier=Z36ZADH7T7$' "$RUNNER_TEMP/voice-studio-codesign.txt"
           /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist" | grep -qx 'com.fireseed.voicestudio'
-          /usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$APP/Info.plist" | grep -qx 'AppIcon'
+          test -s "$APP/Assets.car"
+          xcrun --find assetutil | xargs -I{} {} --info "$APP/Assets.car" > "$RUNNER_TEMP/voice-studio-assets.json"
+          python3 - "$RUNNER_TEMP/voice-studio-assets.json" <<'PY'
+          import json, sys
+          with open(sys.argv[1], encoding="utf-8") as f: assets = json.load(f)
+          if not any(asset.get("Name") == "AppIcon" for asset in assets):
+              raise SystemExit("Compiled app icon AppIcon was not found in Assets.car")
+          PY
           /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Info.plist" | grep -qx "$MARKETING_VERSION"
           /usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Info.plist" | grep -qx "$BUILD_NUMBER"
           python3 - "$APP/Info.plist" <<'PY'
