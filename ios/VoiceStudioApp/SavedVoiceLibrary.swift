@@ -52,23 +52,9 @@ enum SavedVoiceLibrary {
 }
 
 enum GeneratedAudioLibrary {
-    static let pageSize = 10
-
-    static func assets(_ assets: [AudioAsset]) -> [AudioAsset] {
-        assets.sorted {
-            if $0.createdAt != $1.createdAt { return $0.createdAt > $1.createdAt }
-            return $0.id.uuidString < $1.id.uuidString
-        }
-    }
-
-    static func pageCount(for count: Int) -> Int { max(1, (count + pageSize - 1) / pageSize) }
-
-    static func validPage(_ page: Int, count: Int) -> Int {
-        min(max(0, page), pageCount(for: count) - 1)
-    }
-
-    static func page(_ assets: [AudioAsset], index: Int) -> [AudioAsset] {
-        let start = validPage(index, count: assets.count) * pageSize
-        return Array(assets.dropFirst(start).prefix(pageSize))
-    }
+    static let pageSize = GeneratedAudioOrdering.pageSize
+    static func assets(_ assets: [AudioAsset]) -> [AudioAsset] { GeneratedAudioOrdering.newestFirst(assets) }
+    static func pageCount(for count: Int) -> Int { GeneratedAudioOrdering.pageCount(for: count) }
+    static func validPage(_ page: Int, count: Int) -> Int { GeneratedAudioOrdering.validPage(page, count: count) }
+    static func page(_ assets: [AudioAsset], index: Int) -> [AudioAsset] { GeneratedAudioOrdering.page(assets, index: index) }
 }

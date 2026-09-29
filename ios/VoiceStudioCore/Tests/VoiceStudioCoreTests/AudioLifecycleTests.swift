@@ -131,10 +131,10 @@ final class AudioLifecycleTests: XCTestCase {
             return try XCTUnwrap(AudioLifecycle(fileStore: store).save(id: asset.id, from: .generated))
         }
         let ordered = saved.sorted { $0.createdAt > $1.createdAt }
-        XCTAssertEqual(GeneratedAudioLibrary.pageSize, 10)
-        XCTAssertEqual(GeneratedAudioLibrary.assets(saved).first?.id, ordered.first?.id)
-        XCTAssertEqual(GeneratedAudioLibrary.page(GeneratedAudioLibrary.assets(saved), index: 0).count, 10)
-        XCTAssertEqual(GeneratedAudioLibrary.page(GeneratedAudioLibrary.assets(saved), index: 1).count, 2)
+        XCTAssertEqual(GeneratedAudioOrdering.pageSize, 10)
+        XCTAssertEqual(GeneratedAudioOrdering.newestFirst(saved).first?.id, ordered.first?.id)
+        XCTAssertEqual(GeneratedAudioOrdering.page(GeneratedAudioOrdering.newestFirst(saved), index: 0).count, 10)
+        XCTAssertEqual(GeneratedAudioOrdering.page(GeneratedAudioOrdering.newestFirst(saved), index: 1).count, 2)
     }
 
     func testRemovingRendererPackDoesNotAffectSavedVoiceOrReference() throws {

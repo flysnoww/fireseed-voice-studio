@@ -21,6 +21,28 @@ public enum GeneratedAudioVoiceSource: Codable, Equatable, Sendable {
     case tinyLocalVoice(String?)
 }
 
+public enum GeneratedAudioOrdering {
+    public static let pageSize = 10
+
+    public static func newestFirst(_ assets: [AudioAsset]) -> [AudioAsset] {
+        assets.sorted {
+            if $0.createdAt != $1.createdAt { return $0.createdAt > $1.createdAt }
+            return $0.id.uuidString < $1.id.uuidString
+        }
+    }
+
+    public static func pageCount(for count: Int) -> Int { max(1, (count + pageSize - 1) / pageSize) }
+
+    public static func validPage(_ page: Int, count: Int) -> Int {
+        min(max(0, page), pageCount(for: count) - 1)
+    }
+
+    public static func page(_ assets: [AudioAsset], index: Int) -> [AudioAsset] {
+        let start = validPage(index, count: assets.count) * pageSize
+        return Array(assets.dropFirst(start).prefix(pageSize))
+    }
+}
+
 public struct AudioAsset: Identifiable, Codable, Equatable, Sendable {
     public let id: UUID
     /// A generated file name relative to the managed audio store, never an arbitrary URL.
