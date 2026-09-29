@@ -56,6 +56,18 @@ Load command 3
         records = parse_otool_build_commands(output)
         self.assertEqual(records[0].platform, "IOSSIMULATOR")
 
+    def test_maps_numeric_platform_constants_from_archive_output(self) -> None:
+        output = """Load command 0
+          cmd LC_BUILD_VERSION
+      cmdsize 32
+     platform 2
+        minos 17.0
+          sdk 26.5
+      ntools 0
+"""
+        records = parse_otool_build_commands(output)
+        self.assertEqual(records[0].platform, "IOS")
+
 
 if __name__ == "__main__":
     unittest.main()

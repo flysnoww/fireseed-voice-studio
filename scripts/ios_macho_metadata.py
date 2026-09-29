@@ -39,7 +39,21 @@ def parse_otool_build_commands(output: str) -> list[BuildMetadata]:
             minimum = re.search(r"^\s*minos\s+(\S+)\s*$", block, re.MULTILINE)
             sdk = re.search(r"^\s*sdk\s+(\S+)\s*$", block, re.MULTILINE)
             if platform and minimum:
-                records.append(BuildMetadata(platform.group(1), minimum.group(1), sdk.group(1) if sdk else None))
+                platform_name = {
+                    "1": "MACOS",
+                    "2": "IOS",
+                    "3": "TVOS",
+                    "4": "WATCHOS",
+                    "5": "BRIDGEOS",
+                    "6": "MACCATALYST",
+                    "7": "IOSSIMULATOR",
+                    "8": "TVOSSIMULATOR",
+                    "9": "WATCHOSSIMULATOR",
+                    "10": "DRIVERKIT",
+                    "11": "VISIONOS",
+                    "12": "VISIONOSSIMULATOR",
+                }.get(platform.group(1), platform.group(1))
+                records.append(BuildMetadata(platform_name, minimum.group(1), sdk.group(1) if sdk else None))
         elif name.startswith("LC_VERSION_MIN_"):
             target = name.removeprefix("LC_VERSION_MIN_")
             platform = {
@@ -68,4 +82,3 @@ def read_build_metadata(binary: str, arch: str) -> list[BuildMetadata]:
 
 def version_tuple(value: str) -> tuple[int, ...]:
     return tuple(int(part) for part in value.split("."))
-
