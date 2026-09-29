@@ -30,7 +30,7 @@ final class SpeechCapabilityTests: XCTestCase {
                                                 .voiceCloning: .supported], languages: ["en", "zh"])
         let tiny = CapabilityProfile(support: [.speechGeneration: .supported,
                                               .voiceCloning: .unsupported], languages: ["en"])
-        let converter = CapabilityProfile(support: [.voiceConversion: .supported])
+        let converter = CapabilityProfile(support: [.voiceConversion: .supported], languages: ["en", "zh"])
 
         XCTAssertEqual(SpeechProviderSelection.select(voice: .systemDefault, language: "zh-CN",
                                                        system: system, local: local, localIsReady: true), .system)
