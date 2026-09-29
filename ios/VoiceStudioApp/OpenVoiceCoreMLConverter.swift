@@ -108,7 +108,7 @@ actor OpenVoiceCoreMLConverter: VoiceConverterProvider {
             "source_speaker": MLFeatureValue(multiArray: source),
             "target_speaker": MLFeatureValue(multiArray: target),
         ])
-        guard let output = try converter.prediction(from: input)
+        guard let output = try await converter.prediction(from: input)
             .featureValue(for: "audio")?.multiArrayValue else { throw OpenVoiceRuntimeError.predictionFailed }
         return try writeWAV((0..<output.count).map { output[$0].floatValue })
     }
@@ -152,7 +152,7 @@ actor OpenVoiceCoreMLConverter: VoiceConverterProvider {
         let input = try MLDictionaryFeatureProvider(dictionary: [
             "spectrogram": MLFeatureValue(multiArray: inputArray),
         ])
-        guard let output = try model.prediction(from: input)
+        guard let output = try await model.prediction(from: input)
             .featureValue(for: "speaker_embedding")?.multiArrayValue else {
             throw OpenVoiceRuntimeError.predictionFailed
         }
