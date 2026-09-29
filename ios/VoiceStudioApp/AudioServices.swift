@@ -519,32 +519,24 @@ struct AudioTimePitchProcessor {
             let output = try AVAudioFile(forWriting: outputURL, settings: outputSettings)
             let renderBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4096)!
             var renderedFrames: AVAudioFramePosition = 0
-            var sourceFinished = false
-            let sourceRendered = DispatchSemaphore(value: 0)
+            let targetFrames = AVAudioFramePosition(ceil(Double(input.length) / speed))
             engine.prepare()
             try engine.start()
-            player.scheduleFile(input, at: nil, completionCallbackType: .dataRendered) { _ in
-                sourceRendered.signal()
-            }
+            player.scheduleFile(input, at: nil)
             player.play()
             var attempts = 0
-            while attempts < 100_000 {
+            while engine.manualRenderingSampleTime < targetFrames && attempts < 100_000 {
                 attempts += 1
-                if sourceRendered.wait(timeout: .now()) == .success { sourceFinished = true }
-                let framesToRender: AVAudioFrameCount = 4096
+                let remaining = targetFrames - engine.manualRenderingSampleTime
+                let framesToRender = AVAudioFrameCount(min(remaining, AVAudioFramePosition(renderBuffer.frameCapacity)))
                 switch try engine.renderOffline(framesToRender, to: renderBuffer) {
                 case .success:
                     if renderBuffer.frameLength > 0 {
                         try output.write(from: renderBuffer)
                         renderedFrames += AVAudioFramePosition(renderBuffer.frameLength)
                     }
-                    if sourceFinished, renderBuffer.frameLength == 0 {
-                        engine.stop()
-                        guard renderedFrames > 0 else { throw VoiceStudioError.invalidAudioFile }
-                        return outputURL
-                    }
                 case .insufficientDataFromInputNode:
-                    if sourceFinished { continue }
+                    continue
                 case .cannotDoInCurrentContext:
                     continue
                 case .error:
@@ -553,7 +545,11 @@ struct AudioTimePitchProcessor {
                     throw VoiceStudioError.invalidAudioFile
                 }
             }
-            throw VoiceStudioError.invalidAudioFile
+            engine.stop()
+            guard engine.manualRenderingSampleTime >= targetFrames, renderedFrames > 0 else {
+                throw VoiceStudioError.invalidAudioFile
+            }
+            return outputURL
         } catch {
             engine.stop()
             try? FileManager.default.removeItem(at: outputURL)
