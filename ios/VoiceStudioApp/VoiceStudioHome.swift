@@ -113,47 +113,30 @@ struct VoiceStudioHome: View {
             .onChange(of: generationAccent) { _, _ in updateDiagnosticContext() }
             .onChange(of: generationText) { _, _ in updateDiagnosticContext() }
             .onChange(of: model.currentReference?.asset.id) { _, _ in updateDiagnosticContext() }
-            .confirmationDialog("Delete Voice?", isPresented: Binding(
-                get: { voiceToDelete != nil }, set: { if !$0 { voiceToDelete = nil } }
-            ), titleVisibility: .visible) {
-                Button("Delete", role: .destructive) {
-                    if let voiceToDelete { model.deleteSavedVoice(id: voiceToDelete.id) }
-                    voiceToDelete = nil
-                }
-                Button("Cancel", role: .cancel) { voiceToDelete = nil }
-            } message: {
-                Text("This voice and its saved reference audio will be removed.")
-            }
-            .confirmationDialog("Delete Generated Audio?", isPresented: Binding(
-                get: { generatedAudioToDelete != nil }, set: { if !$0 { generatedAudioToDelete = nil } }
-            ), titleVisibility: .visible) {
-                Button("Delete", role: .destructive) {
-                    if let generatedAudioToDelete { model.deleteGeneratedAudio(id: generatedAudioToDelete.id) }
-                    generatedAudioToDelete = nil
-                }
-                Button("Cancel", role: .cancel) { generatedAudioToDelete = nil }
-            } message: {
-                Text("This generated audio file will be removed.")
-            }
-            .sheet(isPresented: $isSystemVoicePickerPresented) { systemVoicePicker }
-            .sheet(isPresented: $isGeneratedAudioLibraryPresented) { generatedAudioLibrary }
-            .sheet(item: $voiceToEdit) { voice in
-                VoiceAssetEditor(voice: voice, selected: generationVoice == .saved(voice.id),
-                                 onSelect: { generationVoice = .saved(voice.id); voiceToEdit = nil },
-                                 onPlay: { model.playVoiceReference(voice) }, onStop: { model.stopPlayback() },
-                                 onRename: { model.renameSavedVoice(id: voice.id, name: $0) },
-                                 onFavorite: { model.setSavedVoiceFavorite(id: voice.id, isFavorite: $0) },
-                                 onDelete: { voiceToEdit = nil; voiceToDelete = voice })
-            }
-            .sheet(item: $audioToEdit) { audio in
-                GeneratedAudioEditor(audio: audio, shareURL: model.managedURL(for: audio),
-                                     onPlay: { model.playAudioAsset(audio) }, onStop: { model.stopPlayback() },
-                                     onRename: { model.renameGeneratedAudio(id: audio.id, name: $0) },
-                                     onFavorite: { model.setGeneratedAudioFavorite(id: audio.id, isFavorite: $0) },
-                                     onDelete: { audioToEdit = nil; generatedAudioToDelete = audio })
-            }
+            .modifier(VoiceLibraryPresentationModifier(
+                voiceToDelete: $voiceToDelete,
+                generatedAudioToDelete: $generatedAudioToDelete,
+                voiceToEdit: $voiceToEdit,
+                audioToEdit: $audioToEdit,
+                isSystemVoicePickerPresented: $isSystemVoicePickerPresented,
+                isGeneratedAudioLibraryPresented: $isGeneratedAudioLibraryPresented,
+                generationVoice: $generationVoice,
+                systemVoicePicker: { AnyView(systemVoicePicker) },
+                generatedAudioLibrary: { AnyView(generatedAudioLibrary) },
+                deleteVoice: { model.deleteSavedVoice(id: $0) },
+                deleteAudio: { model.deleteGeneratedAudio(id: $0) },
+                playVoice: { model.playVoiceReference($0) },
+                playAudio: { model.playAudioAsset($0) },
+                stopPlayback: { model.stopPlayback() },
+                renameVoice: { model.renameSavedVoice(id: $0, name: $1) },
+                favoriteVoice: { model.setSavedVoiceFavorite(id: $0, isFavorite: $1) },
+                renameAudio: { model.renameGeneratedAudio(id: $0, name: $1) },
+                favoriteAudio: { model.setGeneratedAudioFavorite(id: $0, isFavorite: $1) },
+                shareURL: { model.managedURL(for: $0) }
+            ))
         }
     }
+
 
     private var voiceCard: some View {
         StudioCard(title: "Voice", symbol: "person.wave.2") {
@@ -687,6 +670,71 @@ private struct StudioCard<Content: View>: View {
         .background(appearance.skin.material, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).stroke(.white.opacity(0.42), lineWidth: 1))
         .shadow(color: .black.opacity(0.06), radius: 16, y: 6)
+    }
+}
+
+private struct VoiceLibraryPresentationModifier: ViewModifier {
+    @Binding var voiceToDelete: VoiceAsset?
+    @Binding var generatedAudioToDelete: AudioAsset?
+    @Binding var voiceToEdit: VoiceAsset?
+    @Binding var audioToEdit: AudioAsset?
+    @Binding var isSystemVoicePickerPresented: Bool
+    @Binding var isGeneratedAudioLibraryPresented: Bool
+    @Binding var generationVoice: VoiceSelection
+    let systemVoicePicker: () -> AnyView
+    let generatedAudioLibrary: () -> AnyView
+    let deleteVoice: (UUID) -> Void
+    let deleteAudio: (UUID) -> Void
+    let playVoice: (VoiceAsset) -> Void
+    let playAudio: (AudioAsset) -> Void
+    let stopPlayback: () -> Void
+    let renameVoice: (UUID, String) -> Void
+    let favoriteVoice: (UUID, Bool) -> Void
+    let renameAudio: (UUID, String) -> Void
+    let favoriteAudio: (UUID, Bool) -> Void
+    let shareURL: (AudioAsset) -> URL?
+
+    func body(content: Content) -> some View {
+        content
+            .confirmationDialog("Delete Voice?", isPresented: voiceDeletePresented, titleVisibility: .visible) {
+                Button("Delete", role: .destructive) {
+                    if let voiceToDelete { deleteVoice(voiceToDelete.id) }
+                    voiceToDelete = nil
+                }
+                Button("Cancel", role: .cancel) { voiceToDelete = nil }
+            } message: { Text("This voice and its saved reference audio will be removed.") }
+            .confirmationDialog("Delete Generated Audio?", isPresented: audioDeletePresented, titleVisibility: .visible) {
+                Button("Delete", role: .destructive) {
+                    if let generatedAudioToDelete { deleteAudio(generatedAudioToDelete.id) }
+                    generatedAudioToDelete = nil
+                }
+                Button("Cancel", role: .cancel) { generatedAudioToDelete = nil }
+            } message: { Text("This generated audio file will be removed.") }
+            .sheet(isPresented: $isSystemVoicePickerPresented, content: systemVoicePicker)
+            .sheet(isPresented: $isGeneratedAudioLibraryPresented, content: generatedAudioLibrary)
+            .sheet(item: $voiceToEdit) { voice in
+                VoiceAssetEditor(voice: voice, selected: generationVoice == .saved(voice.id),
+                                 onSelect: { generationVoice = .saved(voice.id); voiceToEdit = nil },
+                                 onPlay: { playVoice(voice) }, onStop: stopPlayback,
+                                 onRename: { renameVoice(voice.id, $0) },
+                                 onFavorite: { favoriteVoice(voice.id, $0) },
+                                 onDelete: { voiceToEdit = nil; voiceToDelete = voice })
+            }
+            .sheet(item: $audioToEdit) { audio in
+                GeneratedAudioEditor(audio: audio, shareURL: shareURL(audio),
+                                     onPlay: { playAudio(audio) }, onStop: stopPlayback,
+                                     onRename: { renameAudio(audio.id, $0) },
+                                     onFavorite: { favoriteAudio(audio.id, $0) },
+                                     onDelete: { audioToEdit = nil; generatedAudioToDelete = audio })
+            }
+    }
+
+    private var voiceDeletePresented: Binding<Bool> {
+        Binding(get: { voiceToDelete != nil }, set: { if !$0 { voiceToDelete = nil } })
+    }
+
+    private var audioDeletePresented: Binding<Bool> {
+        Binding(get: { generatedAudioToDelete != nil }, set: { if !$0 { generatedAudioToDelete = nil } })
     }
 }
 
