@@ -11,7 +11,12 @@ import sys
 
 
 def run(*args: str) -> str:
-    result = subprocess.run(args, check=True, text=True, capture_output=True)
+    result = subprocess.run(args, text=True, capture_output=True)
+    if result.returncode:
+        raise SystemExit(
+            f"Command failed ({result.returncode}): {' '.join(args)}\n"
+            f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
     return result.stdout.strip()
 
 
