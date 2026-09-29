@@ -36,7 +36,14 @@ def audit(app: pathlib.Path) -> int:
     print(run("file", str(app_binary)))
     print(run("lipo", "-info", str(app_binary)))
     print(run("otool", "-l", str(app_binary)))
-    print(run("xcrun", "vtool", "-show-build", str(app_binary)))
+    app_build = run("xcrun", "vtool", "-show-build", str(app_binary))
+    print(app_build)
+    app_platform = re.search(r"^\s*platform\s+(\S+)", app_build, re.MULTILINE)
+    app_binary_min = re.search(r"^\s*minos\s+(\S+)", app_build, re.MULTILINE)
+    if not app_platform or app_platform.group(1) != "IOS":
+        raise SystemExit(f"App binary is not an iOS device binary: {app_platform.group(1) if app_platform else 'unknown'}")
+    if not app_binary_min or version_tuple(app_binary_min.group(1)) > version_tuple(app_min):
+        raise SystemExit(f"App binary minOS {app_binary_min.group(1) if app_binary_min else 'unknown'} exceeds app Info.plist minOS {app_min}")
 
     targets: list[tuple[pathlib.Path, pathlib.Path | None, str]] = []
     for framework in sorted(app.rglob("*.framework")):
@@ -62,9 +69,15 @@ def audit(app: pathlib.Path) -> int:
             framework_info = plistlib.loads(plist_path.read_bytes())
             supported = framework_info.get("CFBundleSupportedPlatforms")
             framework_min = framework_info.get("MinimumOSVersion")
-            print(f"CFBundleSupportedPlatforms={supported!r} MinimumOSVersion={framework_min!r}")
+            dt_platform = framework_info.get("DTPlatformVersion")
+            dt_sdk = framework_info.get("DTSDKName")
+            print(f"CFBundleSupportedPlatforms={supported!r} MinimumOSVersion={framework_min!r} DTPlatformVersion={dt_platform!r} DTSDKName={dt_sdk!r}")
             if supported and "iPhoneOS" not in supported:
                 failures.append(f"{label}: unsupported plist platform {supported!r}")
+            if dt_sdk and not dt_sdk.lower().startswith("iphoneos"):
+                failures.append(f"{label}: DTSDKName is not an iPhoneOS SDK: {dt_sdk}")
+            if not framework_min:
+                failures.append(f"{label}: framework Info.plist is missing MinimumOSVersion")
             if framework_min and version_tuple(framework_min) > version_tuple(app_min):
                 failures.append(f"{label}: plist minOS {framework_min} exceeds app minOS {app_min}")
         else:
@@ -76,6 +89,7 @@ def audit(app: pathlib.Path) -> int:
         architectures = arch_output.split()
         if not architectures:
             failures.append(f"{label}: no readable Mach-O architectures")
+        binary_mins: list[str] = []
         for arch in architectures:
             print(f"--- ARCH {arch}: otool -l ---")
             load_commands = run("otool", "-arch", arch, "-l", str(binary))
@@ -92,10 +106,19 @@ def audit(app: pathlib.Path) -> int:
             print(f"SUMMARY arch={arch} platform={platform} minOS={minos} SDK={sdk}")
             if platform != "IOS":
                 failures.append(f"{label} ({arch}): platform is {platform}, expected IOS device")
+            if arch not in {"arm64", "arm64e"}:
+                failures.append(f"{label} ({arch}): architecture is not supported for iPhone device distribution")
             if not minos:
                 failures.append(f"{label} ({arch}): LC_BUILD_VERSION minos unavailable")
-            elif version_tuple(minos) > version_tuple(app_min):
-                failures.append(f"{label} ({arch}): binary minOS {minos} exceeds app minOS {app_min}")
+            else:
+                binary_mins.append(minos)
+                if version_tuple(minos) > version_tuple(app_min):
+                    failures.append(f"{label} ({arch}): binary minOS {minos} exceeds app minOS {app_min}")
+
+        if plist_path and binary_mins and framework_min:
+            actual_min = max(binary_mins, key=version_tuple)
+            if version_tuple(framework_min) != version_tuple(actual_min):
+                failures.append(f"{label}: Info.plist MinimumOSVersion {framework_min} disagrees with binary minOS {actual_min}")
 
     if failures:
         print("\nCOMPATIBILITY AUDIT FAILED:", file=sys.stderr)

@@ -1,0 +1,25 @@
+{
+  "object" : {
+    "pins" : [
+      {
+        "package" : "kittentts-swift",
+        "repositoryURL" : "https://github.com/KittenML/KittenTTS-swift",
+        "state" : {
+          "branch" : null,
+          "revision" : "4da0abbb92af4e7faf61affabbdb80d334ea768e",
+          "version" : "0.1.0"
+        }
+      },
+      {
+        "package" : "onnxruntime-swift-package-manager",
+        "repositoryURL" : "https://github.com/microsoft/onnxruntime-swift-package-manager",
+        "state" : {
+          "branch" : null,
+          "revision" : "b7fb7f7dea8a2469e6335d95a61b8f36d0dc83b2",
+          "version" : "1.24.2"
+        }
+      }
+    ]
+  },
+  "version" : 2
+}
