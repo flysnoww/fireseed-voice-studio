@@ -187,7 +187,8 @@ jobs:
           grep -q '^TeamIdentifier=Z36ZADH7T7$' "$RUNNER_TEMP/voice-studio-codesign.txt"
           /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist" | grep -qx 'com.fireseed.voicestudio'
           test -s "$APP/Assets.car"
-          xcrun --find assetutil | xargs -I{} {} --info "$APP/Assets.car" > "$RUNNER_TEMP/voice-studio-assets.json"
+          ASSETUTIL="$(xcrun --find assetutil)"
+          "$ASSETUTIL" --info "$APP/Assets.car" > "$RUNNER_TEMP/voice-studio-assets.json"
           python3 - "$RUNNER_TEMP/voice-studio-assets.json" <<'PY'
           import json, sys
           with open(sys.argv[1], encoding="utf-8") as f: assets = json.load(f)
