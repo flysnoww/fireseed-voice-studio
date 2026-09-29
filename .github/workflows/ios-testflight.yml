@@ -175,7 +175,15 @@ jobs:
           ORT_FRAMEWORK=$(find "$RUNNER_TEMP/VoiceStudioDerivedData/SourcePackages/artifacts" \
             -path '*/onnxruntime.xcframework/ios-arm64/onnxruntime.framework' -type d -print -quit)
           test -n "$ORT_FRAMEWORK"
-          python3 scripts/align-onnxruntime-framework-minimum-os.py "$ORT_FRAMEWORK"
+          APP_MINIMUM_OS_VERSION=$(xcodebuild \
+            -project ios/VoiceStudio.xcodeproj \
+            -target VoiceStudio \
+            -configuration Release \
+            -sdk iphoneos \
+            -showBuildSettings | awk -F ' = ' '/^[[:space:]]*IPHONEOS_DEPLOYMENT_TARGET = / { print $2; exit }')
+          test -n "$APP_MINIMUM_OS_VERSION"
+          echo "VoiceStudio IPHONEOS_DEPLOYMENT_TARGET=$APP_MINIMUM_OS_VERSION"
+          python3 scripts/align-onnxruntime-framework-minimum-os.py "$ORT_FRAMEWORK" "$APP_MINIMUM_OS_VERSION"
           xcodebuild archive \
             -project ios/VoiceStudio.xcodeproj \
             -scheme VoiceStudio \

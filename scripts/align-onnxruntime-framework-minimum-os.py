@@ -19,7 +19,21 @@ def run(*args: str) -> str:
         raise SystemExit(str(error)) from error
 
 
-def main(framework: pathlib.Path) -> None:
+def framework_plist_minimum(source_mins: list[str], app_minimum: str) -> str:
+    if not source_mins:
+        raise ValueError("ONNX Runtime framework has no verifiable binary minimum OS version")
+    incompatible = [value for value in source_mins if version_tuple(value) > version_tuple(app_minimum)]
+    if incompatible:
+        raise ValueError(
+            f"ONNX Runtime source binary minOS {max(incompatible, key=version_tuple)} "
+            f"exceeds VoiceStudio deployment target {app_minimum}"
+        )
+    # The SPM artifact is a static archive. Xcode creates the embedded framework
+    # wrapper for the app target, whose Mach-O minOS is the app deployment target.
+    return app_minimum
+
+
+def main(framework: pathlib.Path, app_minimum: str) -> None:
     info_path = framework / "Info.plist"
     info = plistlib.loads(info_path.read_bytes())
     executable = framework / info.get("CFBundleExecutable", framework.stem)
@@ -42,17 +56,24 @@ def main(framework: pathlib.Path) -> None:
         print(f"ONNX Runtime {arch} build metadata entries={len(builds)} platform/minOS/SDK={metadata_summary}")
         mins.extend(build.minos for build in builds)
 
-    actual_min = max(mins, key=version_tuple)
+    try:
+        embedded_minimum = framework_plist_minimum(mins, app_minimum)
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
     original = info.get("MinimumOSVersion")
-    if original != actual_min:
-        print(f"Aligning ONNX Runtime framework MinimumOSVersion {original!r} -> {actual_min} from LC_BUILD_VERSION")
-        info["MinimumOSVersion"] = actual_min
+    if original != embedded_minimum:
+        print(
+            f"Aligning static ONNX Runtime framework wrapper MinimumOSVersion "
+            f"{original!r} -> {embedded_minimum} from VoiceStudio deployment target "
+            f"(source archive minOS {max(mins, key=version_tuple)})"
+        )
+        info["MinimumOSVersion"] = embedded_minimum
         info_path.write_bytes(plistlib.dumps(info, fmt=plistlib.FMT_XML, sort_keys=True))
     else:
-        print(f"ONNX Runtime framework MinimumOSVersion already matches LC_BUILD_VERSION: {actual_min}")
+        print(f"ONNX Runtime framework wrapper MinimumOSVersion already matches app target: {embedded_minimum}")
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        raise SystemExit("Usage: align-onnxruntime-framework-minimum-os.py <onnxruntime.framework>")
-    main(pathlib.Path(sys.argv[1]))
+    if len(sys.argv) != 3:
+        raise SystemExit("Usage: align-onnxruntime-framework-minimum-os.py <onnxruntime.framework> <app-minimum-os>")
+    main(pathlib.Path(sys.argv[1]), sys.argv[2])
