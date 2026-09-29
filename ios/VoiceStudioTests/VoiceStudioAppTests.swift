@@ -436,7 +436,8 @@ final class VoiceStudioAppTests: XCTestCase {
         XCTAssertEqual(model.savedGeneratedAudio.count, 1)
         XCTAssertEqual(model.savedGeneratedAudio.first?.id, generated.id)
         XCTAssertEqual(model.savedGeneratedAudio.first?.sourceVoice, .tinyLocalVoice("tiny-local"))
-        XCTAssertTrue(FileManager.default.fileExists(atPath: try XCTUnwrap(model.shareURL(for: generated)).path))
+        let savedAudio = try XCTUnwrap(model.savedGeneratedAudio.first)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: try XCTUnwrap(model.shareURL(for: savedAudio)).path))
     }
 
     @MainActor
