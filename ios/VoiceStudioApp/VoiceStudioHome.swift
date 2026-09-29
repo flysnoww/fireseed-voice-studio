@@ -738,7 +738,7 @@ private struct VoiceLibraryPresentationModifier: ViewModifier {
     }
 }
 
-private struct BackgroundImportRequestGate {
+struct BackgroundImportRequestGate {
     private(set) var activeRequestID: UUID?
 
     mutating func begin() -> UUID {
