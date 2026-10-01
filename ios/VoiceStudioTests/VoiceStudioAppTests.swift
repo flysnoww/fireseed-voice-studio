@@ -70,6 +70,21 @@ final class VoiceStudioAppTests: XCTestCase {
         XCTAssertEqual(try VoiceStudioModel(rootDirectory: root).currentVoice, model.currentVoice)
     }
 
+    @MainActor
+    func testAccentProbeCoversLocalesInsteadOfOnlyTopQualityVoices() async throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let voices = (0..<8).map { SystemVoiceDescriptor(identifier: "us-\($0)", name: "US \($0)", language: "en-US", quality: 3) }
+            + [SystemVoiceDescriptor(identifier: "gb", name: "UK", language: "en-GB"),
+               SystemVoiceDescriptor(identifier: "failed", name: "Unavailable", language: "en-AU")]
+        let cache = SystemVoiceAvailabilityCache { $0.identifier != "failed" }
+        let model = try VoiceStudioModel(rootDirectory: root, systemVoices: voices, voiceAvailability: cache)
+        await model.probeSystemAccents("en-US")
+        XCTAssertEqual(Set(model.usableSystemVoices.map(\.language)), Set(["en-US", "en-GB"]))
+        XCTAssertEqual(cache.results.count, 3, "Probe one representative per locale, not every same-accent voice.")
+        XCTAssertEqual(cache.results["failed"], .failed)
+    }
+
     func testSystemLanguageGroupingOrderingDeduplicationAndVoiceQualityRanking() {
         let voices = [SystemVoiceDescriptor(identifier: "default", name: "A", language: "en-US", quality: 1),
                       SystemVoiceDescriptor(identifier: "premium", name: "B", language: "en-GB", quality: 3),

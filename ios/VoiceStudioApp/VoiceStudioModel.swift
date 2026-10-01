@@ -206,6 +206,13 @@ final class VoiceStudioModel: ObservableObject {
         let candidates = SystemVoiceCatalog.rankVoices(systemVoiceCandidates.filter { SystemVoiceCatalog.baseLanguage($0.language) == base }, locale: .autoupdatingCurrent)
         await systemVoiceAvailability.test(all ? candidates : Array(candidates.prefix(8)))
     }
+    func probeSystemAccents(_ language: String) async {
+        let base = SystemVoiceCatalog.baseLanguage(language)
+        let ranked = SystemVoiceCatalog.rankVoices(systemVoiceCandidates.filter { SystemVoiceCatalog.baseLanguage($0.language) == base }, locale: .autoupdatingCurrent)
+        var checkedLocales = Set<String>()
+        let representatives = ranked.filter { checkedLocales.insert($0.language).inserted }
+        await systemVoiceAvailability.test(representatives)
+    }
     func restoreCurrentVoiceAvailability() async {
         let restoring = currentVoice
         if case .saved(let id) = currentVoice, savedVoices.contains(where: { $0.id == id }) { return }

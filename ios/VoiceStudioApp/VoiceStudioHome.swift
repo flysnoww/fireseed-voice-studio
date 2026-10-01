@@ -382,7 +382,7 @@ struct StudioVoiceDetail: View {
                 }
             }.accessibilityIdentifier("voiceDetailFloatingCard")
                 .onAppear { name = voice?.name ?? String(localized: "Hello.", locale: locale) }
-                .task { if selection.savedVoiceID != nil { await model.probeSystemLanguage(profile.language) } }
+                .task(id: profile.language) { if selection.savedVoiceID != nil { await model.probeSystemAccents(profile.language) } }
                 .confirmationDialog("Delete Voice?", isPresented: $deleting, titleVisibility: .visible) {
                     Button("Delete", role: .destructive) { if let voice { model.deleteSavedVoice(id: voice.id) }; dismiss() }
                 }
