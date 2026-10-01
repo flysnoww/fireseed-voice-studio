@@ -100,16 +100,16 @@ struct VoiceStudioHome: View {
                 await model.restoreCurrentVoiceAvailability()
             }
             .onChange(of: model.currentReference?.asset.id) { _, id in
-                if id != nil { voiceName = String(localized: "My voice", locale: locale) }
+                if id != nil, model.currentReference?.source == .record { voiceName = String(localized: "My voice", locale: locale) }
             }
         }
     }
     private var voiceSourceCard: some View {
         StudioCard(title: "Voice", symbol: "person.2") {
             HStack(spacing: 8) {
-                Button { focusedInput = false; card = .voices } label: { Label("My Voices", systemImage: "person.2") }
+                Button { focusedInput = false; card = .voices } label: { Label("My Voices", systemImage: "person.2").frame(maxWidth: .infinity) }
                     .frame(maxWidth: .infinity).accessibilityIdentifier("myVoicesButton")
-                Button { focusedInput = false; card = .system } label: { Label("System Voices", systemImage: "waveform") }
+                Button { focusedInput = false; card = .system } label: { Label("System Voices", systemImage: "waveform").frame(maxWidth: .infinity) }
                     .frame(maxWidth: .infinity).accessibilityIdentifier("systemVoicesButton")
                 ImportAudioButton(model: model, onChoose: { focusedInput = false }, onImported: { url in
                     voiceName = url.deletingPathExtension().lastPathComponent
@@ -153,6 +153,10 @@ struct VoiceStudioHome: View {
     private var diagnosticsCard: some View {
         StudioCard(title: "Developer Diagnostics", symbol: "stethoscope") {
             let snapshot = model.diagnostics.snapshot
+            HStack {
+                Button("Copy Diagnostics") { UIPasteboard.general.string = model.diagnostics.exportText() }
+                ShareLink(item: model.diagnostics.exportText()) { Label("Share Diagnostics", systemImage: "square.and.arrow.up") }
+            }
             LabeledContent("Current Voice", value: model.voiceName(for: model.currentVoice, locale: locale))
             LabeledContent("Voice Source", value: snapshot.voiceSource)
             LabeledContent("System Voice ID", value: snapshot.systemVoiceIdentifier ?? "—")
@@ -177,6 +181,7 @@ struct StudioFloatingCard<Content: View>: View {
     var subtitle: String? = nil
     @ViewBuilder var content: Content
     @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var appearance: AppAppearancePreference
     var body: some View {
         NavigationStack {
             content.navigationTitle(title).navigationBarTitleDisplayMode(.inline)
@@ -186,7 +191,7 @@ struct StudioFloatingCard<Content: View>: View {
                 } }
         }
         .presentationDetents([.medium, .large]).presentationDragIndicator(.visible)
-        .presentationCornerRadius(28).presentationBackground(.regularMaterial)
+        .presentationCornerRadius(28).presentationBackground(appearance.skin.material)
         .presentationContentInteraction(.scrolls)
     }
 }
@@ -754,7 +759,7 @@ private struct GeneratedAudioEditor: View {
     }
 
     var body: some View {
-        NavigationStack {
+        StudioFloatingCard(title: "Generated Audio") {
             Form {
                 Section {
                     TextField("Audio Name", text: $name)
@@ -778,16 +783,11 @@ private struct GeneratedAudioEditor: View {
                     Button("Delete Audio…", role: .destructive) { deleting = true }
                 }
             }
-            .navigationTitle("Generated Audio")
             .accessibilityIdentifier("generatedAudioFloatingCard")
             .confirmationDialog("Delete Audio?", isPresented: $deleting, titleVisibility: .visible) {
                 Button("Delete", role: .destructive) { onDelete(); dismiss() }
             }
-            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
         }
-        .presentationDetents([.medium, .large]).presentationDragIndicator(.visible)
-        .presentationCornerRadius(28).presentationBackground(.regularMaterial)
-        .presentationContentInteraction(.scrolls).accessibilityIdentifier("generatedAudioFloatingCard")
     }
 
     private var sourceName: String {
@@ -807,7 +807,9 @@ private struct ImportAudioButton: View {
     @State private var isImporterPresented = false
 
     var body: some View {
-        Button("Import Voice") { onChoose(); isImporterPresented = true }
+        Button { onChoose(); isImporterPresented = true } label: {
+            Label("Import Voice", systemImage: "square.and.arrow.down").frame(maxWidth: .infinity)
+        }
             .disabled(model.isRecording || model.isRequestingPermission)
             .accessibilityIdentifier("importButton")
             .fileImporter(isPresented: $isImporterPresented, allowedContentTypes: [.audio], allowsMultipleSelection: false) { result in

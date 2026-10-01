@@ -755,6 +755,8 @@ final class VoiceStudioModel: ObservableObject {
         }
         let started = ProcessInfo.processInfo.systemUptime
         diagnostics.start(.synthesis)
+        var activeStage = DiagnosticStage.synthesis
+        var activeStageStarted = started
         var temporaryURLs: [URL] = []
         defer { temporaryURLs.forEach { try? FileManager.default.removeItem(at: $0) } }
         do {
@@ -769,6 +771,7 @@ final class VoiceStudioModel: ObservableObject {
             diagnostics.finish(.synthesis, startedAt: started)
             let referenceURL = try audioFileStore.managedURL(for: targetVoice.referenceAudio)
             let conversionStarted = ProcessInfo.processInfo.systemUptime
+            activeStage = .voicePrepare; activeStageStarted = conversionStarted
             diagnostics.start(.voicePrepare)
             let convertedURL = try await openVoiceConverter.convert(
                 sourceURL: rawURL, targetReferenceURL: referenceURL,
@@ -786,12 +789,15 @@ final class VoiceStudioModel: ObservableObject {
             let conversionMilliseconds = max(0, Int((ProcessInfo.processInfo.systemUptime - conversionStarted) * 1000))
             diagnostics.finish(.voicePrepare, startedAt: conversionStarted)
             let dspStarted = ProcessInfo.processInfo.systemUptime
+            activeStage = .dsp; activeStageStarted = dspStarted
             diagnostics.start(.dsp)
             let shapedURL = try timePitchProcessor.process(convertedURL, speed: speed, pitch: pitch, shaping: shaping)
             diagnostics.finish(.dsp, startedAt: dspStarted)
             if shapedURL != convertedURL { temporaryURLs.append(shapedURL) }
             let output = try AVAudioFile(forReading: shapedURL)
             let duration = Double(output.length) / output.processingFormat.sampleRate
+            activeStage = .output; activeStageStarted = ProcessInfo.processInfo.systemUptime
+            diagnostics.start(.output)
             let asset = try audioFileStore.registerGeneratedAudio(from: shapedURL, duration: duration,
                                                                   sourceVoiceID: targetVoice.id,
                                                                   sourceVoice: .savedVoice(targetVoice.id),
@@ -809,12 +815,11 @@ final class VoiceStudioModel: ObservableObject {
                 $0.realTimeFactor = OpenVoiceRuntimeMetrics.realTimeFactor(
                     elapsedMilliseconds: runtimeMilliseconds, audioDuration: duration)
             }
-            diagnostics.finish(.output, startedAt: started)
+            diagnostics.finish(.output, startedAt: activeStageStarted)
             statusMessage = "Speech generated."
         } catch {
-            diagnostics.finish(.output, startedAt: started,
-                               error: NSError(domain: "OpenVoice.Pipeline", code: 1,
-                                              userInfo: [NSLocalizedDescriptionKey: "Voice conversion pipeline failed."]),
+            diagnostics.finish(activeStage, startedAt: activeStageStarted,
+                               error: error,
                                friendlyError: "Voice conversion failed.")
             diagnostics.update { $0.generation = "failed" }
             statusMessage = "This voice could not generate speech. Please try again."
