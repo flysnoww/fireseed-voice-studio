@@ -32,7 +32,7 @@ struct VoiceStudioHome: View {
                         StudioCard(title: "Current Voice", symbol: "person.wave.2") {
                             Button { card = .voice(model.currentVoice) } label: {
                                 HStack {
-                                    Text(model.voiceName(for: model.currentVoice)).font(.title3)
+                                    Text(model.voiceName(for: model.currentVoice, locale: locale)).font(.title3)
                                     Spacer()
                                     Image(systemName: "checkmark.circle.fill")
                                 }
@@ -153,7 +153,7 @@ struct VoiceStudioHome: View {
     private var diagnosticsCard: some View {
         StudioCard(title: "Developer Diagnostics", symbol: "stethoscope") {
             let snapshot = model.diagnostics.snapshot
-            LabeledContent("Current Voice", value: model.voiceName(for: model.currentVoice))
+            LabeledContent("Current Voice", value: model.voiceName(for: model.currentVoice, locale: locale))
             LabeledContent("Voice Source", value: snapshot.voiceSource)
             LabeledContent("System Voice ID", value: snapshot.systemVoiceIdentifier ?? "—")
             LabeledContent("Quality", value: snapshot.systemVoiceQuality.map(String.init) ?? "—")
@@ -322,7 +322,7 @@ struct StudioVoiceDetail: View {
         StudioFloatingCard(title: "Shape Voice") {
             Form {
                 Section {
-                    Text(model.voiceName(for: selection)).font(.title2)
+                    Text(model.voiceName(for: selection, locale: locale)).font(.title2)
                     Text(selection.savedVoiceID != nil ? "My Voice" : (selection == .tinyLocal ? "Local Voice" : "System Voice")).foregroundStyle(.secondary)
                     Button {
                         model.selectVoice(selection)

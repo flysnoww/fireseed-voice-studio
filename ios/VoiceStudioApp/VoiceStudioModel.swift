@@ -206,17 +206,25 @@ final class VoiceStudioModel: ObservableObject {
         await systemVoiceAvailability.test(all ? candidates : Array(candidates.prefix(8)))
     }
     func restoreCurrentVoiceAvailability() async {
+        let restoring = currentVoice
         if case .saved(let id) = currentVoice, savedVoices.contains(where: { $0.id == id }) { return }
         if case .tinyLocal = currentVoice, isTinyLocalModelReady { return }
         if case .systemVoice(let id) = currentVoice, let voice = systemVoiceCandidates.first(where: { $0.identifier == id }) {
             await systemVoiceAvailability.test([voice])
+            guard currentVoice == restoring else { return }
             if systemVoiceAvailability.results[id] == .usable { return }
         }
         if let voice = savedVoices.first { selectVoice(.saved(voice.id)); return }
         let language = SystemVoiceCatalog.baseLanguage(Locale.preferredLanguages.first ?? "en")
         await probeSystemLanguage(language)
-        if usableSystemVoices.isEmpty, language != "en" { await probeSystemLanguage("en") }
-        if let voice = SystemVoiceCatalog.rankVoices(usableSystemVoices, locale: .autoupdatingCurrent).first { selectVoice(.systemVoice(voice.identifier)) }
+        guard currentVoice == restoring else { return }
+        var candidates = usableSystemVoices.filter { SystemVoiceCatalog.baseLanguage($0.language) == language }
+        if candidates.isEmpty, language != "en" {
+            await probeSystemLanguage("en")
+            guard currentVoice == restoring else { return }
+            candidates = usableSystemVoices.filter { SystemVoiceCatalog.baseLanguage($0.language) == "en" }
+        }
+        if let voice = SystemVoiceCatalog.rankVoices(candidates, locale: .autoupdatingCurrent).first { selectVoice(.systemVoice(voice.identifier)) }
     }
     func selectVoice(_ selection: CurrentVoiceSelection) {
         if let id = selection.savedVoiceID, !savedVoices.contains(where: { $0.id == id }) { return }
@@ -561,6 +569,7 @@ final class VoiceStudioModel: ObservableObject {
                 $0.rendererGenerationDurationMilliseconds = nil
             }
             statusMessage = "Local voice data removed."
+            if currentVoice == .tinyLocal { await restoreCurrentVoiceAvailability() }
         } catch {
             statusMessage = "Could not remove local voice data. Please try again."
         }

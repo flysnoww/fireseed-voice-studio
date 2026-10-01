@@ -8,6 +8,25 @@ import VoiceStudioCore
 
 final class VoiceStudioAppTests: XCTestCase {
     @MainActor
+    func testAvailabilityRestoreCannotOverwriteANewerManualSelection() async throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let saved = try makePersistedVoices(in: root, count: 1)
+        let cache = SystemVoiceAvailabilityCache { _ in
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            return false
+        }
+        let model = try VoiceStudioModel(rootDirectory: root,
+            systemVoices: [SystemVoiceDescriptor(identifier: "old", name: "Old", language: "en-US")], voiceAvailability: cache)
+        model.selectVoice(.systemVoice("old"))
+        let restoring = Task { await model.restoreCurrentVoiceAvailability() }
+        await Task.yield()
+        model.selectVoice(.saved(saved[0].id))
+        await restoring.value
+        XCTAssertEqual(model.currentVoice, .saved(saved[0].id))
+        XCTAssertEqual(try VoiceStudioModel(rootDirectory: root).currentVoice, model.currentVoice)
+    }
+    @MainActor
     func testLatestSelectionManualReselectAndProfilesSurviveRestartIndependently() throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }

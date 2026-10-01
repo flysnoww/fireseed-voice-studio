@@ -147,7 +147,11 @@ actor OpenVoiceCoreMLConverter: VoiceConverterProvider {
 
     private func extractEmbedding(audioURL: URL, packDirectory: URL, cacheDirectory: URL) async throws -> [Float] {
         let started = ProcessInfo.processInfo.systemUptime
-        defer { lastTimings.embeddingMilliseconds += Int((ProcessInfo.processInfo.systemUptime - started) * 1000) }
+        let previousLoad = lastTimings.loadMilliseconds
+        defer {
+            let elapsed = Int((ProcessInfo.processInfo.systemUptime - started) * 1000)
+            lastTimings.embeddingMilliseconds += max(0, elapsed - (lastTimings.loadMilliseconds - previousLoad))
+        }
         let samples = try loadMonoSamples(audioURL)
         let spectrum = try stft(samples: samples)
         let frames = spectrum.count / 513
