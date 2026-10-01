@@ -37,6 +37,8 @@ jobs:
         run: |
           DEVICE_ID=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"]; print(next(x["udid"] for runtime in d.values() for x in runtime if x["name"].startswith("iPhone")))')
           echo "DEVICE_ID=$DEVICE_ID" >> "$GITHUB_ENV"
+          xcrun simctl boot "$DEVICE_ID" || true
+          xcrun simctl bootstatus "$DEVICE_ID" -b
 
       - name: Xcode unit tests
         run: |
@@ -48,6 +50,7 @@ jobs:
             -destination "platform=iOS Simulator,id=$DEVICE_ID,arch=arm64" \
             -resultBundlePath TestResults.xcresult \
             -skip-testing:VoiceStudioUITests \
+            -parallel-testing-enabled NO \
             ARCHS=arm64 \
             CODE_SIGNING_ALLOWED=NO | tee xcodebuild-test.log
 

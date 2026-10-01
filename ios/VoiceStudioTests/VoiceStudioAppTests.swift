@@ -696,14 +696,16 @@ final class VoiceStudioAppTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: try store.managedURL(for: saved.referenceAudio).path))
     }
 
+    @MainActor
     func testAppleSystemSpeechProviderProducesPlayableAudioForSharedRequest() async throws {
         let provider = AppleSystemSpeechProvider()
-        guard let language = provider.capabilities.languages.first(where: { $0.hasPrefix("en") }),
-              let accent = provider.capabilities.accents(for: language).first else {
-            throw XCTSkip("This simulator has no English system speech voice.")
-        }
-        let request = VoiceRequest(text: "Hello from Voice Studio", voice: .systemDefault,
-                                   language: language, accent: accent, speed: 1.2, renderMode: .generate)
+        let cache = SystemVoiceAvailabilityCache()
+        let english = SystemVoiceCatalog.rankVoices(AVSpeechSynthesisVoice.speechVoices().map(SystemVoiceDescriptor.init)
+            .filter { SystemVoiceCatalog.baseLanguage($0.language) == "en" && !$0.isPersonal }, locale: Locale(identifier: "en-US"))
+        await cache.test(Array(english.prefix(8)))
+        let selected = try XCTUnwrap(cache.usable(english).first, "A real usable English voice is required for this integration test.")
+        let request = VoiceRequest(text: "Hello from Voice Studio", voice: .systemVoice(selected.identifier),
+                                   language: "en", accent: selected.language, speed: 1.2, renderMode: .generate)
 
         let result = await provider.generate(request, voice: nil, referenceAudioURL: nil)
 
