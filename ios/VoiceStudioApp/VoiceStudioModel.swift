@@ -202,7 +202,8 @@ final class VoiceStudioModel: ObservableObject {
         refreshSystemVoiceCatalog()
     }
     func probeSystemLanguage(_ language: String, all: Bool = false) async {
-        let candidates = SystemVoiceCatalog.rankVoices(systemVoiceCandidates.filter { SystemVoiceCatalog.baseLanguage($0.language) == language }, locale: .autoupdatingCurrent)
+        let base = SystemVoiceCatalog.baseLanguage(language)
+        let candidates = SystemVoiceCatalog.rankVoices(systemVoiceCandidates.filter { SystemVoiceCatalog.baseLanguage($0.language) == base }, locale: .autoupdatingCurrent)
         await systemVoiceAvailability.test(all ? candidates : Array(candidates.prefix(8)))
     }
     func restoreCurrentVoiceAvailability() async {
@@ -282,6 +283,7 @@ final class VoiceStudioModel: ObservableObject {
     func generateCurrentVoice(text: String, preview: Bool = false) async {
         let selection = currentVoice
         let profile = currentVoiceProfile
+        let baseLanguage = SystemVoiceCatalog.baseLanguage(profile.language)
         guard !isGeneratingSpeech, !isResolvingVoice, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         isResolvingVoice = true
         defer {
@@ -291,8 +293,8 @@ final class VoiceStudioModel: ObservableObject {
         if selection.savedVoiceID != nil, profile.renderingPreference == .automatic {
             guard isOpenVoicePackReady else { statusMessage = "Install the optional voice pack in Settings to generate with this voice."; return }
             await probeSystemLanguage(profile.language)
-            if !usableSystemVoices.contains(where: { SystemVoiceCatalog.baseLanguage($0.language) == profile.language }) { await probeSystemLanguage(profile.language, all: true) }
-            let ranked = SystemVoiceCatalog.rankVoices(usableSystemVoices.filter { SystemVoiceCatalog.baseLanguage($0.language) == profile.language },
+            if !usableSystemVoices.contains(where: { SystemVoiceCatalog.baseLanguage($0.language) == baseLanguage }) { await probeSystemLanguage(profile.language, all: true) }
+            let ranked = SystemVoiceCatalog.rankVoices(usableSystemVoices.filter { SystemVoiceCatalog.baseLanguage($0.language) == baseLanguage },
                                                        locale: Locale(identifier: profile.accent ?? profile.language))
             guard let source = ranked.first else { statusMessage = "No usable system voice is available for this language."; return }
             diagnostics.update { $0.systemVoiceIdentifier = source.identifier; $0.systemVoiceQuality = source.quality; $0.voiceSource = "Saved Voice" }

@@ -419,7 +419,7 @@ struct StudioVoiceDetail: View {
     }
     private var accents: [String] {
         if case .systemVoice = selection { return profile.accent.map { [$0] } ?? [] }
-        return Array(Set(model.usableSystemVoices.filter { SystemVoiceCatalog.baseLanguage($0.language) == profile.language }.map(\.language))).sorted()
+        return Array(Set(model.usableSystemVoices.filter { SystemVoiceCatalog.baseLanguage($0.language) == SystemVoiceCatalog.baseLanguage(profile.language) }.map(\.language))).sorted()
     }
     private func displayLanguage(_ language: String) -> String { locale.localizedString(forLanguageCode: language) ?? language }
     private func displayAccent(_ accent: String?) -> String { accent.map { locale.localizedString(forIdentifier: $0) ?? $0 } ?? "—" }

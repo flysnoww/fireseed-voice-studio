@@ -103,6 +103,12 @@ final class VoiceStudioAppTests: XCTestCase {
         await cache.test(voices)
         let refreshedCount = await counter.count
         XCTAssertEqual(refreshedCount, 4)
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = try VoiceStudioModel(rootDirectory: root, systemVoices: voices,
+                                        voiceAvailability: SystemVoiceAvailabilityCache { $0.identifier == "good" })
+        await model.probeSystemLanguage("en-US")
+        XCTAssertEqual(model.usableSystemVoices.map(\.identifier), ["good"], "Legacy locale hints must resolve the same base-language group.")
     }
 
     @MainActor
