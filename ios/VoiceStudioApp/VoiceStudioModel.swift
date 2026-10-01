@@ -251,12 +251,12 @@ final class VoiceStudioModel: ObservableObject {
             }
         } catch { report(error) }
     }
-    func voiceName(for selection: VoiceSelection) -> String {
+    func voiceName(for selection: VoiceSelection, locale: Locale = .autoupdatingCurrent) -> String {
         switch selection {
-        case .saved(let id): savedVoices.first(where: { $0.id == id })?.name ?? String(localized: "My Voice")
-        case .systemVoice(let id): systemVoiceCandidates.first(where: { $0.identifier == id })?.name ?? String(localized: "System Voice")
-        case .tinyLocal: String(localized: "Local Voice")
-        case .systemDefault: String(localized: "System Voice")
+        case .saved(let id): savedVoices.first(where: { $0.id == id })?.name ?? String(localized: "My Voice", locale: locale)
+        case .systemVoice(let id): systemVoiceCandidates.first(where: { $0.identifier == id })?.name ?? String(localized: "System Voice", locale: locale)
+        case .tinyLocal: String(localized: "Local Voice", locale: locale)
+        case .systemDefault: String(localized: "System Voice", locale: locale)
         }
     }
     var canGenerateCurrentVoice: Bool {

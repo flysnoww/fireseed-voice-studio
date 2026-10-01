@@ -458,7 +458,7 @@ final class SystemVoiceAvailabilityCache: ObservableObject {
             let usable = await withTaskCancellationHandler(operation: { await task.value }, onCancel: { task.cancel() })
             guard revision == activeRevision else { return }
             pending.removeValue(forKey: voice.identifier)
-            if Task.isCancelled { results.removeValue(forKey: voice.identifier); return }
+            if Task.isCancelled || task.isCancelled { results.removeValue(forKey: voice.identifier); return }
             results[voice.identifier] = usable ? .usable : .failed
             if !usable { diagnostics[voice.identifier] = "synthesisProbe · \(voice.identifier) · \(voice.language) · quality=\(voice.quality) · no valid PCM" }
         }

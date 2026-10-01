@@ -17,14 +17,18 @@ final class VoiceStudioUITests: XCTestCase {
         if !element.isHittable { app.swipeUp() }
         element.tap()
     }
-    private func closeCard() { app.buttons["floatingCardClose"].lastMatch.tap() }
-    private func expandCard() { app.swipeUp() }
+    private func closeCard() { app.buttons.matching(identifier: "floatingCardClose").allElementsBoundByIndex.last!.tap() }
+    private func expandCard() {
+        let close = app.buttons.matching(identifier: "floatingCardClose").allElementsBoundByIndex.last!
+        let start = app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: app.frame.width / 2, dy: close.frame.minY - 14))
+        start.press(forDuration: 0.2, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.12)))
+    }
     private func generate() {
-        let field = app.textFields["generationTextField"]
+        let field = app.descendants(matching: .any).matching(identifier: "generationTextField").firstMatch
         XCTAssertTrue(field.waitForExistence(timeout: 20))
         if !field.isHittable { app.swipeUp() }
         field.tap(); field.typeText("Hello from Voice Studio.")
-        if app.buttons["Done"].exists { app.buttons["Done"].lastMatch.tap() }
+        if let done = app.buttons.matching(identifier: "Done").allElementsBoundByIndex.last { done.tap() }
         tap("generateSpeechButton")
         XCTAssertTrue(app.buttons["saveGeneratedAudioButton"].waitForExistence(timeout: 180))
         screenshot("Generated unsaved output")
