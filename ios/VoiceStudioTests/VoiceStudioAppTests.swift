@@ -8,6 +8,104 @@ import VoiceStudioCore
 
 final class VoiceStudioAppTests: XCTestCase {
     @MainActor
+    func testLatestSelectionManualReselectAndProfilesSurviveRestartIndependently() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let voices = try makePersistedVoices(in: root, count: 2)
+        let model = try VoiceStudioModel(rootDirectory: root)
+        model.selectVoice(.saved(voices[0].id))
+        let first = VoiceProfile(speed: 1.25, pitch: 250, language: "zh", accent: "zh-CN")
+        model.updateProfile(first, for: .saved(voices[0].id))
+        model.selectVoice(.saved(voices[1].id))
+        XCTAssertEqual(model.currentVoice, .saved(voices[1].id))
+        XCTAssertEqual(model.currentVoiceProfile.speed, 1)
+        model.selectVoice(.systemVoice("test-system"))
+        let system = VoiceProfile(speed: 0.8, pitch: -100, language: "en", accent: "en-GB")
+        model.updateProfile(system, for: .systemVoice("test-system"))
+        model.selectVoice(.saved(voices[0].id))
+        XCTAssertEqual(model.currentVoiceProfile, first)
+        let restored = try VoiceStudioModel(rootDirectory: root)
+        XCTAssertEqual(restored.currentVoice, .saved(voices[0].id))
+        XCTAssertEqual(restored.currentVoiceProfile, first)
+        XCTAssertEqual(restored.profile(for: .systemVoice("test-system")), system)
+        XCTAssertEqual(restored.savedVoices.count, 2)
+        XCTAssertNotNil(restored.shareURL(for: voices[0].referenceAudio))
+    }
+
+    @MainActor
+    func testSaveRecordAndImportImmediatelySelectsSavedVoiceWithoutConfirmation() async throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try AudioFileStore(rootDirectory: root)
+        let recorded = try makeStagedAsset(in: store)
+        let imported = try makeStagedAsset(in: store)
+        let model = try VoiceStudioModel(rootDirectory: root, audioRecorder: StubAudioRecorder(asset: recorded), audioImporter: StubAudioImporter(asset: imported))
+        await model.startRecording(); model.stopRecording(); model.saveVoice(name: "Recorded test")
+        XCTAssertEqual(model.currentVoice.savedVoiceID, model.mostRecentlySavedVoiceID)
+        XCTAssertNil(model.currentReference)
+        model.importAudio(from: URL(fileURLWithPath: "/test.wav")); model.saveVoice(name: "Imported test")
+        XCTAssertEqual(model.currentVoice.savedVoiceID, model.mostRecentlySavedVoiceID)
+        XCTAssertEqual(model.savedVoices.count, 2)
+        model.saveVoice(name: "Duplicate")
+        XCTAssertEqual(model.savedVoices.count, 2)
+        XCTAssertEqual(try VoiceStudioModel(rootDirectory: root).currentVoice, model.currentVoice)
+    }
+
+    func testSystemLanguageGroupingOrderingDeduplicationAndVoiceQualityRanking() {
+        let voices = [SystemVoiceDescriptor(identifier: "default", name: "A", language: "en-US", quality: 1),
+                      SystemVoiceDescriptor(identifier: "premium", name: "B", language: "en-GB", quality: 3),
+                      SystemVoiceDescriptor(identifier: "personal", name: "C", language: "en-US", quality: 1, isPersonal: true)]
+        XCTAssertEqual(SystemVoiceCatalog.groupByBaseLanguage(voices)["en"]?.count, 3)
+        let languages = SystemVoiceCatalog.rankLanguages(["en", "zh", "de", "zz", "fr", "en"], systemLanguage: "zh-Hans", locale: Locale(identifier: "en"))
+        XCTAssertEqual(Array(languages.prefix(2)), ["zh", "en"])
+        XCTAssertEqual(languages.filter { $0 == "en" }.count, 1)
+        XCTAssertEqual(languages.last, "zz")
+        let english = SystemVoiceCatalog.rankLanguages(["en", "zh"], systemLanguage: "en-US", locale: Locale(identifier: "en"))
+        XCTAssertEqual(english, ["en", "zh"])
+        XCTAssertEqual(SystemVoiceCatalog.rankVoices(voices, locale: Locale(identifier: "en-US")).map(\.identifier), ["personal", "premium", "default"])
+    }
+
+    @MainActor
+    func testUsableProbeCachesFailuresHidesUnavailableAndInvalidatesOnAppleNotification() async throws {
+        let counter = ProbeCounter()
+        let cache = SystemVoiceAvailabilityCache { voice in await counter.probe(voice) }
+        let voices = [SystemVoiceDescriptor(identifier: "good", name: "Good", language: "en-US", quality: 1),
+                      SystemVoiceDescriptor(identifier: "bad", name: "Bad", language: "en-US", quality: 3)]
+        await cache.test(voices); await cache.test(voices)
+        let count = await counter.count
+        XCTAssertEqual(count, 2)
+        XCTAssertEqual(cache.usable(voices).map(\.identifier), ["good"])
+        XCTAssertNotNil(cache.diagnostics["bad"])
+        let invalidation = expectation(description: "Apple voices changed")
+        cache.onInvalidation = { invalidation.fulfill() }
+        NotificationCenter.default.post(name: AVSpeechSynthesizer.availableVoicesDidChangeNotification, object: nil)
+        await fulfillment(of: [invalidation], timeout: 2)
+        XCTAssertTrue(cache.results.isEmpty)
+        await cache.test(voices)
+        let refreshedCount = await counter.count
+        XCTAssertEqual(refreshedCount, 4)
+    }
+
+    @MainActor
+    func testProbeCancellationDoesNotCacheUnavailableAndDeletedCurrentVoiceFallsBack() async throws {
+        let cache = SystemVoiceAvailabilityCache { _ in
+            do { try await Task.sleep(nanoseconds: 2_000_000_000); return true } catch { return false }
+        }
+        let voice = SystemVoiceDescriptor(identifier: "pending", name: "Pending", language: "en-US", quality: 1)
+        let task = Task { await cache.test([voice]) }
+        await Task.yield(); task.cancel(); await task.value
+        XCTAssertNil(cache.results[voice.identifier])
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let saved = try makePersistedVoices(in: root, count: 2)
+        let model = try VoiceStudioModel(rootDirectory: root)
+        model.selectVoice(.saved(saved[0].id)); model.deleteSavedVoice(id: saved[0].id)
+        XCTAssertEqual(model.currentVoice, .saved(saved[1].id))
+        XCTAssertEqual(model.personalVoiceAuthorization, AVSpeechSynthesizer.personalVoiceAuthorizationStatus)
+        if model.personalVoiceAuthorization != .authorized { XCTAssertFalse(model.systemVoiceCandidates.contains(where: \.isPersonal)) }
+        XCTAssertFalse(model.isLocalSpeechReady)
+    }
+    @MainActor
     func testAppLanguageDefaultsToSystemAndPersistsExplicitSelections() {
         let defaults = makeLanguageDefaults()
         let key = UUID().uuidString
@@ -447,9 +545,9 @@ final class VoiceStudioAppTests: XCTestCase {
         let model = try VoiceStudioModel(rootDirectory: root)
         let capabilities = model.capabilities(for: .systemDefault)
 
-        XCTAssertEqual(capabilities.shaping[.brightness], .supported)
-        XCTAssertEqual(capabilities.shaping[.clarity], .supported)
-        XCTAssertEqual(capabilities.shaping[.softness], .supported)
+        XCTAssertNil(capabilities.shaping[.brightness])
+        XCTAssertNil(capabilities.shaping[.clarity])
+        XCTAssertNil(capabilities.shaping[.softness])
         XCTAssertTrue(capabilities.expressions.isEmpty)
         XCTAssertEqual(capabilities.status(for: .speed), .supported)
         XCTAssertEqual(capabilities.status(for: .pitch), .supported)
@@ -634,31 +732,31 @@ final class VoiceStudioAppTests: XCTestCase {
         XCTAssertTrue(personal.allSatisfy { $0.voiceTraits.contains(.isPersonalVoice) })
     }
 
-    func testSystemProviderAdvertisesOnlyImplementedPostProcessingAndNoExpression() {
+    func testSystemProviderHidesExperimentalEQAndExpression() {
         let provider = AppleSystemSpeechProvider()
         XCTAssertEqual(provider.capabilities.status(for: .speechGeneration), .supported)
-        XCTAssertEqual(provider.capabilities.shaping[.brightness], .supported)
-        XCTAssertEqual(provider.capabilities.shaping[.clarity], .supported)
-        XCTAssertEqual(provider.capabilities.shaping[.softness], .supported)
+        XCTAssertNil(provider.capabilities.shaping[.brightness])
+        XCTAssertNil(provider.capabilities.shaping[.clarity])
+        XCTAssertNil(provider.capabilities.shaping[.softness])
         XCTAssertTrue(provider.capabilities.expressions.isEmpty)
     }
 
     @MainActor
-    func testCapabilityVisibilityReflectsSharedDSPButKeepsExpressionUnsupported() throws {
+    func testProductionCapabilitiesExposeSpeedPitchAndHideExperimentalEQ() throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let model = try VoiceStudioModel(rootDirectory: root)
         let system = model.capabilities(for: .systemDefault)
         XCTAssertEqual(system.status(for: .pitch), .supported)
-        XCTAssertEqual(system.shaping[.brightness], .supported)
-        XCTAssertEqual(system.shaping[.clarity], .supported)
-        XCTAssertEqual(system.shaping[.softness], .supported)
+        XCTAssertNil(system.shaping[.brightness])
+        XCTAssertNil(system.shaping[.clarity])
+        XCTAssertNil(system.shaping[.softness])
         XCTAssertTrue(system.expressions.isEmpty)
 
         let saved = model.capabilities(for: .saved(UUID()))
-        XCTAssertEqual(saved.shaping[.brightness], .supported)
-        XCTAssertEqual(saved.shaping[.clarity], .supported)
-        XCTAssertEqual(saved.shaping[.softness], .supported)
+        XCTAssertNil(saved.shaping[.brightness])
+        XCTAssertNil(saved.shaping[.clarity])
+        XCTAssertNil(saved.shaping[.softness])
     }
 
     func testSharedDSPParameterBoundsRejectUnsupportedAndNonFiniteValues() {
@@ -1127,4 +1225,9 @@ private actor StubTinyLocalSpeechProvider: SpeechProvider {
         }
         return .renderedFile(outputURL, duration: duration, approximation: nil)
     }
+}
+
+private actor ProbeCounter {
+    private(set) var count = 0
+    func probe(_ voice: SystemVoiceDescriptor) -> Bool { count += 1; return voice.identifier != "bad" }
 }

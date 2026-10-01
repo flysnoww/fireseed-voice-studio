@@ -1,45 +1,43 @@
-# Mobile Voice Engine Architecture
+# Voice-centered Mobile Voice Engine (M2-C2.1)
 
-## Product boundary
-
-The app owns model-neutral `VoiceAsset`, `VoiceRequest`, and `AudioAsset` data. Rendering providers consume a request and produce a temporary PCM/audio file; the shared audio lifecycle validates and caches the result. Only an explicit save promotes generated audio to durable storage. Voice reference audio remains canonical user data.
+## Product state and routes
 
 ```text
-Voice selection
-    ├─ System voice ── AVSpeechSynthesizer ─┐
-    ├─ Saved voice ── selected local clone ─┤
-    ├─ Saved voice ── System speech → OpenVoice VC ─┼─> shared DSP ─> AudioAsset
-    └─ Local fixed voice ── local generator ┘
+Home voice entries → CurrentVoiceSelection (one, persisted)
+  ├ Saved Voice → usable system speech → OpenVoice conversion → Speed/Pitch → AudioAsset
+  ├ System / Apple Personal Voice → system speech → Speed/Pitch → AudioAsset
+  ├ installed local English voice → Kitten → Speed/Pitch → AudioAsset
+  └ explicitly opted-in advanced Saved Voice → legacy Qwen → Speed/Pitch → AudioAsset
 ```
 
-## Providers and deterministic routing
+A completed library selection is immediately current. Saving Record/Import selects the new durable Voice. Relaunch restores the selection; missing/unusable entries fall back to the newest Saved Voice, then a probed usable system voice. There is no Confirm, Prepare, Use or Apply user step. Automatic Saved Voice generation never requires a manually selected system source or precomputed target embedding. Missing optional conversion data is reported truthfully; system generation works without any downloaded models.
 
-- **System provider:** `AVSpeechSynthesisVoice` catalog and `AVSpeechSynthesizer.write` generate PCM. Explicit identifiers select the chosen device voice. Personal Voices remain Apple-managed system voices, shown only when the OS enumerates them after its authorization flow.
-- **Local generator provider:** Kitten remains a fixed English voice. Qwen remains available for saved-voice cloning as the quality baseline and advanced/experimental route. Qwen's measured iPhone footprint and latency make it unsuitable as the architecture default; no Qwen behavior or pack format is changed in this stage.
-- **Voice converter provider:** OpenVoice V2 is an isolated, optional Core ML spike candidate behind a small `VoiceConverterProvider` seam. It consumes generated source speech plus a VoiceAsset reference and must never own or delete that reference. Its model pack stays outside the IPA. The experimental route can be explicitly selected after pack validation and voice embedding preparation; it is not the default route. Quality/performance are not yet validated on a physical device.
-- **DSP stage:** AVAudioEngine offline rendering applies pitch/rate and bounded EQ controls after a provider emits audio. DSP does not claim emotion or identity conversion.
+## Persistence and migration
 
-Routing is deterministic: system selection uses System; Tiny Local uses its fixed generator; a prepared Saved Voice uses Qwen unless the user explicitly selects System Voice Conversion, in which case Apple system speech feeds OpenVoice VC. The system path never calls the Qwen voice-prepare method. Expression values remain explicitly unsupported until a provider implements them.
+`VoiceAsset.profile` is model-neutral: speed, pitch, language, accent, rendering preference. Decoding earlier metadata supplies neutral speed/pitch and the existing language/accent hints. Rename/favorite/profile updates preserve reference identity and bytes. `voice-selection.json` separately stores one selection and system/local profiles keyed by stable identifiers. Apple voices are never copied into Saved Voice assets.
 
-## Capability contract
+Preview cache remains FIFO 5; unsaved Generate cache remains FIFO 2. Only explicit Save promotes output. Sharing works from managed cached or durable files. Canonical references stay durable; embeddings and compiled models are disposable. Removing a pack cannot delete VoiceAsset/reference/audio metadata.
 
-Each provider advertises `supported`, `approximate`, or `unsupported` for generation, cloning, language/accent, speed/pitch, shaping, and expression. The UI exposes only supported controls. Requests outside the bounded DSP parameter ranges fail validation; they are not silently clamped.
+## Native presentation
 
-Current shared DSP controls are pitch (±1200 cents), rate (0.5×–2×), brightness, clarity, and softness (each normalized −1...1). Brightness/softness use a restrained high shelf; clarity uses a restrained presence band. Their audible quality still requires listening checks on physical devices and representative voices.
+`StudioFloatingCard` uses SwiftUI sheets, native NavigationStack, medium/large detents, drag indicator, common material/corners and Done. Libraries, system language/voice choices, Shaping, language/accent and Settings children use this treatment. Generated Audio is an editable object card. Background replacement and skin persistence remain independent.
 
-## Durable assets and disposable runtime data
+## Usable system voices
 
-- `VoiceAsset` and its canonical reference audio remain durable across provider changes.
-- `AudioAsset` stores generated audio and model-neutral source metadata.
-- Speaker embeddings and compiled Core ML models are disposable/rebuildable caches, keyed by reference identity and pack revision. They are never the sole copy of a user's voice.
-- Optional model packs are installed under app support storage, validated against a manifest and hashes, and deleted independently of voice/audio assets. Large packs are not bundled in the IPA.
+The OS catalog supplies identifiers, names, locale, gender and quality; no private Siri identifiers are assumed. Base-language groups are unique. Device language is first, English second without duplication, then a small documented static language order and localized alphabetical fallback. Within a language, authorized Personal Voice precedes Premium, Enhanced, Default, then locale/name/id ties. The UI initially probes eight candidates and offers more.
 
-## OpenVoice evidence gate
+`SystemVoiceAvailabilityCache` asynchronously calls `AVSpeechSynthesizer.write` with a short native phrase. Only a nonempty valid PCM buffer makes a voice usable. Failure is diagnostic-only; unusable voices never appear as selectable rows. Tasks support cancellation and timeout; identifier results are reused until Apple's available-voices notification invalidates them. Personal Voices are hidden unless enumerated and authorized through Apple's official permission flow. Voice availability is device-dependent.
 
-The candidate is the community Core ML conversion of MyShell OpenVoice V2. The pinned upstream source revision is `3a72f7931fce14857c34a15b2d83ffbcaa755e16`; the pinned Core ML package revision is `b0f10347769c88bb6df26e268d4b84bc7237fdeb`. The source and conversion are MIT licensed. The downloaded package payload is 66,024,655 bytes (about 63 MiB): encoder 1,653,738 bytes and converter 64,370,917 bytes. The converter model card advertises iOS 17 and roughly 500 MB peak RAM; the downloaded model tree is 66.2 MB, so its 58 MB figure is not used as the measured payload. These source figures are not iPhone measurements. Runtime compile/load time, RAM, RTF, Chinese/English quality, and the four gender-pair combinations must be verified in the isolated spike before enabling it. Its ~10-second reference guidance means the requested 3–5 second test must be measured rather than assumed.
+## Shaping and providers
 
-The optional pack store verifies both immutable revisions, package inventory, byte sizes and SHA-256 values. Pack deletion also clears only the OpenVoice embedding cache; it does not access the voice library or canonical reference audio. The UI exposes install, validate and remove for this pack. The converter card recommends an approximately 10-second reference, following the package guidance; a shorter reference remains unverified.
+Production controls are native rate 0.5–2 and pitch ±1200 cents, applied once in shared offline AVAudioEngine DSP. Brightness/clarity/softness are absent from production capability/UI; their old experimental DSP tests remain. Expression contract remains unsupported and has no controls. No emotion claim is made.
 
-## Scope decisions
+Saved automatic routing uses language/accent and the usable catalog to choose system source speech. OpenVoice lazily creates/reuses target embeddings keyed by Voice ID + reference ID + pinned converter revision. System speech and optional Kitten work with NO QWEN MODEL. Qwen packs/runtime remain compatible but are never restored by default; only advanced preference may load them. Kitten is an optional installed local English fixed voice, not a cloning provider.
 
-Qwen is preserved as the existing quality baseline because its Chinese cloning behavior has passed the project's physical-device evaluation. OpenVoice remains decoupled because its conversion model and encoder are optional and must not increase the installed app's footprint. MOSS remains a later candidate only if the measured OpenVoice result fails the product's size/quality gate.
+OpenVoice is optional, outside the IPA, with exact upstream revision `3a72f7931fce14857c34a15b2d83ffbcaa755e16` and converter revision `b0f10347769c88bb6df26e268d4b84bc7237fdeb`. Its six immutable payload files total 66,024,655 bytes. Existing manifest/hash/model-feature validation is preserved. No new model architecture is introduced.
+
+## Verification and diagnostics
+
+Unit tests cover migration, independent profiles, selection, restoration, save auto-selection, usable-probe cache/invalidation/cancellation, capabilities and asset lifetimes. Simulator UI regression seeds explicitly synthetic reference/output assets in isolated storage, imports the same hash-verified existing optional pack, uses real system synthesis/Core ML conversion, and attaches flow screenshots. This checks plumbing, not cloning similarity or iPhone latency.
+
+Build 4 diagnostics include source, identifier, quality, language/accent, route, synthesis/DSP stage time, OpenVoice load/embedding/conversion time, output duration, RTF and actual process physical footprint. No reference audio or user text is logged. iPhone listening/performance remains a user hardware gate. No MOSS, cloud, account, training, new model or next milestone is part of this change.

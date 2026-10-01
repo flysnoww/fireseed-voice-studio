@@ -32,6 +32,8 @@ enum OpenVoiceModelContract {
 /// Loads one Core ML component at a time. Compiled packages and speaker vectors
 /// are disposable cache data; source/reference audio stays in AudioFileStore.
 actor OpenVoiceCoreMLConverter: VoiceConverterProvider {
+    private var lastTimings = VoiceConverterTimings()
+    func timings() -> VoiceConverterTimings? { lastTimings }
     private static let sampleRate = 22_050.0
     private static let fftSize = 1_024
     private static let hopLength = 256
@@ -69,6 +71,7 @@ actor OpenVoiceCoreMLConverter: VoiceConverterProvider {
 
     func convert(sourceURL: URL, targetReferenceURL: URL, targetVoiceID: UUID,
                  targetReferenceID: UUID, packDirectory: URL, cacheDirectory: URL) async throws -> URL {
+        lastTimings = VoiceConverterTimings()
         let cache = OpenVoiceSpeakerEmbeddingCache(rootDirectory: cacheDirectory.appendingPathComponent("Embeddings", isDirectory: true))
         let targetEmbedding: [Float]
         if let cached = cache.load(voiceID: targetVoiceID, referenceAudioID: targetReferenceID,
@@ -108,8 +111,10 @@ actor OpenVoiceCoreMLConverter: VoiceConverterProvider {
             "source_speaker": MLFeatureValue(multiArray: source),
             "target_speaker": MLFeatureValue(multiArray: target),
         ])
+        let conversionStarted = ProcessInfo.processInfo.systemUptime
         guard let output = try await converter.prediction(from: input)
             .featureValue(for: "audio")?.multiArrayValue else { throw OpenVoiceRuntimeError.predictionFailed }
+        lastTimings.conversionMilliseconds = Int((ProcessInfo.processInfo.systemUptime - conversionStarted) * 1000)
         return try writeWAV((0..<output.count).map { output[$0].floatValue })
     }
 
@@ -124,6 +129,8 @@ actor OpenVoiceCoreMLConverter: VoiceConverterProvider {
     }
 
     private func loadModel(named name: String, packDirectory: URL, cacheDirectory: URL) async throws -> MLModel {
+        let started = ProcessInfo.processInfo.systemUptime
+        defer { lastTimings.loadMilliseconds += Int((ProcessInfo.processInfo.systemUptime - started) * 1000) }
         let packageURL = packDirectory.appendingPathComponent("\(name).mlpackage", isDirectory: true)
         let compiledDirectory = cacheDirectory.appendingPathComponent("Compiled", isDirectory: true)
         try fileManager.createDirectory(at: compiledDirectory, withIntermediateDirectories: true)
@@ -139,6 +146,8 @@ actor OpenVoiceCoreMLConverter: VoiceConverterProvider {
     }
 
     private func extractEmbedding(audioURL: URL, packDirectory: URL, cacheDirectory: URL) async throws -> [Float] {
+        let started = ProcessInfo.processInfo.systemUptime
+        defer { lastTimings.embeddingMilliseconds += Int((ProcessInfo.processInfo.systemUptime - started) * 1000) }
         let samples = try loadMonoSamples(audioURL)
         let spectrum = try stft(samples: samples)
         let frames = spectrum.count / 513

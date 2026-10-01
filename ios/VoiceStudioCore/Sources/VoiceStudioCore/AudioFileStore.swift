@@ -120,7 +120,8 @@ public final class AudioFileStore {
         let saved = VoiceAsset(id: voice.id, name: voice.name, sourceType: voice.sourceType,
                                referenceAudio: reference, languageHint: voice.languageHint,
                                defaultAccent: voice.defaultAccent, defaultAttributes: voice.defaultAttributes,
-                               createdAt: voice.createdAt, updatedAt: Date(), isFavorite: voice.isFavorite)
+                               createdAt: voice.createdAt, updatedAt: Date(), isFavorite: voice.isFavorite,
+                               profile: voice.profile)
         try write(saved, named: "voice-\(saved.id.uuidString.lowercased()).json")
         return saved
     }
@@ -137,6 +138,15 @@ public final class AudioFileStore {
             throw VoiceStudioError.missingManagedAudio
         }
         let updated = voice.updating(name: trimmed)
+        try write(updated, named: "voice-\(id.uuidString.lowercased()).json")
+        return updated
+    }
+
+    public func updateVoiceProfile(id: UUID, profile: VoiceProfile) throws -> VoiceAsset {
+        guard profile.isValid, let voice = savedVoices().first(where: { $0.id == id }) else {
+            throw VoiceStudioError.invalidAudioFile
+        }
+        let updated = voice.updating(profile: profile)
         try write(updated, named: "voice-\(id.uuidString.lowercased()).json")
         return updated
     }
@@ -199,7 +209,7 @@ public final class AudioFileStore {
                               referenceAudio: reference, languageHint: voice.languageHint,
                               defaultAccent: voice.defaultAccent, defaultAttributes: voice.defaultAttributes,
                               createdAt: voice.createdAt, updatedAt: voice.updatedAt,
-                              isFavorite: voice.isFavorite)
+                              isFavorite: voice.isFavorite, profile: voice.profile)
         }
     }
 

@@ -4,6 +4,26 @@ import XCTest
 @testable import VoiceStudioCore
 
 final class AudioLifecycleTests: XCTestCase {
+    func testLegacyVoiceProfileMigratesAndUpdatedProfilePreservesDurableAssets() throws {
+        let saved = try store.saveVoice(VoiceAsset(name: "Legacy name", sourceType: .imported,
+                                                    referenceAudio: makeStagedAsset(), languageHint: "zh", defaultAccent: "zh-CN"))
+        let referenceURL = try store.managedURL(for: saved.referenceAudio)
+        let bytes = try Data(contentsOf: referenceURL)
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(saved)) as? [String: Any])
+        json.removeValue(forKey: "profile")
+        let legacy = try JSONDecoder().decode(VoiceAsset.self, from: JSONSerialization.data(withJSONObject: json))
+        XCTAssertEqual(legacy.profile, VoiceProfile(language: "zh", accent: "zh-CN"))
+        let profile = VoiceProfile(speed: 1.25, pitch: 200, language: "en", accent: "en-GB")
+        let updated = try store.updateVoiceProfile(id: saved.id, profile: profile)
+        XCTAssertEqual(updated.profile, profile)
+        XCTAssertEqual(updated.referenceAudio, saved.referenceAudio)
+        XCTAssertEqual(updated.name, saved.name)
+        let relaunched = try AudioFileStore(rootDirectory: temporaryRoot)
+        XCTAssertEqual(relaunched.savedVoices().first?.profile, profile)
+        XCTAssertEqual(try Data(contentsOf: relaunched.managedURL(for: updated.referenceAudio)), bytes)
+        XCTAssertThrowsError(try store.updateVoiceProfile(id: saved.id, profile: VoiceProfile(speed: .nan)))
+        XCTAssertEqual(store.savedVoices().first?.profile, profile)
+    }
     private var temporaryRoot: URL!
     private var store: AudioFileStore!
 

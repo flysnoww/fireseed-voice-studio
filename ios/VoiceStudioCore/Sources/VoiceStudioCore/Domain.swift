@@ -107,6 +107,26 @@ public enum VoiceSourceType: String, Codable, Sendable {
     case builtIn
 }
 
+public enum VoiceRenderingPreference: String, Codable, Sendable {
+    case automatic, advancedLocal
+}
+
+public struct VoiceProfile: Codable, Equatable, Sendable {
+    public var speed: Double
+    public var pitch: Double
+    public var language: String
+    public var accent: String?
+    public var renderingPreference: VoiceRenderingPreference
+    public init(speed: Double = 1, pitch: Double = 0, language: String = "en",
+                accent: String? = nil, renderingPreference: VoiceRenderingPreference = .automatic) {
+        self.speed = speed; self.pitch = pitch; self.language = language
+        self.accent = accent; self.renderingPreference = renderingPreference
+    }
+    public var isValid: Bool {
+        speed.isFinite && (0.5...2).contains(speed) && pitch.isFinite && (-1200...1200).contains(pitch) && !language.isEmpty
+    }
+}
+
 public struct VoiceAsset: Identifiable, Codable, Equatable, Sendable {
     public let id: UUID
     public let name: String
@@ -121,12 +141,13 @@ public struct VoiceAsset: Identifiable, Codable, Equatable, Sendable {
     public let isFavorite: Bool
 
     /// Voices are created as part of the save action; keep this computed to preserve the stored schema.
+    public let profile: VoiceProfile
     public var savedAt: Date { createdAt }
 
     public init(id: UUID = UUID(), name: String, sourceType: VoiceSourceType, referenceAudio: AudioAsset,
                 languageHint: String? = nil, defaultAccent: String? = nil,
                 defaultAttributes: [String: String] = [:], createdAt: Date = Date(), updatedAt: Date = Date(),
-                isFavorite: Bool = false) {
+                isFavorite: Bool = false, profile: VoiceProfile? = nil) {
         self.id = id
         self.name = name
         self.sourceType = sourceType
@@ -137,10 +158,11 @@ public struct VoiceAsset: Identifiable, Codable, Equatable, Sendable {
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.isFavorite = isFavorite
+        self.profile = profile ?? VoiceProfile(language: languageHint ?? "en", accent: defaultAccent)
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, sourceType, referenceAudio, languageHint, defaultAccent, defaultAttributes, createdAt, updatedAt, isFavorite
+        case id, name, sourceType, referenceAudio, languageHint, defaultAccent, defaultAttributes, createdAt, updatedAt, isFavorite, profile
     }
 
     public init(from decoder: Decoder) throws {
@@ -154,13 +176,15 @@ public struct VoiceAsset: Identifiable, Codable, Equatable, Sendable {
                   defaultAttributes: try values.decodeIfPresent([String: String].self, forKey: .defaultAttributes) ?? [:],
                   createdAt: try values.decode(Date.self, forKey: .createdAt),
                   updatedAt: try values.decode(Date.self, forKey: .updatedAt),
-                  isFavorite: try values.decodeIfPresent(Bool.self, forKey: .isFavorite) ?? false)
+                  isFavorite: try values.decodeIfPresent(Bool.self, forKey: .isFavorite) ?? false,
+                  profile: try values.decodeIfPresent(VoiceProfile.self, forKey: .profile))
     }
 
-    public func updating(name: String? = nil, isFavorite: Bool? = nil) -> VoiceAsset {
+    public func updating(name: String? = nil, isFavorite: Bool? = nil, profile: VoiceProfile? = nil) -> VoiceAsset {
         VoiceAsset(id: id, name: name ?? self.name, sourceType: sourceType, referenceAudio: referenceAudio,
                    languageHint: languageHint, defaultAccent: defaultAccent, defaultAttributes: defaultAttributes,
-                   createdAt: createdAt, updatedAt: Date(), isFavorite: isFavorite ?? self.isFavorite)
+                   createdAt: createdAt, updatedAt: Date(), isFavorite: isFavorite ?? self.isFavorite,
+                   profile: profile ?? self.profile)
     }
 }
 

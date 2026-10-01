@@ -37,6 +37,7 @@ jobs:
             -scheme VoiceStudio \
             -sdk iphonesimulator \
             -configuration Debug \
+            -derivedDataPath CI-DerivedData \
             CODE_SIGNING_ALLOWED=NO \
             ARCHS=arm64 \
             build | tee xcodebuild-build.log
@@ -47,7 +48,18 @@ jobs:
           echo "DEVICE_ID=$DEVICE_ID" >> "$GITHUB_ENV"
           echo "Selected iPhone simulator: $DEVICE_ID"
 
-      - name: Xcode unit tests
+      - name: Install real optional converter fixture for UI regression
+        run: |
+          set -euo pipefail
+          python3 experiments/m2c2-openvoice/prepare_ci_fixture.py "$RUNNER_TEMP/UIOpenVoicePack"
+          xcrun simctl boot "$DEVICE_ID" || true
+          xcrun simctl bootstatus "$DEVICE_ID" -b
+          xcrun simctl install "$DEVICE_ID" CI-DerivedData/Build/Products/Debug-iphonesimulator/VoiceStudio.app
+          CONTAINER=$(xcrun simctl get_app_container "$DEVICE_ID" com.fireseed.voicestudio data)
+          mkdir -p "$CONTAINER/Documents"
+          cp -R "$RUNNER_TEMP/UIOpenVoicePack" "$CONTAINER/Documents/UIOpenVoicePack"
+
+      - name: Xcode unit and UI regression tests
         run: |
           set -o pipefail
           xcodebuild test \
@@ -56,6 +68,8 @@ jobs:
             -configuration Debug \
             -destination "platform=iOS Simulator,id=$DEVICE_ID,arch=arm64" \
             -resultBundlePath TestResults.xcresult \
+            -derivedDataPath CI-DerivedData \
+            -parallel-testing-enabled NO \
             ARCHS=arm64 \
             CODE_SIGNING_ALLOWED=NO | tee xcodebuild-test.log
 

@@ -1,3 +1,4 @@
+import AVFoundation
 import PhotosUI
 import OSLog
 import SwiftUI
@@ -5,750 +6,444 @@ import UIKit
 import UniformTypeIdentifiers
 import VoiceStudioCore
 
-struct VoiceStudioHome: View {
-    private enum InputField: Hashable { case speechText, voiceName }
+private enum StudioCardRoute: Identifiable {
+    case voices, system, voice(VoiceSelection), history, settings
+    var id: String { String(describing: self) }
+}
 
+struct VoiceStudioHome: View {
     @StateObject private var model: VoiceStudioModel
+    @State private var card: StudioCardRoute?
     @State private var voiceName = "My voice"
-    @State private var voiceNameWasEdited = false
     @State private var generationText = ""
-    @State private var generationVoice = VoiceSelection.systemDefault
-    @State private var generationLanguage = "en"
-    @State private var generationAccent: String?
-    @State private var speed = 1.0
-    @State private var pitch = 0.0
-    @State private var brightness = 0.0
-    @State private var clarity = 0.0
-    @State private var softness = 0.0
-    @State private var personalVoiceRefresh = 0
-    @State private var useSystemVoiceConverter = false
-    @State private var converterSourceVoiceIdentifier: String?
-    @State private var voiceToDelete: VoiceAsset?
-    @State private var generatedAudioToDelete: AudioAsset?
-    @State private var voiceToEdit: VoiceAsset?
-    @State private var audioToEdit: AudioAsset?
-    @State private var isSavedVoicePickerPresented = false
-    @State private var isSystemVoicePickerPresented = false
-    @State private var isGeneratedAudioLibraryPresented = false
-    @State private var pendingVoiceName: String?
-    @State private var textInputFrames: [String: CGRect] = [:]
-    @FocusState private var focusedInput: InputField?
+    @FocusState private var focusedInput: Bool
+    @EnvironmentObject private var appearance: AppAppearancePreference
     @Environment(\.locale) private var locale
     @Environment(\.openURL) private var openURL
-    @EnvironmentObject private var appearance: AppAppearancePreference
-
     init(model: VoiceStudioModel) { _model = StateObject(wrappedValue: model) }
-
     var body: some View {
         NavigationStack {
             ZStack {
                 StudioBackdrop(skin: appearance.skin, imageURL: appearance.backgroundImageURL)
-                    .onTapGesture { focusedInput = nil }
-                ScrollViewReader { scrollProxy in
-                    ScrollView {
-                        VStack(spacing: 16) {
-                            voiceCard
-                            libraryEntryCard
-                            textCard
-                            shapingCard
-                            expressionCard
-                            languageCard
-                            generateCard
-                            developerDiagnosticsCard
+                    .onTapGesture { focusedInput = false }
+                ScrollView {
+                    VStack(spacing: 18) {
+                        voiceSourceCard
+                        StudioCard(title: "Current Voice", symbol: "person.wave.2") {
+                            Button { card = .voice(model.currentVoice) } label: {
+                                HStack {
+                                    Text(model.voiceName(for: model.currentVoice)).font(.title3)
+                                    Spacer()
+                                    Image(systemName: "checkmark.circle.fill")
+                                }
+                            }.accessibilityIdentifier("currentVoiceCard")
+                            Button("Shape Voice") { card = .voice(model.currentVoice) }
+                                .accessibilityIdentifier("shapeVoiceButton")
                         }
-                        .padding(.horizontal, 18)
-                        .padding(.top, 12)
-                    .padding(.bottom, 28)
-                    .frame(maxWidth: 680)
-                    .frame(maxWidth: .infinity)
-                    }
-                    .scrollDismissesKeyboard(.interactively)
-                    .onChange(of: model.mostRecentlySavedVoiceID) { _, voiceID in
-                        guard let voiceID else { return }
-                        withAnimation(.easeInOut(duration: 0.3)) { scrollProxy.scrollTo(voiceID, anchor: .center) }
-                    }
-                }
+                        StudioCard(title: "Text", symbol: "text.alignleft") {
+                            TextField("Enter text for your voice", text: $generationText, axis: .vertical)
+                                .lineLimit(3...8).textFieldStyle(.roundedBorder).focused($focusedInput)
+                                .accessibilityIdentifier("generationTextField")
+                        }
+                        StudioCard(title: "Generate", symbol: "waveform") {
+                            HStack {
+                                Button("Preview") { generate(preview: true) }
+                                    .accessibilityIdentifier("previewSpeechButton")
+                                Button(model.isGeneratingSpeech ? "Generating…" : "Generate") { generate(preview: false) }
+                                    .accessibilityIdentifier("generateSpeechButton")
+                            }.disabled(model.isGeneratingSpeech || !model.canGenerateCurrentVoice || generationText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                            if model.isGeneratingSpeech || model.isResolvingVoice { ProgressView("Preparing…") }
+                            if let audio = model.generatedAudio {
+                                HStack {
+                                    Button("Play") { model.playGeneratedAudio() }
+                                    Button("Stop") { model.stopPlayback() }
+                                    Button("Save Audio") { model.saveGeneratedAudio() }
+                                        .disabled(audio.persistenceState == .persistent)
+                                        .accessibilityIdentifier("saveGeneratedAudioButton")
+                                    assetShare(audio)
+                                }
+                            }
+                            Text(LocalizedStringKey(model.statusMessage)).font(.footnote).foregroundStyle(.secondary)
+                                .accessibilityIdentifier("statusMessage")
+                        }
+                        StudioCard(title: "Generation History", symbol: "square.stack") {
+                            Button("Generation History") { card = .history }.accessibilityIdentifier("generatedAudioLibraryButton")
+                        }
+#if DEBUG || VOICE_STUDIO_DEVELOPER_DIAGNOSTICS
+                        diagnosticsCard
+#endif
+                    }.padding(18).frame(maxWidth: 680).frame(maxWidth: .infinity)
+                }.scrollDismissesKeyboard(.interactively)
             }
-            .coordinateSpace(name: "voiceStudioRoot")
-            .onPreferenceChange(VoiceInputFramesKey.self) { textInputFrames = $0 }
-            .simultaneousGesture(SpatialTapGesture(coordinateSpace: .named("voiceStudioRoot")).onEnded { tap in
-                guard focusedInput != nil,
-                      KeyboardDismissalPolicy.shouldDismiss(tapLocation: tap.location,
-                                                           inputFrames: Array(textInputFrames.values)) else { return }
-                focusedInput = nil
-            })
-            .tint(appearance.skin.accent)
-            .navigationTitle("Voice Studio")
-            .navigationBarTitleDisplayMode(.inline)
+            .navigationTitle("Voice Studio").navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(.hidden, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    NavigationLink(destination: SettingsView(model: model)) {
-                        Image(systemName: "person.circle")
-                    }
-                    .accessibilityLabel("Settings")
-                    .accessibilityIdentifier("settingsButton")
+                    Button { focusedInput = false; card = .settings } label: { Image(systemName: "person.circle") }
+                        .accessibilityLabel("Settings").accessibilityIdentifier("settingsButton")
                 }
-                ToolbarItemGroup(placement: .keyboard) {
-                    Spacer()
-                    Button("Done") { focusedInput = nil }
-                }
+                ToolbarItemGroup(placement: .keyboard) { Spacer(); Button("Done") { focusedInput = false } }
             }
-            .onAppear {
-                updateDefaultVoiceName()
-                syncGenerationOptions()
-                updateDiagnosticContext()
+            .tint(appearance.skin.accent)
+            .sheet(item: $card) { route in
+                switch route {
+                case .voices: StudioVoiceLibrary(model: model, onSelected: { card = nil })
+                case .system: StudioSystemVoicePicker(model: model, onSelected: { card = nil })
+                case .voice(let voice): StudioVoiceDetail(model: model, selection: voice)
+                case .history: StudioAudioLibrary(model: model)
+                case .settings: StudioFloatingCard(title: "Settings") { SettingsView(model: model) }
+                }
             }
             .task {
                 await model.refreshTinyLocalModelState()
+                await model.refreshOpenVoicePackState()
+                await model.restoreCurrentVoiceAvailability()
             }
-            .onChange(of: model.currentReference?.asset.id) { _, newID in
-                guard newID != nil else { return }
-                voiceNameWasEdited = false
-                updateDefaultVoiceName()
+            .onChange(of: model.currentReference?.asset.id) { _, id in
+                if id != nil { voiceName = String(localized: "My voice", locale: locale) }
             }
-            .onChange(of: locale.identifier) { _, _ in updateDefaultVoiceName() }
-            .onChange(of: model.savedVoices.map(\.id)) { _, _ in syncGenerationOptions(); updateDiagnosticContext() }
-            .onChange(of: generationVoice) { _, _ in
-                focusedInput = nil
-                if generationVoice.savedVoiceID == nil { useSystemVoiceConverter = false }
-                syncGenerationOptions()
-                updateDiagnosticContext()
-                Task { await model.activateVoice(generationVoice) }
-            }
-            .onChange(of: useSystemVoiceConverter) { _, enabled in
-                guard enabled, generationVoice.savedVoiceID != nil else { return }
-                Task { await model.prepareOpenVoiceTarget(generationVoice) }
-                syncGenerationOptions()
-            }
-            .onChange(of: generationLanguage) { _, _ in focusedInput = nil; updateDiagnosticContext() }
-            .onChange(of: generationAccent) { _, _ in updateDiagnosticContext() }
-            .onChange(of: generationText) { _, _ in updateDiagnosticContext() }
-            .onChange(of: model.currentReference?.asset.id) { _, _ in updateDiagnosticContext() }
-            .modifier(VoiceLibraryPresentationModifier(
-                voiceToDelete: $voiceToDelete,
-                generatedAudioToDelete: $generatedAudioToDelete,
-                voiceToEdit: $voiceToEdit,
-                audioToEdit: $audioToEdit,
-                isSystemVoicePickerPresented: $isSystemVoicePickerPresented,
-                isGeneratedAudioLibraryPresented: $isGeneratedAudioLibraryPresented,
-                generationVoice: $generationVoice,
-                systemVoicePicker: { AnyView(systemVoicePicker) },
-                generatedAudioLibrary: { AnyView(generatedAudioLibrary) },
-                deleteVoice: { model.deleteSavedVoice(id: $0) },
-                deleteAudio: { model.deleteGeneratedAudio(id: $0) },
-                playVoice: { model.playVoiceReference($0) },
-                playAudio: { model.playAudioAsset($0) },
-                stopPlayback: { model.stopPlayback() },
-                renameVoice: { model.renameSavedVoice(id: $0, name: $1) },
-                favoriteVoice: { model.setSavedVoiceFavorite(id: $0, isFavorite: $1) },
-                renameAudio: { model.renameGeneratedAudio(id: $0, name: $1) },
-                favoriteAudio: { model.setGeneratedAudioFavorite(id: $0, isFavorite: $1) },
-                shareURL: { model.managedURL(for: $0) }
-            ))
         }
     }
-
-
-    private var voiceCard: some View {
-        StudioCard(title: "Voice", symbol: "person.wave.2") {
-            LabeledContent("Current voice", value: selectedVoiceName)
-            Menu {
-                Button("System Default") { generationVoice = .systemDefault }
-                Button("Choose System Voice…") { isSystemVoicePickerPresented = true }
-                Button("Local Voice") { generationVoice = .tinyLocal }
-            } label: {
-                Label("Built-in Voices", systemImage: "chevron.down.circle")
-            }
-            .accessibilityIdentifier("generationVoicePicker")
-            HStack {
-                Button {
-                    focusedInput = nil
-                    isSavedVoicePickerPresented = true
-                } label: {
-                    Label("My Voices", systemImage: "person.2")
-                }
-                .accessibilityIdentifier("myVoicesButton")
-                Button {
-                    focusedInput = nil
-                    isSystemVoicePickerPresented = true
-                } label: { Label("System Voices", systemImage: "waveform") }
-                Spacer()
-                Button {
-                    focusedInput = nil
-                    if model.isRecording { model.stopRecording() }
-                    else { Task { await model.startRecording() } }
-                } label: {
-                    Label(model.isRecording ? "Stop Recording" : "Record New Voice",
-                          systemImage: model.isRecording ? "stop.circle" : "record.circle")
-                }
-                .tint(model.isRecording ? .red : appearance.skin.accent)
-                .disabled(model.isRequestingPermission && !model.isRecording)
-                .accessibilityIdentifier("recordNewVoiceButton")
-            }
-            if generationVoice.savedVoiceID != nil {
-                Picker("Voice method", selection: $useSystemVoiceConverter) {
-                    Text("Quality Clone").tag(false)
-                    Text("System Voice Conversion").tag(true)
-                }
-                .disabled((!model.isOpenVoicePackReady && !useSystemVoiceConverter) ||
-                          model.isInstallingOpenVoicePack || model.isDeletingOpenVoicePack ||
-                          model.isPreparingOpenVoiceTarget || model.isGeneratingSpeech)
-                .accessibilityIdentifier("voiceRendererPicker")
-                if useSystemVoiceConverter {
-                    Picker("Source System Voice", selection: $converterSourceVoiceIdentifier) {
-                        Text("System Default").tag(Optional<String>.none)
-                        ForEach(SystemVoiceCatalog.voices(AVSpeechSynthesisVoice.speechVoices()), id: \.identifier) { voice in
-                            Text("\(voice.name) · \(languageDisplayName(voice.language))")
-                                .tag(Optional(voice.identifier))
-                        }
-                    }
-                    .accessibilityIdentifier("converterSourceVoicePicker")
-                } else if !model.isOpenVoicePackReady {
-                    Text("Install the optional voice converter pack in Settings to use this method.")
-                        .font(.footnote).foregroundStyle(.secondary)
-                }
-            }
-            ImportAudioButton(model: model, onChoose: { focusedInput = nil }, onImported: { url in
-                let candidateName = url.deletingPathExtension().lastPathComponent
-                let name = candidateName.isEmpty ? String(localized: "Imported Voice", locale: locale) : candidateName
-                pendingVoiceName = name
-                voiceName = name
-                voiceNameWasEdited = false
-            })
-            if model.isRecording {
-                Label("Recording in progress", systemImage: "record.circle.fill")
-                    .foregroundStyle(.red).accessibilityIdentifier("recordingState")
-            }
+    private var voiceSourceCard: some View {
+        StudioCard(title: "Voice", symbol: "person.2") {
+            HStack(spacing: 8) {
+                Button { focusedInput = false; card = .voices } label: { Label("My Voices", systemImage: "person.2") }
+                    .frame(maxWidth: .infinity).accessibilityIdentifier("myVoicesButton")
+                Button { focusedInput = false; card = .system } label: { Label("System Voices", systemImage: "waveform") }
+                    .frame(maxWidth: .infinity).accessibilityIdentifier("systemVoicesButton")
+                ImportAudioButton(model: model, onChoose: { focusedInput = false }, onImported: { url in
+                    voiceName = url.deletingPathExtension().lastPathComponent
+                }).frame(maxWidth: .infinity)
+            }.buttonStyle(.bordered).font(.subheadline)
+            Button {
+                focusedInput = false
+                if model.isRecording { model.stopRecording() } else { Task { await model.startRecording() } }
+            } label: { Label(model.isRecording ? "Stop Recording" : "Record Voice", systemImage: model.isRecording ? "stop.circle" : "mic") }
+                .disabled(model.isRequestingPermission && !model.isRecording).accessibilityIdentifier("recordNewVoiceButton")
+            if model.isRecording { Label("Recording in progress", systemImage: "record.circle.fill").foregroundStyle(.red) }
             if model.microphonePermissionDenied {
-                Button("Open Settings") {
-                    focusedInput = nil
-                    guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
-                    openURL(url)
-                }.accessibilityIdentifier("microphoneSettingsButton")
+                Button("Open Settings") { if let url = URL(string: UIApplication.openSettingsURLString) { openURL(url) } }
             }
-            if let reference = model.currentReference {
+            if model.currentReference != nil {
                 Divider()
-                Label("Current Reference", systemImage: "waveform")
-                    .font(.headline).accessibilityIdentifier("currentReferenceState")
-                HStack(spacing: 4) {
-                    Text("Ready ·")
-                    Text(sourceLocalizationKey(for: reference.source))
-                }.font(.footnote).foregroundStyle(.secondary)
+                Text("New Voice").font(.headline).accessibilityIdentifier("currentReferenceState")
+                TextField("Voice Name", text: $voiceName).textFieldStyle(.roundedBorder)
+                    .accessibilityIdentifier("voiceNameField")
                 HStack {
                     Button("Play") { model.playCurrentAudio() }.accessibilityIdentifier("playReferenceButton")
-                    Button("Stop") { model.stopPlayback() }.disabled(!model.isPlaying)
-                        .accessibilityIdentifier("stopPlaybackButton")
+                    Button("Save Voice") { model.saveVoice(name: voiceName); focusedInput = false }
+                        .disabled(!model.canSaveVoice || voiceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .accessibilityIdentifier("saveVoiceButton")
                 }
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Voice Name").font(.caption).foregroundStyle(.secondary)
-                    TextField("Voice Name", text: $voiceName, onEditingChanged: { editing in
-                        if editing { voiceNameWasEdited = true }
-                    })
-                    .textFieldStyle(.roundedBorder)
-                    .focused($focusedInput, equals: .voiceName)
-                    .background(GeometryReader { geometry in
-                        Color.clear.preference(key: VoiceInputFramesKey.self,
-                                               value: ["voiceName": geometry.frame(in: .named("voiceStudioRoot"))])
-                    })
-                    .accessibilityHint("Editable voice name")
-                    .accessibilityIdentifier("voiceNameField")
-                }
-                Button("Save Voice") {
-                    focusedInput = nil
-                    model.saveVoice(name: voiceName)
-                    if let id = model.mostRecentlySavedVoiceID { generationVoice = .saved(id) }
-                }
-                .disabled(!model.canSaveVoice || voiceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                .accessibilityIdentifier("saveVoiceButton")
-            }
-            if case .saved = generationVoice {
-                prepareVoiceButton
             }
         }
-        .sheet(isPresented: $isSavedVoicePickerPresented) {
-            NavigationStack {
-                List {
-                    if model.savedVoices.isEmpty {
-                        Text("No saved voices yet.").foregroundStyle(.secondary)
+    }
+    private func generate(preview: Bool) {
+        focusedInput = false
+        Task {
+            let previous = model.generatedAudio?.id
+            await model.generateCurrentVoice(text: generationText, preview: preview)
+            if preview, model.generatedAudio?.id != previous { model.playGeneratedAudio() }
+        }
+    }
+    @ViewBuilder private func assetShare(_ audio: AudioAsset) -> some View {
+        if let url = model.shareURL(for: audio) { ShareLink(item: url) { Label("Share", systemImage: "square.and.arrow.up") } }
+        else { Button("Share") { model.statusMessage = "This audio could not be shared. Please try again." } }
+    }
+    private var diagnosticsCard: some View {
+        StudioCard(title: "Developer Diagnostics", symbol: "stethoscope") {
+            let snapshot = model.diagnostics.snapshot
+            LabeledContent("Current Voice", value: model.voiceName(for: model.currentVoice))
+            LabeledContent("Voice Source", value: snapshot.voiceSource)
+            LabeledContent("System Voice ID", value: snapshot.systemVoiceIdentifier ?? "—")
+            LabeledContent("Quality", value: snapshot.systemVoiceQuality.map(String.init) ?? "—")
+            LabeledContent("Language", value: model.currentVoiceProfile.language)
+            LabeledContent("Accent", value: model.currentVoiceProfile.accent ?? "—")
+            LabeledContent("Route", value: snapshot.provider)
+            LabeledContent("Load ms", value: snapshot.openVoiceLoadMilliseconds.map(String.init) ?? "—")
+            LabeledContent("Embedding ms", value: snapshot.embeddingPrepareMilliseconds.map(String.init) ?? "—")
+            LabeledContent("Conversion ms", value: snapshot.conversionMilliseconds.map(String.init) ?? "—")
+            LabeledContent("RTF", value: snapshot.realTimeFactor.map { String(format: "%.2f", $0) } ?? "—")
+            LabeledContent("Footprint MB", value: snapshot.physicalFootprintMB.map(String.init) ?? "—")
+            ForEach(model.diagnostics.stages, id: \.stage) { result in
+                LabeledContent(result.stage.rawValue, value: result.durationMilliseconds.map { "\($0) ms" } ?? result.state.rawValue)
+            }
+        }.font(.caption)
+    }
+}
+
+struct StudioFloatingCard<Content: View>: View {
+    let title: LocalizedStringKey
+    var subtitle: String? = nil
+    @ViewBuilder var content: Content
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        NavigationStack {
+            content.navigationTitle(title).navigationBarTitleDisplayMode(.inline)
+                .safeAreaInset(edge: .top) { if let subtitle { Text(subtitle).font(.footnote).foregroundStyle(.secondary).padding(.horizontal) } }
+                .toolbar { ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }.accessibilityIdentifier("floatingCardClose")
+                } }
+        }
+        .presentationDetents([.medium, .large]).presentationDragIndicator(.visible)
+        .presentationCornerRadius(28).presentationBackground(.regularMaterial)
+        .presentationContentInteraction(.scrolls)
+    }
+}
+
+private struct VoiceDetailSelection: Identifiable {
+    let voice: VoiceSelection
+    var id: String { String(describing: voice) }
+}
+
+struct StudioVoiceLibrary: View {
+    @ObservedObject var model: VoiceStudioModel
+    let onSelected: () -> Void
+    @State private var detail: VoiceDetailSelection?
+    var body: some View {
+        StudioFloatingCard(title: "My Voices") {
+            List {
+                Picker("Sort", selection: Binding(get: { model.savedVoiceFilter }, set: { model.setSavedVoiceFilter($0) })) {
+                    Text("Time").tag(SavedVoiceFilter.time)
+                    Text("Imported").tag(SavedVoiceFilter.imported)
+                    Text("Recorded").tag(SavedVoiceFilter.recorded)
+                }.pickerStyle(.segmented)
+                if model.savedVoices.isEmpty { Text("No saved voices yet.").foregroundStyle(.secondary) }
+                ForEach(model.pagedSavedVoices) { voice in
+                    HStack {
+                        Button { model.selectVoice(.saved(voice.id)); onSelected() } label: {
+                            Image(systemName: model.currentVoice == .saved(voice.id) ? "checkmark.circle.fill" : "circle")
+                        }.accessibilityLabel("Select \(voice.name)").accessibilityIdentifier("savedVoiceChoice-\(voice.id.uuidString)")
+                        Button { model.selectVoice(.saved(voice.id)); detail = VoiceDetailSelection(voice: .saved(voice.id)) } label: {
+                            VStack(alignment: .leading) { Text(voice.name); Text(SavedVoiceLibrary.formattedDuration(voice.referenceAudio.duration)).font(.caption) }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }.accessibilityIdentifier("voiceDetail-\(voice.id.uuidString)")
+                    }.buttonStyle(.plain).listRowBackground(model.currentVoice == .saved(voice.id) ? Color.accentColor.opacity(0.12) : Color.clear)
+                }
+                if model.savedVoicePageCount > 1 {
+                    HStack {
+                        Button("Previous") { model.setSavedVoicePage(model.savedVoicePage - 1) }.disabled(model.savedVoicePage == 0)
+                        Spacer(); Text("\(model.savedVoicePage + 1) / \(model.savedVoicePageCount)"); Spacer()
+                        Button("Next") { model.setSavedVoicePage(model.savedVoicePage + 1) }.disabled(model.savedVoicePage + 1 >= model.savedVoicePageCount)
                     }
-                    ForEach(model.pagedSavedVoices) { voice in
+                }
+                if model.isTinyLocalModelReady {
+                    Section("Local Voices") {
+                        Button { model.selectVoice(.tinyLocal); detail = VoiceDetailSelection(voice: .tinyLocal) } label: {
+                            Label("Local English Voice", systemImage: model.currentVoice == .tinyLocal ? "checkmark.circle.fill" : "circle")
+                        }
+                    }
+                }
+            }.accessibilityIdentifier("myVoicesFloatingCard")
+                .sheet(item: $detail) { StudioVoiceDetail(model: model, selection: $0.voice) }
+        }
+    }
+}
+
+private struct LanguageChoice: Identifiable { let id: String }
+struct StudioSystemVoicePicker: View {
+    @ObservedObject var model: VoiceStudioModel
+    let onSelected: () -> Void
+    @State private var language: LanguageChoice?
+    @Environment(\.locale) private var locale
+    var body: some View {
+        StudioFloatingCard(title: "System Voices") {
+            List {
+                if model.personalVoiceAuthorization == .notDetermined {
+                    Button("Allow Apple Personal Voice") { Task { await model.authorizePersonalVoice() } }
+                        .accessibilityIdentifier("personalVoiceAuthorizationButton")
+                }
+                ForEach(languages, id: \.self) { code in
+                    Button { language = LanguageChoice(id: code) } label: {
+                        HStack { Text(locale.localizedString(forLanguageCode: code) ?? code); Spacer(); Image(systemName: "chevron.right") }
+                    }.accessibilityIdentifier("systemLanguage-\(code)")
+                }
+            }.accessibilityIdentifier("systemLanguageFloatingCard")
+                .sheet(item: $language) { choice in
+                    StudioSystemLanguageVoices(model: model, language: choice.id, onSelected: onSelected)
+                }
+        }
+    }
+    var languages: [String] {
+        let candidates = model.systemVoiceCandidates.filter { model.systemVoiceAvailability.results[$0.identifier] != .failed }
+        return SystemVoiceCatalog.rankLanguages(Array(SystemVoiceCatalog.groupByBaseLanguage(candidates).keys), systemLanguage: Locale.preferredLanguages.first ?? "en", locale: locale)
+    }
+}
+
+struct StudioSystemLanguageVoices: View {
+    @ObservedObject var model: VoiceStudioModel
+    let language: String
+    let onSelected: () -> Void
+    @State private var showAll = false
+    @State private var isProbing = true
+    @Environment(\.locale) private var locale
+    var body: some View {
+        StudioFloatingCard(title: LocalizedStringKey(locale.localizedString(forLanguageCode: language) ?? language)) {
+            List {
+                if isProbing { ProgressView("Checking voices…") }
+                if !isProbing && voices.isEmpty { Text("No usable voices are available for this language.") }
+                ForEach(showAll ? voices : Array(voices.prefix(8))) { voice in
+                    Button { model.selectVoice(.systemVoice(voice.identifier)); onSelected() } label: {
                         HStack {
-                            Button {
-                                generationVoice = .saved(voice.id)
-                                isSavedVoicePickerPresented = false
-                            } label: {
-                                HStack {
-                                    VStack(alignment: .leading) {
-                                        Text(voice.name)
-                                        Text("\(sourceLocalizationKey(for: voice.sourceType)) · \(SavedVoiceLibrary.formattedDuration(voice.referenceAudio.duration))")
-                                            .font(.caption).foregroundStyle(.secondary)
+                            VStack(alignment: .leading) {
+                                Text(voice.name)
+                                Text(locale.localizedString(forIdentifier: voice.language) ?? voice.language).font(.caption).foregroundStyle(.secondary)
+                                if voice.isPersonal { Text("Personal Voice").font(.caption) }
+                                if voice.gender != 0 { Text(voice.gender == 1 ? "Male" : "Female").font(.caption).foregroundStyle(.secondary) }
+                            }
+                            Spacer()
+                            Image(systemName: model.currentVoice == .systemVoice(voice.identifier) ? "checkmark.circle.fill" : "circle")
+                        }
+                    }.accessibilityIdentifier("systemVoice-\(voice.identifier)")
+                }
+                if !showAll && model.systemVoiceCandidates.filter({ SystemVoiceCatalog.baseLanguage($0.language) == language }).count > 8 {
+                    Button("More Voices") { showAll = true }
+                }
+            }.accessibilityIdentifier("systemVoicesFloatingCard")
+                .task(id: showAll) { isProbing = true; await model.probeSystemLanguage(language, all: showAll); isProbing = false }
+        }
+    }
+    var voices: [SystemVoiceDescriptor] {
+        SystemVoiceCatalog.rankVoices(model.usableSystemVoices.filter { SystemVoiceCatalog.baseLanguage($0.language) == language }, locale: locale)
+    }
+}
+
+struct StudioVoiceDetail: View {
+    @ObservedObject var model: VoiceStudioModel
+    let selection: VoiceSelection
+    @State private var name = ""
+    @State private var option: LanguageChoice?
+    @State private var deleting = false
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.locale) private var locale
+    private var voice: VoiceAsset? { selection.savedVoiceID.flatMap { id in model.savedVoices.first { $0.id == id } } }
+    private var profile: VoiceProfile { model.profile(for: selection) }
+    var body: some View {
+        StudioFloatingCard(title: "Shape Voice") {
+            Form {
+                Section {
+                    Text(model.voiceName(for: selection)).font(.title2)
+                    Text(selection.savedVoiceID != nil ? "My Voice" : (selection == .tinyLocal ? "Local Voice" : "System Voice")).foregroundStyle(.secondary)
+                    Button {
+                        model.selectVoice(selection)
+                    } label: { Label(model.currentVoice == selection ? "Current Voice" : "Select Voice", systemImage: model.currentVoice == selection ? "checkmark.circle.fill" : "circle") }
+                        .accessibilityIdentifier("voiceCurrentIndicator")
+                    if let voice {
+                        HStack {
+                            Button("Play") { model.playVoiceReference(voice) }
+                            if let url = model.shareURL(for: voice.referenceAudio) { ShareLink(item: url) { Label("Share", systemImage: "square.and.arrow.up") } }
+                            else { Button("Share") { model.statusMessage = "This voice could not be shared. Please try again." } }
+                        }
+                        Toggle("Favorite", isOn: Binding(get: { self.voice?.isFavorite ?? false }, set: { model.setSavedVoiceFavorite(id: voice.id, isFavorite: $0) }))
+                    }
+                }
+                Section("Voice Shaping") {
+                    LabeledContent("Speed", value: String(format: "%.2f×", profile.speed))
+                    Slider(value: profileBinding(\.speed), in: 0.5...2, step: 0.05).accessibilityLabel("Speed").accessibilityIdentifier("voiceSpeedSlider")
+                    LabeledContent("Pitch", value: String(format: "%.0f", profile.pitch))
+                    Slider(value: profileBinding(\.pitch), in: -1200...1200, step: 50).accessibilityLabel("Pitch").accessibilityIdentifier("voicePitchSlider")
+                }
+                Section {
+                    if languages.count > 1 {
+                        Button { option = LanguageChoice(id: "language") } label: { LabeledContent("Language", value: displayLanguage(profile.language) + " ›") }
+                            .accessibilityIdentifier("voiceLanguageButton")
+                    } else { LabeledContent("Language", value: displayLanguage(profile.language)) }
+                    if accents.count > 1 {
+                        Button { option = LanguageChoice(id: "accent") } label: { LabeledContent("Accent", value: displayAccent(profile.accent) + " ›") }
+                            .accessibilityIdentifier("voiceAccentButton")
+                    } else if let accent = profile.accent { LabeledContent("Accent", value: displayAccent(accent)) }
+                }
+                if let voice {
+                    Section {
+                        TextField("Voice Name", text: $name).accessibilityIdentifier("renameVoiceField")
+                        Button("Rename") { model.renameSavedVoice(id: voice.id, name: name) }.disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        if model.isLocalSpeechReady || model.isAdvancedPackInstalled {
+                            Picker("Rendering Preference", selection: profileBinding(\.renderingPreference)) {
+                                Text("Standard").tag(VoiceRenderingPreference.automatic)
+                                Text("Advanced Local Voice").tag(VoiceRenderingPreference.advancedLocal)
+                            }
+                        }
+                        Button("Delete Voice…", role: .destructive) { deleting = true }
+                    }
+                } else {
+                    Section {
+                        TextField("Preview Text", text: $name)
+                        Button("Preview") { model.selectVoice(selection); Task { let previous = model.generatedAudio?.id; await model.generateCurrentVoice(text: name, preview: true); if model.generatedAudio?.id != previous { model.playGeneratedAudio() } } }
+                            .disabled(model.isGeneratingSpeech || name.isEmpty)
+                        if let audio = model.generatedAudio, audio.sourceVoice == source {
+                            if let url = model.shareURL(for: audio) { ShareLink(item: url) { Label("Share", systemImage: "square.and.arrow.up") } }
+                        }
+                    }
+                }
+            }.accessibilityIdentifier("voiceDetailFloatingCard")
+                .onAppear { name = voice?.name ?? String(localized: "Hello.", locale: locale) }
+                .task { if selection.savedVoiceID != nil { await model.probeSystemLanguage(profile.language) } }
+                .confirmationDialog("Delete Voice?", isPresented: $deleting, titleVisibility: .visible) {
+                    Button("Delete", role: .destructive) { if let voice { model.deleteSavedVoice(id: voice.id) }; dismiss() }
+                }
+                .sheet(item: $option) { choice in
+                    StudioFloatingCard(title: choice.id == "language" ? "Language" : "Accent") {
+                        List {
+                            ForEach(choice.id == "language" ? languages : accents, id: \.self) { value in
+                                Button {
+                                    var updated = profile
+                                    if choice.id == "language" { updated.language = value; updated.accent = nil }
+                                    else { updated.accent = value }
+                                    model.updateProfile(updated, for: selection); option = nil
+                                    Task { await model.probeSystemLanguage(updated.language) }
+                                } label: {
+                                    HStack { Text(choice.id == "language" ? displayLanguage(value) : displayAccent(value)); Spacer()
+                                        if value == (choice.id == "language" ? profile.language : profile.accent) { Image(systemName: "checkmark") }
                                     }
-                                    Spacer()
-                                    if generationVoice == .saved(voice.id) { Image(systemName: "checkmark").foregroundStyle(appearance.skin.accent) }
                                 }
-                            }.accessibilityIdentifier("savedVoiceChoice-\(voice.id.uuidString)")
-                            Button { voiceToEdit = voice; isSavedVoicePickerPresented = false } label: {
-                                Image(systemName: "info.circle")
-                            }.accessibilityLabel("Edit \(voice.name)")
-                            Button { voiceToDelete = voice } label: { Image(systemName: "trash") }
-                                .accessibilityLabel("Delete \(voice.name)")
-                        }
-                    }
-                    if model.savedVoicePageCount > 1 {
-                        HStack {
-                            Button("Previous") { model.setSavedVoicePage(model.savedVoicePage - 1) }.disabled(model.savedVoicePage == 0)
-                            Spacer(); Text("\(model.savedVoicePage + 1) / \(model.savedVoicePageCount)"); Spacer()
-                            Button("Next") { model.setSavedVoicePage(model.savedVoicePage + 1) }
-                                .disabled(model.savedVoicePage >= model.savedVoicePageCount - 1)
-                        }
-                    }
-                }
-                .navigationTitle("My Voices")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Button("Done") { isSavedVoicePickerPresented = false }
-                    }
-                }
-            }
-            .presentationDetents([.medium, .large])
-        }
-    }
-
-    private var libraryEntryCard: some View {
-        StudioCard(title: "Libraries", symbol: "square.stack") {
-            HStack {
-                Button { isSavedVoicePickerPresented = true } label: {
-                    Label("My Voices", systemImage: "person.2")
-                }
-                Spacer()
-                Button { isGeneratedAudioLibraryPresented = true } label: {
-                    Label("Generation History", systemImage: "waveform.path")
-                }
-            }
-        }
-    }
-
-    private var systemVoicePicker: some View {
-        NavigationStack {
-            List {
-                Button {
-                    generationVoice = .systemDefault
-                    isSystemVoicePickerPresented = false
-                } label: {
-                    HStack { Text("System Default"); Spacer(); if generationVoice == .systemDefault { Image(systemName: "checkmark") } }
-                }
-                let systemVoices = SystemVoiceCatalog.voices(AVSpeechSynthesisVoice.speechVoices())
-                let personalVoices = SystemVoiceCatalog.personalVoices(systemVoices)
-                if !personalVoices.isEmpty {
-                    Section("Personal Voice") {
-                        ForEach(personalVoices, id: \.identifier, content: systemVoiceRow)
-                    }
-                } else if AVSpeechSynthesizer.personalVoiceAuthorizationStatus == .notDetermined {
-                    Section("Personal Voice") {
-                        Button("Enable Personal Voice") {
-                            AVSpeechSynthesizer.requestPersonalVoiceAuthorization { _ in
-                                Task { @MainActor in personalVoiceRefresh += 1 }
                             }
-                        }
+                        }.accessibilityIdentifier(choice.id == "language" ? "voiceLanguageFloatingCard" : "voiceAccentFloatingCard")
                     }
                 }
-                Section("System Voices") {
-                    ForEach(SystemVoiceCatalog.nonPersonalVoices(systemVoices), id: \.identifier, content: systemVoiceRow)
-                }
-            }
-            .id(personalVoiceRefresh)
-            .navigationTitle("System Voices")
-            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { isSystemVoicePickerPresented = false } } }
         }
-        .presentationDetents([.medium, .large])
     }
-
-    private func systemVoiceRow(_ voice: AVSpeechSynthesisVoice) -> some View {
-        Button {
-            generationVoice = .systemVoice(voice.identifier)
-            generationLanguage = voice.language
-            generationAccent = voice.language
-            isSystemVoicePickerPresented = false
-        } label: {
-            HStack {
-                VStack(alignment: .leading) {
-                    Text(voice.name)
-                    Text(languageDisplayName(voice.language)).font(.caption).foregroundStyle(.secondary)
-                }
-                Spacer()
-                if generationVoice == .systemVoice(voice.identifier) { Image(systemName: "checkmark") }
-            }
-        }.accessibilityIdentifier("systemVoice-\(voice.identifier)")
+    private func profileBinding<T>(_ key: WritableKeyPath<VoiceProfile, T>) -> Binding<T> {
+        Binding(get: { profile[keyPath: key] }, set: { value in var updated = profile; updated[keyPath: key] = value; model.updateProfile(updated, for: selection) })
     }
+    private var source: GeneratedAudioVoiceSource {
+        switch selection { case .tinyLocal: .tinyLocalVoice("tiny-local"); case .systemVoice(let id): .systemVoice(id); default: .systemVoice(nil) }
+    }
+    private var languages: [String] {
+        if selection.savedVoiceID != nil { return model.availableLanguages(for: selection) }
+        return [profile.language]
+    }
+    private var accents: [String] {
+        if case .systemVoice = selection { return profile.accent.map { [$0] } ?? [] }
+        return Array(Set(model.usableSystemVoices.filter { SystemVoiceCatalog.baseLanguage($0.language) == profile.language }.map(\.language))).sorted()
+    }
+    private func displayLanguage(_ language: String) -> String { locale.localizedString(forLanguageCode: language) ?? language }
+    private func displayAccent(_ accent: String?) -> String { accent.map { locale.localizedString(forIdentifier: $0) ?? $0 } ?? "—" }
+}
 
-    private var generatedAudioLibrary: some View {
-        NavigationStack {
+struct StudioAudioLibrary: View {
+    @ObservedObject var model: VoiceStudioModel
+    @State private var selected: AudioAsset?
+    var body: some View {
+        StudioFloatingCard(title: "Generation History") {
             List {
-                if model.pagedGeneratedAudio.isEmpty { Text("No generated audio yet.").foregroundStyle(.secondary) }
                 ForEach(model.pagedGeneratedAudio) { audio in
-                    Button { audioToEdit = audio; isGeneratedAudioLibraryPresented = false } label: {
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack { Text(audio.displayName).font(.headline); if audio.isFavorite { Image(systemName: "star.fill").foregroundStyle(.yellow) } }
-                            Text("\(audio.createdAt.formatted(date: .abbreviated, time: .shortened)) · \(SavedVoiceLibrary.formattedDuration(audio.duration)) · \(generatedSourceName(audio.sourceVoice))")
-                                .font(.caption).foregroundStyle(.secondary)
-                            if let text = audio.text { Text(text).lineLimit(2).font(.footnote).foregroundStyle(.secondary) }
-                        }
-                    }.accessibilityIdentifier("generatedAudio-\(audio.id.uuidString)")
-                        .swipeActions(edge: .trailing) {
-                            Button(role: .destructive) { generatedAudioToDelete = audio } label: {
-                                Label("Delete", systemImage: "trash")
-                            }
-                        }
+                    Button { selected = audio } label: { VStack(alignment: .leading) { Text(audio.displayName); Text(SavedVoiceLibrary.formattedDuration(audio.duration)).font(.caption) } }
+                        .accessibilityIdentifier("generatedAudio-\(audio.id.uuidString)")
                 }
+                if model.savedGeneratedAudio.isEmpty { Text("No saved audio yet.") }
                 if model.generatedAudioPageCount > 1 {
                     HStack {
-                        Button("Previous") { model.setGeneratedAudioPage(model.generatedAudioPage - 1) }
-                            .disabled(model.generatedAudioPage == 0)
+                        Button("Previous") { model.setGeneratedAudioPage(model.generatedAudioPage - 1) }.disabled(model.generatedAudioPage == 0)
                         Spacer(); Text("\(model.generatedAudioPage + 1) / \(model.generatedAudioPageCount)"); Spacer()
-                        Button("Next") { model.setGeneratedAudioPage(model.generatedAudioPage + 1) }
-                            .disabled(model.generatedAudioPage >= model.generatedAudioPageCount - 1)
+                        Button("Next") { model.setGeneratedAudioPage(model.generatedAudioPage + 1) }.disabled(model.generatedAudioPage + 1 >= model.generatedAudioPageCount)
                     }
                 }
-            }
-            .navigationTitle("Generation History")
-            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { isGeneratedAudioLibraryPresented = false } } }
-        }
-        .presentationDetents([.medium, .large])
-    }
-
-    private func generatedSourceName(_ source: GeneratedAudioVoiceSource?) -> String {
-        switch source {
-        case .savedVoice: String(localized: "My Voices", locale: locale)
-        case .systemVoice: String(localized: "System Voice", locale: locale)
-        case .tinyLocalVoice: String(localized: "Local Voice", locale: locale)
-        case nil: String(localized: "Unknown Voice", locale: locale)
-        }
-    }
-
-    @ViewBuilder
-    private var prepareVoiceButton: some View {
-        let state = model.preparationState(for: generationVoice)
-        let converterReady = generationVoice.savedVoiceID == model.preparedOpenVoiceID &&
-            model.hasPreparedOpenVoiceReference
-        let buttonTitle = prepareVoiceButtonTitle(state: state, converterReady: converterReady)
-        let isReady = useSystemVoiceConverter ? converterReady : state == .ready
-        let buttonTint: Color = isReady ? .green : appearance.skin.accent
-        Button {
-            focusedInput = nil
-            Task {
-                if useSystemVoiceConverter { await model.prepareOpenVoiceTarget(generationVoice) }
-                else { await model.prepareVoice(generationVoice, language: generationLanguage) }
-            }
-        } label: {
-            HStack {
-                if state == .preparing || model.isPreparingOpenVoiceTarget { ProgressView().controlSize(.small) }
-                if isReady { Image(systemName: "checkmark.circle.fill") }
-                Text(buttonTitle)
-                Spacer()
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.bordered)
-        .tint(buttonTint)
-        .disabled(model.isInstallingLocalSpeech || state == .preparing || model.isPreparingOpenVoiceTarget || model.isGeneratingSpeech)
-        .accessibilityIdentifier("prepareVoiceButton")
-    }
-
-    private func prepareVoiceButtonTitle(state: VoicePreparationState, converterReady: Bool) -> LocalizedStringKey {
-        if useSystemVoiceConverter {
-            return model.isPreparingOpenVoiceTarget ? "Preparing voice…" : (converterReady ? "Voice Ready" : "Prepare Voice")
-        }
-        switch state {
-        case .none: return "Confirm Voice"
-        case .preparing: return "Preparing voice…"
-        case .ready: return "Voice Ready"
-        case .failed: return "Preparation failed · Retry"
-        }
-    }
-
-    private var textCard: some View {
-        StudioCard(title: "Text", symbol: "text.alignleft") {
-            TextField("Enter text for your voice", text: $generationText, axis: .vertical)
-                .lineLimit(3...7)
-                .focused($focusedInput, equals: .speechText)
-                .background(GeometryReader { geometry in
-                    Color.clear.preference(key: VoiceInputFramesKey.self,
-                                           value: ["speechText": geometry.frame(in: .named("voiceStudioRoot"))])
-                })
-                .accessibilityIdentifier("generationTextField")
-        }
-    }
-
-    private var shapingCard: some View {
-        let capabilities = model.capabilities(for: generationVoice, usingVoiceConverter: useSystemVoiceConverter)
-        return StudioCard(title: "Shaping", symbol: "slider.horizontal.3") {
-            VStack(spacing: 14) {
-                if capabilities.status(for: .pitch) == .supported {
-                    LabeledContent("Pitch", value: "\(Int(pitch)) cents")
-                    Slider(value: $pitch, in: -1200...1200, step: 50, onEditingChanged: { _ in focusedInput = nil })
-                        .accessibilityIdentifier("pitchSlider")
-                }
-                ForEach(VoiceCapabilityVisibility.visibleShaping(in: capabilities), id: \.self) { shape in
-                    switch shape {
-                    case .brightness:
-                        shapingControl(shape, title: "Brightness", value: $brightness, capabilities: capabilities)
-                    case .clarity:
-                        shapingControl(shape, title: "Clarity", value: $clarity, capabilities: capabilities)
-                    case .softness:
-                        shapingControl(shape, title: "Softness", value: $softness, capabilities: capabilities)
-                    default: EmptyView()
-                    }
-                }
+            }.sheet(item: $selected) { audio in
+                GeneratedAudioEditor(audio: audio, shareURL: model.shareURL(for: audio), onPlay: { model.playAudioAsset(audio) }, onStop: model.stopPlayback,
+                                     onRename: { model.renameGeneratedAudio(id: audio.id, name: $0) }, onFavorite: { model.setGeneratedAudioFavorite(id: audio.id, isFavorite: $0) },
+                                     onDelete: { model.deleteGeneratedAudio(id: audio.id); selected = nil })
             }
         }
-    }
-
-    @ViewBuilder
-    private func shapingControl(_ shape: VoiceShape, title: LocalizedStringKey, value: Binding<Double>,
-                                capabilities: CapabilityProfile) -> some View {
-        if capabilities.shaping[shape] == .supported || capabilities.shaping[shape] == .approximate {
-            LabeledContent(title, value: value.wrappedValue.formatted(.number.precision(.fractionLength(1))))
-            Slider(value: value, in: -1...1, step: 0.1, onEditingChanged: { _ in focusedInput = nil })
-                .accessibilityIdentifier("shaping-\(shape.rawValue)-slider")
-        }
-    }
-
-    private var expressionCard: some View {
-        let capabilities = model.capabilities(for: generationVoice, usingVoiceConverter: useSystemVoiceConverter)
-        return StudioCard(title: "Expression", symbol: "waveform") {
-            let supported = VoiceCapabilityVisibility.visibleExpressions(in: capabilities)
-            if capabilities.status(for: .speed) == .supported {
-                LabeledContent("Pace", value: speed.formatted(.number.precision(.fractionLength(2))) + "×")
-                Slider(value: $speed, in: 0.5...2, step: 0.05, onEditingChanged: { _ in focusedInput = nil })
-                    .accessibilityIdentifier("speedSlider")
-            }
-            if !supported.isEmpty {
-                Picker("Expression", selection: Binding(
-                    get: { supported[0] },
-                    set: { _ in focusedInput = nil }
-                )) {
-                    ForEach(supported, id: \.self) { expression in Text(String(describing: expression)).tag(expression) }
-                }
-                .accessibilityIdentifier("expressionPicker")
-            } else {
-                Text("Expression controls will appear when a supported capability is available.")
-                    .font(.footnote).foregroundStyle(.secondary)
-                Text("Lively · Melancholic · Serious · Gentle · Excited · Calm · Angry · Whisper")
-                    .font(.caption).foregroundStyle(.tertiary)
-                    .accessibilityLabel("Expression presets unavailable")
-            }
-        }
-    }
-
-    private var languageCard: some View {
-        let languages = model.availableLanguages(for: generationVoice, usingVoiceConverter: useSystemVoiceConverter)
-        let accents = model.availableAccents(for: generationVoice, language: generationLanguage,
-                                             usingVoiceConverter: useSystemVoiceConverter)
-        return StudioCard(title: "Language & Accent", symbol: "globe") {
-            Picker("Language", selection: $generationLanguage) {
-                ForEach(languages, id: \.self) { language in
-                    Text(languageDisplayName(language)).tag(language)
-                }
-            }
-            .accessibilityIdentifier("speechLanguagePicker")
-            if !accents.isEmpty {
-                Picker("Accent", selection: Binding(
-                    get: { generationAccent ?? accents.first ?? generationLanguage },
-                    set: { generationAccent = $0 }
-                )) {
-                    ForEach(accents, id: \.self) { accent in Text(accentDisplayName(accent)).tag(accent) }
-                }
-                .accessibilityIdentifier("speechAccentPicker")
-            }
-        }
-    }
-
-    private var generateCard: some View {
-        StudioCard(title: "Preview", symbol: "play.circle") {
-            Button {
-                focusedInput = nil
-                Task {
-                    let shaping = VoiceShaping(values: [.brightness: brightness,
-                                                        .clarity: clarity,
-                                                        .softness: softness])
-                    if useSystemVoiceConverter {
-                        let sourceVoice = converterSourceVoiceIdentifier.map(VoiceSelection.systemVoice) ?? .systemDefault
-                        await model.generateOpenVoiceSpeech(text: generationText, target: generationVoice,
-                                                            systemSource: sourceVoice, language: generationLanguage,
-                                                            accent: generationAccent, shaping: shaping,
-                                                            speed: speed, pitch: pitch)
-                    } else {
-                        await model.generateSpeech(text: generationText, voice: generationVoice,
-                                                   language: generationLanguage, accent: generationAccent,
-                                                   shaping: shaping, speed: speed, pitch: pitch)
-                    }
-                }
-            } label: {
-                Label(model.isGeneratingSpeech ? "Generating…" : "Generate", systemImage: "waveform")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderedProminent)
-            .disabled(!model.canGenerate(text: generationText, voice: generationVoice,
-                                         language: generationLanguage,
-                                         usingVoiceConverter: useSystemVoiceConverter) || model.isGeneratingSpeech)
-            .accessibilityIdentifier("generateSpeechButton")
-
-            if model.generatedAudio != nil {
-                HStack {
-                    Button(model.isPlaying ? "Pause" : "Play generated speech") {
-                        if model.isPlaying { model.stopPlayback() } else { model.playGeneratedAudio() }
-                    }
-                        .disabled(model.isGeneratingSpeech)
-                    Spacer()
-                    if model.generatedAudio?.persistenceState == .temporary {
-                        Button("Save Audio") { model.saveGeneratedAudio() }.disabled(model.isGeneratingSpeech)
-                    } else {
-                        Label("Audio saved", systemImage: "checkmark.circle").foregroundStyle(.secondary)
-                    }
-                    if let audio = model.generatedAudio, let url = model.managedURL(for: audio) {
-                        ShareLink(item: url) { Image(systemName: "square.and.arrow.up") }
-                            .accessibilityLabel("Share generated audio")
-                    }
-                }
-                .accessibilityIdentifier("generatedAudioControls")
-            }
-            Text(LocalizedStringKey(model.statusMessage))
-                .font(.footnote).foregroundStyle(.secondary)
-                .accessibilityIdentifier("voiceStatus")
-        }
-    }
-
-    private var developerDiagnosticsCard: some View {
-        #if DEBUG || VOICE_STUDIO_DEVELOPER_DIAGNOSTICS
-        StudioCard(title: "Developer Diagnostics", symbol: "stethoscope") {
-            DisclosureGroup("调试状态 / Developer Diagnostics") {
-                let snapshot = model.diagnostics.snapshot
-                VStack(alignment: .leading, spacing: 6) {
-                    diagnosticLine("Provider", snapshot.provider)
-                    diagnosticLine("Renderer", snapshot.rendererID ?? "--")
-                    diagnosticLine("Pack", snapshot.pack + (snapshot.packID.map { " · \($0)" } ?? ""))
-                    diagnosticLine("Required files", snapshot.packFilesFound.joined(separator: ", ").isEmpty ? "--" : snapshot.packFilesFound.joined(separator: ", "))
-                    diagnosticLine("Runtime", snapshot.runtime)
-                    diagnosticLine("Renderer load", snapshot.rendererLoadDurationMilliseconds.map { "\($0) ms" } ?? "--")
-                    diagnosticLine("Model folder", snapshot.runtimeModelLocation ?? "--")
-                    diagnosticLine("Backend", snapshot.backend)
-                    diagnosticLine("Voice", snapshot.voice)
-                    diagnosticLine("Reference", snapshot.reference)
-                    diagnosticLine("Language", snapshot.language)
-                    diagnosticLine("Accent", snapshot.accent ?? "--")
-                    diagnosticLine("Request", snapshot.request)
-                    diagnosticLine("Generate", snapshot.generation)
-                    diagnosticLine("Generate time", snapshot.generationDurationMilliseconds.map { "\($0) ms" } ?? "--")
-                    diagnosticLine("Renderer inference", snapshot.rendererGenerationDurationMilliseconds.map { "\($0) ms" } ?? "--")
-                    diagnosticLine("RTF", snapshot.realTimeFactor.map { String(format: "%.2f", $0) } ?? "--")
-                    diagnosticLine("Output", snapshot.outputFileName.map { "\($0) · \(snapshot.outputDuration.map { String(format: "%.2f s", $0) } ?? "--")" } ?? "none")
-                    Divider()
-                    ForEach(model.diagnostics.stages, id: \.stage) { stage in
-                        VStack(alignment: .leading, spacing: 2) {
-                            HStack {
-                                Text(stage.stage.rawValue)
-                                Spacer()
-                                Text(stage.state.rawValue)
-                                if let duration = stage.durationMilliseconds { Text("\(duration) ms") }
-                            }.font(.caption.monospaced())
-                            if let friendly = stage.friendlyError { Text("Friendly: \(friendly)").font(.caption) }
-                            if let domain = stage.errorDomain, let code = stage.errorCode {
-                                Text("Code: \(domain) / \(code)").font(.caption.monospaced())
-                            }
-                            if let raw = stage.underlyingError { Text("Raw: \(raw)").font(.caption).textSelection(.enabled) }
-                            if let operation = stage.operation { Text("Operation: \(operation)").font(.caption.monospaced()) }
-                            if let file = stage.file { Text("File: \(file)").font(.caption.monospaced()) }
-                            if let expected = stage.expected { Text("Expected: \(expected)").font(.caption).textSelection(.enabled) }
-                            if let actual = stage.actual { Text("Actual: \(actual)").font(.caption).textSelection(.enabled) }
-                        }
-                    }
-                    HStack {
-                        Button("Copy Diagnostics") { UIPasteboard.general.string = model.diagnostics.exportText() }
-                        Spacer()
-                        Button("Clear") { model.diagnostics.clear() }
-                    }
-                    .font(.caption)
-                }
-                .padding(.top, 8)
-            }
-            .accessibilityIdentifier("developerDiagnosticsDisclosure")
-        }
-        #else
-        EmptyView()
-        #endif
-    }
-
-    private func diagnosticLine(_ title: LocalizedStringKey, _ value: String) -> some View {
-        HStack(alignment: .firstTextBaseline) {
-            Text(title).foregroundStyle(.secondary)
-            Spacer(minLength: 8)
-            Text(value).multilineTextAlignment(.trailing).textSelection(.enabled)
-        }.font(.caption.monospaced())
-    }
-
-    private func updateDiagnosticContext() {
-        model.updateDiagnosticContext(voice: generationVoice, language: generationLanguage,
-                                      accent: generationAccent,
-                                      hasText: !generationText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                                      hasCurrentReference: model.currentReference != nil)
-    }
-
-    private func sourceLocalizationKey(for source: VoiceSourceType) -> LocalizedStringKey {
-        switch source {
-        case .record: "Recorded"
-        case .imported: "Imported"
-        case .random: "Random"
-        case .builtIn: "Built-in"
-        }
-    }
-
-    private func updateDefaultVoiceName() {
-        if let pendingVoiceName, !pendingVoiceName.isEmpty {
-            voiceName = pendingVoiceName
-            self.pendingVoiceName = nil
-            return
-        }
-        guard !voiceNameWasEdited, let reference = model.currentReference else { return }
-        let key = reference.source == .record ? "Recorded Voice" : "Imported Voice"
-        voiceName = String(localized: String.LocalizationValue(key), locale: locale)
-    }
-
-    private var selectedVoiceName: String {
-        switch generationVoice {
-        case .systemDefault:
-            String(localized: "System Default", locale: locale)
-        case .systemVoice(let identifier):
-            AVSpeechSynthesisVoice.speechVoices().first(where: { $0.identifier == identifier })?.name
-                ?? String(localized: "System Voice", locale: locale)
-        case .tinyLocal:
-            String(localized: "Local Voice", locale: locale)
-        case .saved(let id):
-            model.savedVoices.first(where: { $0.id == id })?.name ?? String(localized: "My Voices", locale: locale)
-        }
-    }
-
-    private func syncGenerationOptions() {
-        let systemChoices = SystemVoiceCatalog.voices(AVSpeechSynthesisVoice.speechVoices()).map {
-            VoiceSelection.systemVoice($0.identifier)
-        }
-        let choices = [VoiceSelection.systemDefault, .tinyLocal] + systemChoices + model.savedVoices.map { VoiceSelection.saved($0.id) }
-        if !choices.contains(generationVoice) { generationVoice = .systemDefault }
-        let languages = model.availableLanguages(for: generationVoice, usingVoiceConverter: useSystemVoiceConverter)
-        if !languages.contains(generationLanguage) { generationLanguage = languages.first ?? "en" }
-        let accents = model.availableAccents(for: generationVoice, language: generationLanguage,
-                                             usingVoiceConverter: useSystemVoiceConverter)
-        if !accents.contains(generationAccent ?? "") { generationAccent = accents.first }
-    }
-
-    private func languageDisplayName(_ language: String) -> String {
-        locale.localizedString(forIdentifier: language) ?? language
-    }
-
-    private func accentDisplayName(_ accent: String) -> String {
-        locale.localizedString(forIdentifier: accent) ?? accent
     }
 }
 
@@ -768,71 +463,6 @@ private struct StudioCard<Content: View>: View {
         .background(appearance.skin.material, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).stroke(.white.opacity(0.42), lineWidth: 1))
         .shadow(color: .black.opacity(0.06), radius: 16, y: 6)
-    }
-}
-
-private struct VoiceLibraryPresentationModifier: ViewModifier {
-    @Binding var voiceToDelete: VoiceAsset?
-    @Binding var generatedAudioToDelete: AudioAsset?
-    @Binding var voiceToEdit: VoiceAsset?
-    @Binding var audioToEdit: AudioAsset?
-    @Binding var isSystemVoicePickerPresented: Bool
-    @Binding var isGeneratedAudioLibraryPresented: Bool
-    @Binding var generationVoice: VoiceSelection
-    let systemVoicePicker: () -> AnyView
-    let generatedAudioLibrary: () -> AnyView
-    let deleteVoice: (UUID) -> Void
-    let deleteAudio: (UUID) -> Void
-    let playVoice: (VoiceAsset) -> Void
-    let playAudio: (AudioAsset) -> Void
-    let stopPlayback: () -> Void
-    let renameVoice: (UUID, String) -> Void
-    let favoriteVoice: (UUID, Bool) -> Void
-    let renameAudio: (UUID, String) -> Void
-    let favoriteAudio: (UUID, Bool) -> Void
-    let shareURL: (AudioAsset) -> URL?
-
-    func body(content: Content) -> some View {
-        content
-            .confirmationDialog("Delete Voice?", isPresented: voiceDeletePresented, titleVisibility: .visible) {
-                Button("Delete", role: .destructive) {
-                    if let voiceToDelete { deleteVoice(voiceToDelete.id) }
-                    voiceToDelete = nil
-                }
-                Button("Cancel", role: .cancel) { voiceToDelete = nil }
-            } message: { Text("This voice and its saved reference audio will be removed.") }
-            .confirmationDialog("Delete Generated Audio?", isPresented: audioDeletePresented, titleVisibility: .visible) {
-                Button("Delete", role: .destructive) {
-                    if let generatedAudioToDelete { deleteAudio(generatedAudioToDelete.id) }
-                    generatedAudioToDelete = nil
-                }
-                Button("Cancel", role: .cancel) { generatedAudioToDelete = nil }
-            } message: { Text("This generated audio file will be removed.") }
-            .sheet(isPresented: $isSystemVoicePickerPresented, content: systemVoicePicker)
-            .sheet(isPresented: $isGeneratedAudioLibraryPresented, content: generatedAudioLibrary)
-            .sheet(item: $voiceToEdit) { voice in
-                VoiceAssetEditor(voice: voice, selected: generationVoice == .saved(voice.id),
-                                 onSelect: { generationVoice = .saved(voice.id); voiceToEdit = nil },
-                                 onPlay: { playVoice(voice) }, onStop: stopPlayback,
-                                 onRename: { renameVoice(voice.id, $0) },
-                                 onFavorite: { favoriteVoice(voice.id, $0) },
-                                 onDelete: { voiceToEdit = nil; voiceToDelete = voice })
-            }
-            .sheet(item: $audioToEdit) { audio in
-                GeneratedAudioEditor(audio: audio, shareURL: shareURL(audio),
-                                     onPlay: { playAudio(audio) }, onStop: stopPlayback,
-                                     onRename: { renameAudio(audio.id, $0) },
-                                     onFavorite: { favoriteAudio(audio.id, $0) },
-                                     onDelete: { audioToEdit = nil; generatedAudioToDelete = audio })
-            }
-    }
-
-    private var voiceDeletePresented: Binding<Bool> {
-        Binding(get: { voiceToDelete != nil }, set: { if !$0 { voiceToDelete = nil } })
-    }
-
-    private var audioDeletePresented: Binding<Bool> {
-        Binding(get: { generatedAudioToDelete != nil }, set: { if !$0 { generatedAudioToDelete = nil } })
     }
 }
 
@@ -879,6 +509,8 @@ private struct SettingsView: View {
     @ObservedObject var model: VoiceStudioModel
     @EnvironmentObject private var languagePreference: AppLanguagePreference
     @EnvironmentObject private var appearance: AppAppearancePreference
+    @State private var isAccountPresented = false
+    @State private var settingsChild: LanguageChoice?
     @State private var selectedBackground: PhotosPickerItem?
     @State private var backgroundError: String?
     @State private var isLoadingBackground = false
@@ -892,23 +524,19 @@ private struct SettingsView: View {
             StudioBackdrop(skin: appearance.skin, imageURL: appearance.backgroundImageURL)
             Form {
                 Section("Account") {
-                    NavigationLink(destination: AccountPlaceholderView()) {
+                    Button { isAccountPresented = true } label: {
                         Label("Account", systemImage: "person.circle")
                         Text("Not signed in").foregroundStyle(.secondary)
                     }.accessibilityIdentifier("accountPlaceholderLink")
                 }.listRowBackground(Rectangle().fill(appearance.skin.material))
                 Section("Language") {
-                    Picker("App Language", selection: Binding(
-                        get: { languagePreference.language }, set: { languagePreference.set($0) }
-                    )) {
-                        ForEach(AppLanguage.allCases) { language in Text(language.displayName).tag(language) }
+                    Button { settingsChild = LanguageChoice(id: "language") } label: {
+                        HStack { Text("App Language"); Spacer(); Text(languagePreference.language.displayName); Image(systemName: "chevron.right") }
                     }.accessibilityIdentifier("appLanguagePicker")
                 }.listRowBackground(Rectangle().fill(appearance.skin.material))
                 Section("Appearance") {
-                    Picker("App Skin", selection: Binding(
-                        get: { appearance.skin }, set: { appearance.setSkin($0) }
-                    )) {
-                        ForEach(AppSkin.allCases) { skin in Text(skin.displayName).tag(skin) }
+                    Button { settingsChild = LanguageChoice(id: "skin") } label: {
+                        HStack { Text("App Skin"); Spacer(); Text(appearance.skin.displayName); Image(systemName: "chevron.right") }
                     }.accessibilityIdentifier("appSkinPicker")
                     PhotosPicker(selection: $selectedBackground, matching: .images) {
                         Label("Replace Background", systemImage: "photo")
@@ -935,37 +563,37 @@ private struct SettingsView: View {
                         Label("Local voice is ready", systemImage: "checkmark.circle")
                             .font(.footnote).foregroundStyle(.secondary)
                     } else {
-                        Text("Local voice data downloads the first time you generate with Local Voice.")
-                            .font(.footnote).foregroundStyle(.secondary)
+                        Button(model.isDownloadingTinyLocalVoice ? "Loading…" : "Download Local English Voice") { Task { await model.installTinyLocalVoice() } }
+                            .disabled(model.isDownloadingTinyLocalVoice)
                     }
                     Button(model.isDeletingTinyLocalModel ? "Removing…" : "Remove Local Voice Data", role: .destructive) {
                         Task { await model.deleteTinyLocalModel() }
                     }
                     .disabled(!model.isTinyLocalModelReady || model.isDeletingTinyLocalModel || model.isGeneratingSpeech)
                 }.listRowBackground(Rectangle().fill(appearance.skin.material))
-                Section("Developer Tools") {
+                DisclosureGroup("Advanced Optional Voice") {
                     Button(model.isInstallingLocalSpeech ? "Loading…" :
-                           (model.isLocalSpeechReady ? "Local speech is ready." : "Import local speech component")) {
+                           (model.isLocalSpeechReady ? "Local speech is ready." : "Import Advanced Voice Pack")) {
                         isSpeechComponentImporterPresented = true
                     }
                     .disabled(model.isInstallingLocalSpeech || model.isGeneratingSpeech)
                     .accessibilityIdentifier("speechComponentImportButton")
                 }.listRowBackground(Rectangle().fill(appearance.skin.material))
-                Section("Experimental Voice Converter") {
+                Section("Optional Voice Pack") {
                     Label(model.isOpenVoicePackReady ? "Optional pack validated" : "Optional pack not installed",
                           systemImage: model.isOpenVoicePackReady ? "checkmark.circle" : "arrow.down.circle")
                         .font(.footnote).foregroundStyle(.secondary)
-                    Button(model.isInstallingOpenVoicePack ? "Validating…" : "Install or Replace OpenVoice Pack") {
+                    Button(model.isInstallingOpenVoicePack ? "Validating…" : "Install or Replace Voice Pack") {
                         isOpenVoicePackImporterPresented = true
                     }.disabled(model.isInstallingOpenVoicePack || model.isGeneratingSpeech || model.isPreparingOpenVoiceTarget)
-                    Button("Validate OpenVoice Pack") { Task { await model.refreshOpenVoicePackState() } }
+                    Button("Validate Voice Pack") { Task { await model.refreshOpenVoicePackState() } }
                         .disabled(model.isInstallingOpenVoicePack || model.isPreparingOpenVoiceTarget)
-                    Button(model.isDeletingOpenVoicePack ? "Removing…" : "Remove OpenVoice Pack", role: .destructive) {
+                    Button(model.isDeletingOpenVoicePack ? "Removing…" : "Remove Voice Pack", role: .destructive) {
                         Task { await model.deleteOpenVoicePack() }
                     }.disabled(!model.isOpenVoicePackReady || model.isDeletingOpenVoicePack || model.isGeneratingSpeech || model.isPreparingOpenVoiceTarget)
-                    Text("Experimental voice conversion. Device quality and performance still need validation.")
+                    Text("Use your saved voices to generate speech with the optional voice pack.")
                         .font(.footnote).foregroundStyle(.secondary)
-                    Text("Use an approximately 10-second saved voice reference for this experimental converter.")
+                    Text("Keep the original voice reference for future voice pack updates.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }.listRowBackground(Rectangle().fill(appearance.skin.material))
             }
@@ -973,6 +601,26 @@ private struct SettingsView: View {
             .background(.clear)
         }
         .tint(appearance.skin.accent)
+        .sheet(isPresented: $isAccountPresented) { StudioFloatingCard(title: "Account") { AccountPlaceholderView() } }
+        .sheet(item: $settingsChild) { child in
+            StudioFloatingCard(title: child.id == "language" ? "App Language" : "App Skin") {
+                List {
+                    if child.id == "language" {
+                        ForEach(AppLanguage.allCases) { language in
+                            Button { languagePreference.set(language); settingsChild = nil } label: {
+                                HStack { Text(language.displayName); Spacer(); if languagePreference.language == language { Image(systemName: "checkmark") } }
+                            }
+                        }
+                    } else {
+                        ForEach(AppSkin.allCases) { skin in
+                            Button { appearance.setSkin(skin); settingsChild = nil } label: {
+                                HStack { Text(skin.displayName); Spacer(); if appearance.skin == skin { Image(systemName: "checkmark") } }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         .navigationTitle("Settings")
         .toolbarBackground(.hidden, for: .navigationBar)
         .fileImporter(isPresented: $isSpeechComponentImporterPresented,
@@ -991,7 +639,7 @@ private struct SettingsView: View {
                 guard let folder = urls.first else { return }
                 Task { await model.installOpenVoicePack(from: folder) }
             case .failure:
-                model.statusMessage = "OpenVoice pack could not be imported."
+                model.statusMessage = "Voice pack could not be imported."
             }
         }
         .task { await model.refreshOpenVoicePackState() }
@@ -1083,58 +731,6 @@ private struct AccountPlaceholderView: View {
     }
 }
 
-private struct VoiceAssetEditor: View {
-    let voice: VoiceAsset
-    let selected: Bool
-    let onSelect: () -> Void
-    let onPlay: () -> Void
-    let onStop: () -> Void
-    let onRename: (String) -> Void
-    let onFavorite: (Bool) -> Void
-    let onDelete: () -> Void
-    @Environment(\.dismiss) private var dismiss
-    @State private var name: String
-
-    init(voice: VoiceAsset, selected: Bool, onSelect: @escaping () -> Void,
-         onPlay: @escaping () -> Void, onStop: @escaping () -> Void,
-         onRename: @escaping (String) -> Void, onFavorite: @escaping (Bool) -> Void,
-         onDelete: @escaping () -> Void) {
-        self.voice = voice; self.selected = selected; self.onSelect = onSelect
-        self.onPlay = onPlay; self.onStop = onStop; self.onRename = onRename
-        self.onFavorite = onFavorite; self.onDelete = onDelete
-        _name = State(initialValue: voice.name)
-    }
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section {
-                    TextField("Voice Name", text: $name)
-                    LabeledContent("Source", value: voice.sourceType.rawValue.capitalized)
-                    LabeledContent("Duration", value: SavedVoiceLibrary.formattedDuration(voice.referenceAudio.duration))
-                    LabeledContent("Saved", value: voice.savedAt.formatted(date: .abbreviated, time: .shortened))
-                }
-                Section {
-                    HStack {
-                        Button("Play") { onPlay() }
-                        Button("Stop") { onStop() }
-                        Button(selected ? "Selected" : "Select Voice") { onSelect() }
-                    }
-                    Toggle("Favorite", isOn: Binding(get: { voice.isFavorite }, set: onFavorite))
-                }
-                Section {
-                    Button("Save Changes") { onRename(name); dismiss() }
-                        .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    Button("Delete Voice…", role: .destructive) { onDelete() }
-                }
-            }
-            .navigationTitle("Voice Details")
-            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
-        }
-        .presentationDetents([.medium, .large])
-    }
-}
-
 private struct GeneratedAudioEditor: View {
     let audio: AudioAsset
     let shareURL: URL?
@@ -1145,6 +741,8 @@ private struct GeneratedAudioEditor: View {
     let onDelete: () -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var name: String
+    @State private var favorite: Bool
+    @State private var deleting = false
 
     init(audio: AudioAsset, shareURL: URL?, onPlay: @escaping () -> Void, onStop: @escaping () -> Void,
          onRename: @escaping (String) -> Void, onFavorite: @escaping (Bool) -> Void,
@@ -1152,6 +750,7 @@ private struct GeneratedAudioEditor: View {
         self.audio = audio; self.shareURL = shareURL; self.onPlay = onPlay; self.onStop = onStop
         self.onRename = onRename; self.onFavorite = onFavorite; self.onDelete = onDelete
         _name = State(initialValue: audio.displayName)
+        _favorite = State(initialValue: audio.isFavorite)
     }
 
     var body: some View {
@@ -1171,18 +770,24 @@ private struct GeneratedAudioEditor: View {
                         Button("Stop") { onStop() }
                         if let shareURL { ShareLink(item: shareURL) { Label("Share", systemImage: "square.and.arrow.up") } }
                     }
-                    Toggle("Favorite", isOn: Binding(get: { audio.isFavorite }, set: onFavorite))
+                    Toggle("Favorite", isOn: Binding(get: { favorite }, set: { favorite = $0; onFavorite($0) }))
                 }
                 Section {
                     Button("Save Changes") { onRename(name); dismiss() }
                         .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    Button("Delete Audio…", role: .destructive) { onDelete() }
+                    Button("Delete Audio…", role: .destructive) { deleting = true }
                 }
             }
             .navigationTitle("Generated Audio")
+            .accessibilityIdentifier("generatedAudioFloatingCard")
+            .confirmationDialog("Delete Audio?", isPresented: $deleting, titleVisibility: .visible) {
+                Button("Delete", role: .destructive) { onDelete(); dismiss() }
+            }
             .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
         }
-        .presentationDetents([.medium, .large])
+        .presentationDetents([.medium, .large]).presentationDragIndicator(.visible)
+        .presentationCornerRadius(28).presentationBackground(.regularMaterial)
+        .presentationContentInteraction(.scrolls).accessibilityIdentifier("generatedAudioFloatingCard")
     }
 
     private var sourceName: String {
@@ -1202,7 +807,7 @@ private struct ImportAudioButton: View {
     @State private var isImporterPresented = false
 
     var body: some View {
-        Button("Create From File") { onChoose(); isImporterPresented = true }
+        Button("Import Voice") { onChoose(); isImporterPresented = true }
             .disabled(model.isRecording || model.isRequestingPermission)
             .accessibilityIdentifier("importButton")
             .fileImporter(isPresented: $isImporterPresented, allowedContentTypes: [.audio], allowsMultipleSelection: false) { result in

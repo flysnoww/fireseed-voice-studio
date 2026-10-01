@@ -1,5 +1,40 @@
 import Foundation
+import AVFoundation
 import VoiceStudioCore
+
+typealias CurrentVoiceSelection = VoiceSelection
+
+struct SystemVoicePreference: Codable, Equatable {
+    let identifier: String
+    var profile: VoiceProfile
+}
+
+/// Product preferences are stored separately from Apple voices and durable audio assets.
+struct VoiceSelectionStore {
+    private struct State: Codable {
+        var current: CurrentVoiceSelection = .systemDefault
+        var systems: [String: VoiceProfile] = [:]
+    }
+    let url: URL
+    init(root: URL) { url = root.appendingPathComponent("voice-selection.json") }
+    private func load() -> State {
+        guard let data = try? Data(contentsOf: url), let state = try? JSONDecoder().decode(State.self, from: data) else { return State() }
+        return state
+    }
+    var current: CurrentVoiceSelection { load().current }
+    func profile(identifier: String) -> VoiceProfile? { load().systems[identifier] }
+    func select(_ selection: CurrentVoiceSelection) throws {
+        var state = load(); state.current = selection; try save(state)
+    }
+    func saveProfile(_ profile: VoiceProfile, identifier: String) throws {
+        guard profile.isValid else { throw VoiceStudioError.invalidAudioFile }
+        var state = load(); state.systems[identifier] = profile; try save(state)
+    }
+    private func save(_ state: State) throws {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try JSONEncoder().encode(state).write(to: url, options: .atomic)
+    }
+}
 
 enum SavedVoiceFilter: String, CaseIterable, Identifiable {
     case time

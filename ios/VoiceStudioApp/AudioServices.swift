@@ -318,6 +318,8 @@ actor KittenLocalSpeechProvider: SpeechProvider {
     }
 
     func isInstalled() -> Bool { KittenTTS.isModelCached(for: Self.config) }
+    func install() async throws { renderer = try await KittenTTS(Self.config); renderer = nil }
+    func unload() { renderer = nil }
 
     func deleteInstalledPack() throws {
         renderer = nil
@@ -332,6 +334,7 @@ protocol VoicePreparingSpeechProvider: SpeechProvider {
 }
 
 protocol VoiceConverterProvider: Sendable {
+    func timings() async -> VoiceConverterTimings?
     var capabilities: CapabilityProfile { get }
     func validateModels(packDirectory: URL, cacheDirectory: URL) async throws
     func prepareReference(referenceURL: URL, voiceID: UUID, referenceAudioID: UUID,
@@ -340,11 +343,46 @@ protocol VoiceConverterProvider: Sendable {
                  targetReferenceID: UUID, packDirectory: URL, cacheDirectory: URL) async throws -> URL
 }
 
+struct VoiceConverterTimings: Sendable {
+    var loadMilliseconds = 0
+    var embeddingMilliseconds = 0
+    var conversionMilliseconds = 0
+}
+extension VoiceConverterProvider { func timings() async -> VoiceConverterTimings? { nil } }
+
 protocol SpeechRuntimeManaging: SpeechProvider {
     func unloadRuntime() async
 }
 
 enum SystemVoiceCatalog {
+    static let languageRanking = ["zh", "es", "hi", "ar", "fr", "pt", "bn", "ru", "ja", "de", "ko", "it", "tr", "vi", "id", "th", "nl", "pl", "uk", "sv"]
+    static func baseLanguage(_ tag: String) -> String { tag.replacingOccurrences(of: "_", with: "-").split(separator: "-").first.map(String.init) ?? tag }
+    static func groupByBaseLanguage(_ voices: [SystemVoiceDescriptor]) -> [String: [SystemVoiceDescriptor]] {
+        Dictionary(grouping: Array(Dictionary(voices.map { ($0.identifier, $0) }, uniquingKeysWith: { first, _ in first }).values)) { baseLanguage($0.language) }
+    }
+    static func rankLanguages(_ languages: [String], systemLanguage: String, locale: Locale) -> [String] {
+        let priority = [baseLanguage(systemLanguage), "en"] + languageRanking
+        return Array(Set(languages)).sorted { a, b in
+            let ar = priority.firstIndex(of: a) ?? Int.max
+            let br = priority.firstIndex(of: b) ?? Int.max
+            if ar != br { return ar < br }
+            let an = locale.localizedString(forLanguageCode: a) ?? a
+            let bn = locale.localizedString(forLanguageCode: b) ?? b
+            if an != bn { return an.localizedStandardCompare(bn) == .orderedAscending }
+            return a < b
+        }
+    }
+    static func rankVoices(_ voices: [SystemVoiceDescriptor], locale: Locale) -> [SystemVoiceDescriptor] {
+        voices.sorted {
+            if $0.isPersonal != $1.isPersonal { return $0.isPersonal }
+            if $0.quality != $1.quality { return $0.quality > $1.quality }
+            let a = $0.language == locale.identifier.replacingOccurrences(of: "_", with: "-")
+            let b = $1.language == locale.identifier.replacingOccurrences(of: "_", with: "-")
+            if a != b { return a }
+            if $0.name != $1.name { return $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+            return $0.identifier < $1.identifier
+        }
+    }
     static func voices(_ voices: [AVSpeechSynthesisVoice]) -> [AVSpeechSynthesisVoice] {
         voices.sorted { $0.identifier.localizedStandardCompare($1.identifier) == .orderedAscending }
     }
@@ -358,25 +396,127 @@ enum SystemVoiceCatalog {
     }
 }
 
+struct SystemVoiceDescriptor: Identifiable, Equatable, Sendable {
+    let identifier: String
+    let name: String
+    let language: String
+    let quality: Int
+    let gender: Int
+    let isPersonal: Bool
+    var id: String { identifier }
+    init(identifier: String, name: String, language: String, quality: Int = 1, gender: Int = 0, isPersonal: Bool = false) {
+        self.identifier = identifier; self.name = name; self.language = language
+        self.quality = quality; self.gender = gender; self.isPersonal = isPersonal
+    }
+    init(_ voice: AVSpeechSynthesisVoice) {
+        self.init(identifier: voice.identifier, name: voice.name, language: voice.language,
+                  quality: voice.quality.rawValue, gender: voice.gender.rawValue,
+                  isPersonal: voice.voiceTraits.contains(.isPersonalVoice))
+    }
+}
+
+enum SystemVoiceProbeResult: Equatable {
+    case testing, usable, failed
+}
+
+@MainActor
+final class SystemVoiceAvailabilityCache: ObservableObject {
+    @Published private(set) var results: [String: SystemVoiceProbeResult] = [:]
+    private(set) var diagnostics: [String: String] = [:]
+    private var revision = 0
+    private var pending: [String: Task<Bool, Never>] = [:]
+    var onInvalidation: (() -> Void)?
+    private var observer: NSObjectProtocol?
+    private let probe: @Sendable (SystemVoiceDescriptor) async -> Bool
+    init(probe: @escaping @Sendable (SystemVoiceDescriptor) async -> Bool = { voice in await SystemVoiceProbeSession.probe(voice) }) {
+        self.probe = probe
+        observer = NotificationCenter.default.addObserver(forName: AVSpeechSynthesizer.availableVoicesDidChangeNotification,
+                                                          object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.invalidate() }
+        }
+    }
+    deinit { if let observer { NotificationCenter.default.removeObserver(observer) } }
+    func invalidate() {
+        revision += 1
+        pending.values.forEach { $0.cancel() }; pending.removeAll()
+        results.removeAll(); diagnostics.removeAll(); onInvalidation?()
+    }
+    func usable(_ voices: [SystemVoiceDescriptor]) -> [SystemVoiceDescriptor] { voices.filter { results[$0.identifier] == .usable } }
+    func test(_ voices: [SystemVoiceDescriptor]) async {
+        let activeRevision = revision
+        for voice in voices {
+            guard !Task.isCancelled, revision == activeRevision else { return }
+            if let result = results[voice.identifier], result != .testing { continue }
+            let task: Task<Bool, Never>
+            if let existing = pending[voice.identifier] { task = existing }
+            else {
+                results[voice.identifier] = .testing
+                let probe = self.probe
+                task = Task { await probe(voice) }
+                pending[voice.identifier] = task
+            }
+            let usable = await withTaskCancellationHandler(operation: { await task.value }, onCancel: { task.cancel() })
+            guard revision == activeRevision else { return }
+            pending.removeValue(forKey: voice.identifier)
+            if Task.isCancelled { results.removeValue(forKey: voice.identifier); return }
+            results[voice.identifier] = usable ? .usable : .failed
+            if !usable { diagnostics[voice.identifier] = "synthesisProbe · \(voice.identifier) · \(voice.language) · quality=\(voice.quality) · no valid PCM" }
+        }
+    }
+}
+
+/// Ends on the first valid PCM buffer; cancellation and timeout always resume once.
+private final class SystemVoiceProbeSession: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Bool, Never>?
+    private var completed: Bool?
+    private let synthesizer = AVSpeechSynthesizer()
+    static func phrase(_ language: String) -> String {
+        ["en": "Hello.", "zh": "你好。", "es": "Hola.", "hi": "नमस्ते।", "ar": "مرحبا.", "fr": "Bonjour.", "pt": "Olá.", "ja": "こんにちは。", "ko": "안녕하세요.", "de": "Hallo.", "ru": "Привет.", "it": "Ciao.", "bn": "হ্যালো।", "tr": "Merhaba.", "vi": "Xin chào.", "id": "Halo.", "th": "สวัสดี", "nl": "Hallo.", "pl": "Cześć.", "uk": "Привіт.", "sv": "Hej."][language] ?? "Hello."
+    }
+    static func probe(_ voice: SystemVoiceDescriptor) async -> Bool {
+        let session = SystemVoiceProbeSession()
+        return await withTaskCancellationHandler(operation: {
+            await withCheckedContinuation { continuation in session.start(voice, continuation: continuation) }
+        }, onCancel: { session.finish(false) })
+    }
+    private func start(_ voice: SystemVoiceDescriptor, continuation: CheckedContinuation<Bool, Never>) {
+        lock.lock()
+        if let completed { lock.unlock(); continuation.resume(returning: completed); return }
+        self.continuation = continuation; lock.unlock()
+        guard let systemVoice = AVSpeechSynthesisVoice(identifier: voice.identifier) else { finish(false); return }
+        let utterance = AVSpeechUtterance(string: Self.phrase(SystemVoiceCatalog.baseLanguage(voice.language)))
+        utterance.voice = systemVoice
+        synthesizer.write(utterance) { [self] buffer in
+            if let pcm = buffer as? AVAudioPCMBuffer, pcm.frameLength > 0, pcm.format.sampleRate > 0, pcm.format.channelCount > 0 { finish(true) }
+            else { finish(false) }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in self?.finish(false) }
+    }
+    private func finish(_ usable: Bool) {
+        lock.lock()
+        guard completed == nil else { lock.unlock(); return }
+        completed = usable
+        let pending = continuation; continuation = nil; lock.unlock()
+        pending?.resume(returning: usable)
+        DispatchQueue.main.async { [self] in synthesizer.stopSpeaking(at: .immediate) }
+    }
+}
+
 actor AppleSystemSpeechProvider: SpeechProvider {
     nonisolated let id: SpeechProviderID = .system
-    nonisolated let capabilities: CapabilityProfile
-    private let availableVoiceTags: Set<String>
-    private let voicesByIdentifier: [String: AVSpeechSynthesisVoice]
-
-    init(voices: [AVSpeechSynthesisVoice] = AVSpeechSynthesisVoice.speechVoices()) {
-        let catalog = SystemVoiceCatalog.voices(voices)
-        let tags = Set(catalog.map(\.language))
-        voicesByIdentifier = Dictionary(uniqueKeysWithValues: catalog.map { ($0.identifier, $0) })
-        let groups = Dictionary(grouping: tags) { $0.split(separator: "-").first.map(String.init) ?? $0 }
-        availableVoiceTags = tags
-        capabilities = CapabilityProfile(
+    nonisolated private let catalogOverride: [SystemVoiceDescriptor]?
+    nonisolated var capabilities: CapabilityProfile {
+        let tags = Set((catalogOverride ?? AVSpeechSynthesisVoice.speechVoices().map(SystemVoiceDescriptor.init)).map(\.language))
+        let groups = Dictionary(grouping: tags) { SystemVoiceCatalog.baseLanguage($0) }
+        return CapabilityProfile(
             support: [.speechGeneration: .supported, .languageSelection: .supported,
                       .accentSelection: .supported, .speed: .supported, .pitch: .supported],
-            shaping: [.brightness: .supported, .clarity: .supported, .softness: .supported],
-            languages: groups.keys.sorted(),
+            shaping: [:], languages: groups.keys.sorted(),
             accentsByLanguage: groups.mapValues { $0.sorted() })
     }
+
+    init(voices: [AVSpeechSynthesisVoice]? = nil) { catalogOverride = voices?.map(SystemVoiceDescriptor.init) }
 
     func generate(_ request: VoiceRequest, voice: VoiceAsset?, referenceAudioURL: URL?) async -> SpeechResult {
         guard request.renderMode == .generate else { return .unsupported(.speechGeneration) }
@@ -384,25 +524,29 @@ actor AppleSystemSpeechProvider: SpeechProvider {
         switch request.voice {
         case .systemDefault:
             let tag = request.accent ?? request.language
-            guard let tag, availableVoiceTags.contains(tag), let resolved = AVSpeechSynthesisVoice(language: tag) else {
+            guard let tag, let resolved = AVSpeechSynthesisVoice(language: tag) else {
                 return .unsupported(.accentSelection)
             }
             speechVoice = resolved
         case .systemVoice(let identifier):
-            guard let resolved = voicesByIdentifier[identifier] else { return .unsupported(.speechGeneration) }
+            guard let resolved = AVSpeechSynthesisVoice(identifier: identifier) else { return .unsupported(.speechGeneration) }
             speechVoice = resolved
         default:
             return .unsupported(.voiceCloning)
         }
         let utterance = AVSpeechUtterance(string: request.text)
         utterance.voice = speechVoice
-        utterance.rate = Float(AVSpeechUtteranceDefaultSpeechRate) * Float(request.speed)
+        utterance.rate = AVSpeechUtteranceDefaultSpeechRate
         let synthesizer = AVSpeechSynthesizer()
         let outputURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("system-speech-\(UUID().uuidString).wav")
         return await withCheckedContinuation { continuation in
             let writer = SpeechBufferWriter(destination: outputURL, continuation: continuation)
             synthesizer.write(utterance) { buffer in writer.append(buffer) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 45) {
+                writer.finish(.failure("System speech timed out. Please select another voice."))
+                synthesizer.stopSpeaking(at: .immediate)
+            }
         }
     }
 }
@@ -455,7 +599,7 @@ private final class SpeechBufferWriter: @unchecked Sendable {
         }
     }
 
-    private func finish(_ result: SpeechResult) {
+    func finish(_ result: SpeechResult) {
         lock.lock()
         guard !finished else { lock.unlock(); return }
         finished = true

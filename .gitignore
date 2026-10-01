@@ -27,6 +27,8 @@ xcuserdata/
 
 # Local model packages and converted weights must stay on this machine.
 /local-models/
+/runtime/
+__pycache__/
 
 # Local M2-A model experiments: never commit model weights, private audio,
 # generated samples, or per-model Python environments.

@@ -56,6 +56,12 @@ struct DiagnosticStageResult: Sendable {
 }
 
 struct VoiceStudioDiagnosticSnapshot: Sendable {
+    var voiceSource = "System Voice"
+    var systemVoiceIdentifier: String?
+    var systemVoiceQuality: Int?
+    var openVoiceLoadMilliseconds: Int?
+    var embeddingPrepareMilliseconds: Int?
+    var conversionMilliseconds: Int?
     var provider = "System"
     var pack = "none"
     var packID: String?
@@ -86,6 +92,16 @@ struct VoiceStudioDiagnosticSnapshot: Sendable {
 
 @MainActor
 final class VoiceStudioDiagnostics: ObservableObject {
+    static func physicalFootprintMB() -> Int? {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
+        let result = withUnsafeMutablePointer(to: &info) { pointer in
+            pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        return result == KERN_SUCCESS ? Int(info.phys_footprint / 1_048_576) : nil
+    }
     @Published private(set) var snapshot = VoiceStudioDiagnosticSnapshot()
     @Published private(set) var stages: [DiagnosticStageResult] = []
     private let breadcrumbDefaults: UserDefaults
@@ -221,6 +237,12 @@ final class VoiceStudioDiagnostics: ObservableObject {
             "Build: \(build)",
             "Timestamp: \(date)",
             "Provider: \(snapshot.provider)",
+            "Voice source: \(snapshot.voiceSource)",
+            "System identifier: \(snapshot.systemVoiceIdentifier ?? "--")",
+            "System quality: \(snapshot.systemVoiceQuality.map(String.init) ?? "--")",
+            "OpenVoice load: \(snapshot.openVoiceLoadMilliseconds.map(String.init) ?? "--") ms",
+            "Embedding prepare: \(snapshot.embeddingPrepareMilliseconds.map(String.init) ?? "--") ms",
+            "Conversion: \(snapshot.conversionMilliseconds.map(String.init) ?? "--") ms",
             "Pack: \(snapshot.pack)",
             "Pack ID: \(snapshot.packID ?? "--")",
             "Renderer ID: \(snapshot.rendererID ?? "--")",
