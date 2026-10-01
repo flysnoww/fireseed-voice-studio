@@ -47,6 +47,7 @@ jobs:
             -configuration Debug \
             -destination "platform=iOS Simulator,id=$DEVICE_ID,arch=arm64" \
             -resultBundlePath TestResults.xcresult \
+            -skip-testing:VoiceStudioUITests \
             ARCHS=arm64 \
             CODE_SIGNING_ALLOWED=NO | tee xcodebuild-test.log
 

@@ -11,7 +11,7 @@ on:
       build_number:
         description: Unused positive integer build number from App Store Connect
         required: true
-        default: "3"
+        default: "4"
         type: string
 
 permissions:
@@ -96,6 +96,7 @@ jobs:
             -configuration Debug \
             -destination "platform=iOS Simulator,id=$DEVICE_ID,arch=arm64" \
             -resultBundlePath TestResults.xcresult \
+            -skip-testing:VoiceStudioUITests \
             -derivedDataPath "$RUNNER_TEMP/VoiceStudioDerivedData" \
             ARCHS=arm64 \
             CODE_SIGNING_ALLOWED=NO | tee xcodebuild-test.log

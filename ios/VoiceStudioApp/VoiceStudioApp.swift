@@ -45,8 +45,10 @@ private struct VoiceStudioRootView: View {
         let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 72_000)!
         buffer.frameLength = 72_000
         for index in 0..<72_000 { buffer.floatChannelData![0][index] = Float(sin(Double(index) * 2 * .pi * 220 / 24_000) * 0.15) }
-        let file = try AVAudioFile(forWriting: url, settings: format.settings)
-        try file.write(from: buffer)
+        do {
+            let file = try AVAudioFile(forWriting: url, settings: format.settings)
+            try file.write(from: buffer)
+        }
         let reference = try store.importAudio(from: url, duration: 3)
         let voice = try store.saveVoice(VoiceAsset(name: "Regression Voice", sourceType: .imported, referenceAudio: reference))
         try VoiceSelectionStore(root: root).select(.saved(voice.id))
