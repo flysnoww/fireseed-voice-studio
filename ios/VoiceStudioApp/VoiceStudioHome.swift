@@ -63,9 +63,8 @@ struct VoiceStudioHome: View {
                                 StudioIcon("Play", symbol: "play.fill") { model.audition(model.currentVoice, locale: locale) }
                                 StudioIcon("Stop", symbol: "stop.fill") { model.stopPlayback() }
                                 Spacer()
-                                Button { cards.push(.voice(model.currentVoice)) } label: { Label("Shape Voice", systemImage: "slider.horizontal.3") }
+                                Button { cards.push(.voice(model.currentVoice)) } label: { Label("Shape Voice", systemImage: "slider.horizontal.3") }.accessibilityIdentifier("shapeVoiceButton")
                             }
-                                .accessibilityIdentifier("shapeVoiceButton")
                         }
                         voiceSourceCard
                         StudioCard(title: "Text", symbol: "text.alignleft") {
@@ -295,23 +294,27 @@ struct StudioVoiceLibrary: View {
                 }.pickerStyle(.segmented)
                 if model.savedVoices.isEmpty { Text("No saved voices yet.").foregroundStyle(.secondary) }
                 ForEach(model.pagedSavedVoices) { voice in
-                    HStack {
-                        Button { model.selectVoice(.saved(voice.id)); onSelected() } label: {
-                            Image(systemName: model.currentVoice == .saved(voice.id) ? "checkmark.circle.fill" : "circle")
-                        }.accessibilityLabel("Select \(voice.name)").accessibilityIdentifier("savedVoiceChoice-\(voice.id.uuidString)")
+                    VStack(alignment: .leading, spacing: 6) {
                         Button { cards.push(.voice(.saved(voice.id))) } label: {
-                            VStack(alignment: .leading) { Text(voice.name); Text(SavedVoiceLibrary.formattedDuration(voice.referenceAudio.duration)).font(.caption); Text(voice.profile.accent ?? voice.profile.language).font(.caption); Text(voice.sourceType == .record ? "Recorded" : "Imported").font(.caption) }
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }.accessibilityIdentifier("voiceDetail-\(voice.id.uuidString)")
-                    }.buttonStyle(.plain).padding(16).background(.thinMaterial, in: RoundedRectangle(cornerRadius: 22))
-                    .overlay(RoundedRectangle(cornerRadius: 22).stroke(model.currentVoice == .saved(voice.id) ? Color.accentColor : .clear, lineWidth: 2))
-                    HStack {
-                        StudioIcon("Play", symbol: "play.fill") { model.playVoiceReference(voice) }
-                        StudioIcon("Shape Voice", symbol: "slider.horizontal.3") { cards.push(.voice(.saved(voice.id))) }
-                        StudioShare(model: model, audio: voice.referenceAudio)
-                        Spacer()
-                        StudioIcon("Favorite", symbol: voice.isFavorite ? "star.fill" : "star") { model.setSavedVoiceFavorite(id: voice.id, isFavorite: !voice.isFavorite) }
-                    }
+                            HStack {
+                                VStack(alignment: .leading, spacing: 5) {
+                                    Text(voice.name).font(.headline)
+                                    Text(voice.sourceType == .record ? "Recorded" : "Imported").font(.caption)
+                                    Text("\(voice.profile.accent ?? voice.profile.language) · \(SavedVoiceLibrary.formattedDuration(voice.referenceAudio.duration))").font(.caption).foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                if model.currentVoice == .saved(voice.id) { Image(systemName: "checkmark.circle.fill") }
+                            }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 8).contentShape(Rectangle())
+                        }.buttonStyle(.plain).accessibilityIdentifier("voiceDetail-\(voice.id.uuidString)")
+                        HStack {
+                            StudioIcon("Play", symbol: "play.fill") { model.playVoiceReference(voice) }
+                            StudioIcon("Shape Voice", symbol: "slider.horizontal.3") { cards.push(.voice(.saved(voice.id))) }
+                            StudioShare(model: model, audio: voice.referenceAudio)
+                            Spacer()
+                            StudioIcon("Favorite", symbol: voice.isFavorite ? "star.fill" : "star") { model.setSavedVoiceFavorite(id: voice.id, isFavorite: !voice.isFavorite) }
+                        }
+                    }.padding(16).background(.thinMaterial, in: RoundedRectangle(cornerRadius: 22))
+                        .overlay(RoundedRectangle(cornerRadius: 22).stroke(model.currentVoice == .saved(voice.id) ? Color.accentColor : .clear, lineWidth: 2))
                 }
                 if model.savedVoicePageCount > 1 {
                     HStack {

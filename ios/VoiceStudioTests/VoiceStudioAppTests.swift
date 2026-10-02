@@ -8,6 +8,15 @@ import VoiceStudioCore
 
 final class VoiceStudioAppTests: XCTestCase {
     @MainActor
+    func testTinyVoiceAuditionNeverSilentlyUsesSystemVoice() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = try VoiceStudioModel(rootDirectory: root)
+        model.audition(.tinyLocal, locale: Locale(identifier: "en"))
+        XCTAssertFalse(model.isPlaying)
+        XCTAssertEqual(model.statusMessage, "Enter text and use Preview to hear this voice.")
+    }
+    @MainActor
     func testTenGenerationsEvictOnlyVolatileAudioAndKeepShareSnapshot() async throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -80,7 +89,7 @@ final class VoiceStudioAppTests: XCTestCase {
         XCTAssertFalse(transfer.performanceCapabilities.newTextStyleTransfer)
         for _ in 0..<10 {
             let output = try await transfer.transfer(referenceAudio: source, targetVoice: voice, targetReference: target, optionalText: "", language: "en", voiceProfile: VoiceProfile())
-            XCTAssertEqual(try Data(contentsOf: output), Data(contentsOf: source))
+            XCTAssertEqual(try Data(contentsOf: output), try Data(contentsOf: source))
             try FileManager.default.removeItem(at: output)
         }
         let calls = await converter.calls

@@ -526,6 +526,10 @@ final class VoiceStudioModel: ObservableObject {
         }
     }
     func audition(_ selection: VoiceSelection, locale: Locale) {
+        guard selection != .tinyLocal else {
+            statusMessage = "Enter text and use Preview to hear this voice."
+            return
+        }
         if let id = selection.savedVoiceID, let voice = savedVoices.first(where: { $0.id == id }) {
             playVoiceReference(voice); return
         }
