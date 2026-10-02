@@ -112,17 +112,9 @@ struct VoiceStudioHome: View {
                         ZStack {
                             ForEach(Array(cards.entries.enumerated()), id: \.element.id) { index, entry in
                                 let depth = cards.entries.count - index - 1
-                                cardContent(entry.route)
-                                    .frame(maxWidth: 620, maxHeight: max(200, geometry.size.height - 60))
-                                    .background(appearance.skin.material, in: RoundedRectangle(cornerRadius: 30))
-                                    .overlay(RoundedRectangle(cornerRadius: 30).stroke(.white.opacity(0.4)))
-                                    .shadow(color: .black.opacity(0.18), radius: 22, y: 12)
-                                    .scaleEffect(reduceMotion ? 1 : max(0.86, 1 - Double(depth) * 0.045), anchor: .top)
-                                    .offset(y: reduceMotion ? 0 : -CGFloat(min(depth, 3)) * 14)
-                                    .opacity(depth == 0 ? 1 : 0.82)
-                                    .allowsHitTesting(depth == 0).accessibilityHidden(depth != 0)
-                                    .transition(reduceMotion ? .opacity : .scale(scale: 0.96).combined(with: .opacity))
-                                    .zIndex(Double(index))
+                                StudioCardLayer(depth: depth, height: geometry.size.height - 60) {
+                                    cardContent(entry.route)
+                                }.zIndex(Double(index))
                             }
                         }.frame(maxWidth: .infinity, maxHeight: .infinity).padding(.horizontal, 18)
                     }
@@ -248,6 +240,24 @@ struct VoiceStudioHome: View {
     }
 }
 
+private struct StudioCardLayer<Content: View>: View {
+    let depth: Int
+    let height: CGFloat
+    @ViewBuilder var content: Content
+    @EnvironmentObject private var appearance: AppAppearancePreference
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    var body: some View {
+        content.frame(maxWidth: 620, maxHeight: max(CGFloat(200), height))
+            .background(appearance.skin.material, in: RoundedRectangle(cornerRadius: 30))
+            .overlay(RoundedRectangle(cornerRadius: 30).stroke(Color.white.opacity(0.4)))
+            .shadow(color: .black.opacity(0.18), radius: 22, y: 12)
+            .scaleEffect(reduceMotion ? 1 : max(0.86, 1 - CGFloat(depth) * 0.045), anchor: .top)
+            .offset(y: reduceMotion ? 0 : -CGFloat(min(depth, 3)) * 14)
+            .opacity(depth == 0 ? 1 : 0.82)
+            .allowsHitTesting(depth == 0).accessibilityHidden(depth != 0)
+            .transition(reduceMotion ? .opacity : .scale(scale: 0.96).combined(with: .opacity))
+    }
+}
 struct StudioIcon: View {
     let title: LocalizedStringKey; let symbol: String; let action: () -> Void
     init(_ title: LocalizedStringKey, symbol: String, action: @escaping () -> Void) { self.title = title; self.symbol = symbol; self.action = action }
@@ -292,7 +302,7 @@ struct StudioVoiceLibrary: View {
                         Button { cards.push(.voice(.saved(voice.id))) } label: {
                             VStack(alignment: .leading) { Text(voice.name); Text(SavedVoiceLibrary.formattedDuration(voice.referenceAudio.duration)).font(.caption); Text(voice.profile.accent ?? voice.profile.language).font(.caption); Text(voice.sourceType == .record ? "Recorded" : "Imported").font(.caption) }
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                        }.padding(20) }.accessibilityIdentifier("voiceDetail-\(voice.id.uuidString)")
+                        }.accessibilityIdentifier("voiceDetail-\(voice.id.uuidString)")
                     }.buttonStyle(.plain).padding(16).background(.thinMaterial, in: RoundedRectangle(cornerRadius: 22))
                     .overlay(RoundedRectangle(cornerRadius: 22).stroke(model.currentVoice == .saved(voice.id) ? Color.accentColor : .clear, lineWidth: 2))
                     HStack {
@@ -317,7 +327,7 @@ struct StudioVoiceLibrary: View {
                         }
                     }
                 }
-            }.accessibilityIdentifier("myVoicesFloatingCard")
+            }.padding(20) }.accessibilityIdentifier("myVoicesFloatingCard")
 
         }
     }
@@ -338,9 +348,9 @@ struct StudioSystemVoicePicker: View {
                 ForEach(languages, id: \.self) { code in
                     Button { cards.push(.systemLanguage(code)) } label: {
                         HStack { Text(locale.localizedString(forLanguageCode: code) ?? code); Spacer(); Image(systemName: "chevron.right") }
-                    }.padding(20) }.padding(18).background(.thinMaterial, in: RoundedRectangle(cornerRadius: 20)).accessibilityIdentifier("systemLanguage-\(code)")
+                    }.padding(18).background(.thinMaterial, in: RoundedRectangle(cornerRadius: 20)).accessibilityIdentifier("systemLanguage-\(code)")
                 }
-            }.accessibilityIdentifier("systemLanguageFloatingCard")
+            }.padding(20) }.accessibilityIdentifier("systemLanguageFloatingCard")
 
         }
     }
@@ -374,13 +384,13 @@ struct StudioSystemLanguageVoices: View {
                             Spacer()
                             Image(systemName: model.currentVoice == .systemVoice(voice.identifier) ? "checkmark.circle.fill" : "circle")
                         }
-                    }.padding(20) }.padding(16).background(.thinMaterial, in: RoundedRectangle(cornerRadius: 20)).accessibilityIdentifier("systemVoice-\(voice.identifier)")
+                    }.padding(16).background(.thinMaterial, in: RoundedRectangle(cornerRadius: 20)).accessibilityIdentifier("systemVoice-\(voice.identifier)")
                     StudioIcon("Play", symbol: "play.fill") { model.audition(.systemVoice(voice.identifier), locale: locale) }
                 }
                 if !showAll && model.systemVoiceCandidates.filter({ SystemVoiceCatalog.baseLanguage($0.language) == language }).count > 8 {
                     Button("More Voices") { showAll = true }
                 }
-            }.accessibilityIdentifier("systemVoicesFloatingCard")
+            }.padding(20) }.accessibilityIdentifier("systemVoicesFloatingCard")
                 .task(id: showAll) { isProbing = true; await model.probeSystemLanguage(language, all: showAll); if !Task.isCancelled { isProbing = false } }
         }
     }

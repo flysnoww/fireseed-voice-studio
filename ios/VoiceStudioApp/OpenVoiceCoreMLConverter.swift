@@ -35,6 +35,17 @@ enum OpenVoiceModelContract {
 /// are disposable cache data; source/reference audio stays in AudioFileStore.
 actor OpenVoiceCoreMLConverter: VoiceConverterProvider {
     private var busy = false
+    private let diagnostics: VoiceStudioDiagnostics?
+    init(diagnostics: VoiceStudioDiagnostics? = nil) { self.diagnostics = diagnostics }
+    private func reportRuntime(_ state: String) async {
+        let bytes = lastTimings.decodedPCMBytes
+        await diagnostics?.update {
+            guard $0.activeOperationToken != nil else { return }
+            $0.openVoiceLoaded = state
+            $0.referenceBufferBytes = bytes
+            $0.physicalFootprintMB = VoiceStudioDiagnostics.physicalFootprintMB()
+        }
+    }
     private var lastTimings = VoiceConverterTimings()
     func timings() -> VoiceConverterTimings? { lastTimings }
     private static let sampleRate = 22_050.0
@@ -117,7 +128,10 @@ actor OpenVoiceCoreMLConverter: VoiceConverterProvider {
             outputs: Set(converter.modelDescription.outputDescriptionsByName.keys), converter: true) else {
             throw OpenVoiceRuntimeError.invalidModelContract
         }
-        let spectrogram = try stft(samples: loadMonoSamples(sourceURL))
+        await reportRuntime("voice converter")
+        let samples = try loadMonoSamples(sourceURL)
+        lastTimings.sourceDuration = Double(samples.count) / Self.sampleRate
+        let spectrogram = try stft(samples: samples)
         let frames = spectrogram.count / 513
         let spec = try multiArray(shape: [1, 513, frames], values: spectrogram)
         let lengths = try MLMultiArray(shape: [1], dataType: .float32)
@@ -177,6 +191,7 @@ actor OpenVoiceCoreMLConverter: VoiceConverterProvider {
             lastTimings.embeddingMilliseconds += max(0, elapsed - (lastTimings.loadMilliseconds - previousLoad))
         }
         let samples = try loadMonoSamples(audioURL)
+        await reportRuntime("loading speaker encoder")
         let spectrum = try stft(samples: samples)
         let frames = spectrum.count / 513
         var transposed = [Float](repeating: 0, count: spectrum.count)
@@ -185,6 +200,7 @@ actor OpenVoiceCoreMLConverter: VoiceConverterProvider {
         }
         let model = try await loadModel(named: "OpenVoice_SpeakerEncoder", packDirectory: packDirectory,
                                         cacheDirectory: cacheDirectory)
+        await reportRuntime("speaker encoder")
         let inputArray = try multiArray(shape: [1, frames, 513], values: transposed)
         let input = try MLDictionaryFeatureProvider(dictionary: [
             "spectrogram": MLFeatureValue(multiArray: inputArray),
@@ -241,6 +257,7 @@ actor OpenVoiceCoreMLConverter: VoiceConverterProvider {
         })
         guard conversionError == nil, outputBuffer.frameLength > 0,
               let channel = outputBuffer.floatChannelData?.pointee else { throw OpenVoiceRuntimeError.invalidAudio }
+        lastTimings.decodedPCMBytes = Int(outputBuffer.frameLength) * MemoryLayout<Float>.size
         return Array(UnsafeBufferPointer(start: channel, count: Int(outputBuffer.frameLength)))
     }
 

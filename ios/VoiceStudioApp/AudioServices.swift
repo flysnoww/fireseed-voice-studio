@@ -380,6 +380,8 @@ protocol VoiceConverterProvider: Sendable {
 }
 
 struct VoiceConverterTimings: Sendable {
+    var decodedPCMBytes = 0
+    var sourceDuration: Double = 0
     var embeddingCacheHit = false
     var loadMilliseconds = 0
     var embeddingMilliseconds = 0

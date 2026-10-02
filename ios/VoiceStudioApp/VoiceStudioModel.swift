@@ -151,11 +151,11 @@ final class VoiceStudioModel: ObservableObject {
         self.audioFileStore = fileStore
         self.catalogOverride = systemVoices
         self.systemVoiceAvailability = voiceAvailability ?? SystemVoiceAvailabilityCache()
-        self.openVoiceConverter = voiceConverter ?? OpenVoiceCoreMLConverter()
+        let diagnostics = suppliedDiagnostics ?? VoiceStudioDiagnostics()
+        self.openVoiceConverter = voiceConverter ?? OpenVoiceCoreMLConverter(diagnostics: diagnostics)
         self.voiceSelectionStore = VoiceSelectionStore(root: storeRoot)
         self.audioLifecycle = AudioLifecycle(fileStore: fileStore)
         self.openVoicePackStore = OpenVoicePackStore(rootDirectory: storeRoot.appendingPathComponent("RendererPacks", isDirectory: true))
-        let diagnostics = suppliedDiagnostics ?? VoiceStudioDiagnostics()
         let assembly = providerAssembly ?? SpeechProviderAssembly.production(diagnostics: diagnostics)
         self.diagnostics = diagnostics
         self.providers = assembly.providers
@@ -483,10 +483,10 @@ final class VoiceStudioModel: ObservableObject {
         diagnostics.beginOperation("imitationSameContent", token: token)
         diagnostics.update {
             $0.renderingAsset = source.id.uuidString; $0.sourceDuration = source.duration
-            $0.referenceBufferBytes = Int(min(target.referenceAudio.duration, 30) * 22_050 * 4)
+            $0.referenceBufferBytes = 0
             $0.openVoiceLoaded = "conversion running"
         }
-        defer { isGeneratingSpeech = false; diagnostics.endOperation(token) }
+        defer { isGeneratingSpeech = false; diagnostics.endOperation(token: token) }
         var work: [URL] = []
         defer { work.forEach { try? FileManager.default.removeItem(at: $0) } }
         do {
@@ -501,7 +501,7 @@ final class VoiceStudioModel: ObservableObject {
             work.append(converted)
             guard acceptsOperation(token) else { return }
             if let timings = await openVoiceConverter.timings() {
-                diagnostics.update { $0.embeddingCache = timings.embeddingCacheHit ? "hit" : "miss" }
+                diagnostics.update { $0.embeddingCache = timings.embeddingCacheHit ? "hit" : "miss"; $0.referenceBufferBytes = timings.decodedPCMBytes; $0.sourceDuration = timings.sourceDuration }
             }
             let shaped = try await timePitchProcessor.processAsync(converted, speed: profile.speed,
                 pitch: profile.pitch, shaping: VoiceShaping())
@@ -990,6 +990,9 @@ final class VoiceStudioModel: ObservableObject {
             guard acceptsOperation(token) else { return }
             if let timings = await openVoiceConverter.timings() {
                 diagnostics.update {
+                    $0.embeddingCache = timings.embeddingCacheHit ? "hit" : "miss"
+                    $0.referenceBufferBytes = timings.decodedPCMBytes
+                    $0.sourceDuration = timings.sourceDuration
                     $0.openVoiceLoadMilliseconds = timings.loadMilliseconds
                     $0.embeddingPrepareMilliseconds = timings.embeddingMilliseconds
                     $0.conversionMilliseconds = timings.conversionMilliseconds
