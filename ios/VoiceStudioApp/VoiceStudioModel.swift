@@ -320,7 +320,7 @@ final class VoiceStudioModel: ObservableObject {
     }
 
     func generateCurrentVoice(text: String, preview: Bool = false) async {
-        guard renderingTask == nil, !isGeneratingSpeech, !isResolvingVoice, !packOperation else { return }
+        guard renderingTask == nil, !isRecording, !isRequestingPermission, !isGeneratingSpeech, !isResolvingVoice, !packOperation else { return }
         let task = Task { await performCurrentVoiceGeneration(text: text, preview: preview) }
         renderingTask = task
         await withTaskCancellationHandler(operation: { await task.value }, onCancel: { task.cancel() })
@@ -512,7 +512,7 @@ final class VoiceStudioModel: ObservableObject {
             let output = try audioFileStore.registerGeneratedAudio(from: shaped, duration: duration,
                 sourceVoiceID: target.id, sourceVoice: .savedVoice(target.id), language: profile.language,
                 text: "", generationKind: .imitationSameContent,
-                referencePerformanceID: source.referencePerformanceID ?? source.id)
+                referencePerformanceID: source.referencePerformanceID)
             try audioLifecycle.cache(output, as: .generated)
             generatedAudioCacheKind = .generated; generatedAudio = output
             diagnostics.update { $0.outputDuration = duration; $0.generation = "success" }

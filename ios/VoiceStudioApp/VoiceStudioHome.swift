@@ -80,7 +80,7 @@ struct VoiceStudioHome: View {
                                 Button { generate(preview: false) } label: { Label(model.isGeneratingSpeech ? "Generating…" : "Generate", systemImage: "waveform").frame(maxWidth: .infinity).padding(.vertical, 8) }.buttonStyle(.borderedProminent)
                                     .accessibilityIdentifier("generateSpeechButton")
                             }.disabled(model.isGeneratingSpeech || !model.canGenerateCurrentVoice || generationText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                            if model.isGeneratingSpeech || model.isResolvingVoice { ProgressView("Preparing…") }
+                            if model.isGeneratingSpeech || model.isResolvingVoice { HStack { ProgressView("Preparing…"); Spacer(); StudioIcon("Cancel", symbol: "xmark") { model.cancelGeneration() } } }
                             if let audio = model.generatedAudio {
                                 HStack {
                                     StudioIcon("Play", symbol: "play.fill") { model.playGeneratedAudio() }
@@ -127,12 +127,12 @@ struct VoiceStudioHome: View {
                     Button { focusedInput = false; cards.push(.settings) } label: { Image(systemName: "person.circle") }
                         .accessibilityLabel("Settings").accessibilityIdentifier("settingsButton")
                 }
-                ToolbarItemGroup(placement: .keyboard) { Spacer(); Button("Done") { focusedInput = false } }
+                ToolbarItemGroup(placement: .keyboard) { Spacer(); Button("Done") { focusedInput = false; UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil) } }
             }
             .tint(appearance.skin.accent)
             .environmentObject(cards)
             .animation(reduceMotion ? .easeInOut(duration: 0.15) : .interactiveSpring(response: 0.36, dampingFraction: 0.88), value: cards.entries.map(\.id))
-            .onChange(of: cards.entries.count) { _, depth in focusedInput = false; model.diagnostics.update { $0.routeDepth = depth } }
+            .onChange(of: cards.entries.count) { _, depth in focusedInput = false; UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil); model.diagnostics.update { $0.routeDepth = depth } }
             .onChange(of: model.savedVoices.map(\.id)) { _, _ in reconcile() }
             .onChange(of: model.savedGeneratedAudio.map(\.id)) { _, _ in reconcile() }
             .onChange(of: scenePhase) { _, phase in if phase == .background { model.applicationDidEnterBackground() } }
@@ -908,7 +908,7 @@ struct StudioImitation: View {
                     HStack { Text(SavedVoiceLibrary.formattedDuration(reference.audio.duration)); StudioIcon("Play", symbol: "play.fill") { model.playAudioAsset(reference.audio) }; StudioIcon("Stop", symbol: "stop.fill") { model.stopPlayback() } }
                 }
                 TextField("Enter new text (optional)", text: $text, axis: .vertical).lineLimit(2...5).textFieldStyle(.roundedBorder).accessibilityIdentifier("imitationTextField")
-                Text(text.isEmpty ? "Recreate this audio with the current voice." : "Use the current voice and this delivery for new words.").font(.footnote).foregroundStyle(.secondary)
+                Text(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Recreate this audio with the current voice." : "Use the current voice and this delivery for new words.").font(.footnote).foregroundStyle(.secondary)
                 if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { Text("Imitation with new text is not supported yet.").font(.footnote).foregroundStyle(.secondary) }
                 Button { Task { await model.imitate(optionalText: text) } } label: { Label("Imitate", systemImage: "person.wave.2").frame(maxWidth: .infinity).padding(.vertical, 8) }.buttonStyle(.borderedProminent)
                     .disabled(!model.canImitate || !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty).accessibilityIdentifier("runImitationButton")

@@ -805,7 +805,9 @@ struct LocalPerformanceTransfer: PerformanceTransferProvider {
     let converter: any VoiceConverterProvider
     let packDirectory: URL
     let cacheDirectory: URL
-    let performanceCapabilities = PerformanceTransferCapabilities(sameContentConversion: true, newTextStyleTransfer: false)
+    var performanceCapabilities: PerformanceTransferCapabilities {
+        PerformanceTransferCapabilities(sameContentConversion: converter.capabilities.status(for: .voiceConversion) == .supported, newTextStyleTransfer: false)
+    }
     func transfer(referenceAudio: URL, targetVoice: VoiceAsset, targetReference: URL,
                   optionalText: String, language: String, voiceProfile: VoiceProfile) async throws -> URL {
         guard optionalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {

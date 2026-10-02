@@ -8,6 +8,53 @@ import VoiceStudioCore
 
 final class VoiceStudioAppTests: XCTestCase {
     @MainActor
+    func testTenGenerationsEvictOnlyVolatileAudioAndKeepShareSnapshot() async throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("source.wav")
+        try makeSilentWaveFile(at: source, duration: 0.25)
+        let provider = DelayedTinyProvider(source: source)
+        let model = try VoiceStudioModel(rootDirectory: root,
+            providerAssembly: SpeechProviderAssembly(providers: [.tinyLocal: provider], localPackProvider: StubLocalSpeechProvider()))
+        var first: AudioAsset?
+        var share: URL?
+        for index in 0..<10 {
+            await model.generateSpeech(text: "test", voice: .tinyLocal, language: "en", accent: nil)
+            let output = try XCTUnwrap(model.generatedAudio)
+            XCTAssertFalse(model.isGeneratingSpeech)
+            if index == 0 { first = output; share = model.shareURL(for: output) }
+            if index == 1 { model.saveGeneratedAudio() }
+        }
+        XCTAssertNil(model.managedURL(for: try XCTUnwrap(first)))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: try XCTUnwrap(share).path))
+        XCTAssertEqual(model.savedGeneratedAudio.count, 1)
+        XCTAssertNotNil(model.managedURL(for: try XCTUnwrap(model.savedGeneratedAudio.first)))
+        model.releaseShare(try XCTUnwrap(first).id)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: try XCTUnwrap(share).path))
+    }
+    @MainActor
+    func testPlaybackSurvivesSourceDeletionAndOldDelegateCannotStopNewPlayer() async throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("source.wav")
+        try makeSilentWaveFile(at: source, duration: 3)
+        let store = try AudioFileStore(rootDirectory: root)
+        let asset = try store.importAudio(from: source, duration: 3)
+        let player = AudioPlayer(fileStore: store)
+        defer { player.stop() }
+        try player.play(asset)
+        let other = try AVAudioPlayer(contentsOf: source)
+        player.audioPlayerDidFinishPlaying(other, successfully: true)
+        await Task.yield()
+        XCTAssertTrue(player.isPlaying)
+        try store.removeTemporaryAudio(asset)
+        XCTAssertTrue(player.isPlaying)
+        XCTAssertEqual(player.playingAssetID, asset.id)
+        let stack = FloatingCardStack(); stack.push(.history(false)); stack.dismissAll()
+        XCTAssertTrue(player.isPlaying)
+        player.stop(); XCTAssertFalse(player.isPlaying)
+    }
+    @MainActor
     func testCardStackTwentyCyclesDepthDismissAndDeletedRouteRecovery() {
         let stack = FloatingCardStack(); let id = UUID()
         for _ in 0..<20 {
@@ -55,7 +102,8 @@ final class VoiceStudioAppTests: XCTestCase {
         let model = try VoiceStudioModel(rootDirectory: root,
             providerAssembly: SpeechProviderAssembly(providers: [.tinyLocal: provider], localPackProvider: local))
         let job = Task { await model.generateSpeech(text: "hello", voice: .tinyLocal, language: "en", accent: nil) }
-        await provider.waitUntilStarted()
+        let didStart = await provider.waitUntilStarted()
+        XCTAssertTrue(didStart)
         model.selectVoice(.systemDefault)
         model.applicationDidEnterBackground()
         await job.value
@@ -1380,7 +1428,13 @@ private actor DelayedTinyProvider: SpeechProvider {
     private var started = false
     private(set) var output: URL?
     init(source: URL) { self.source = source }
-    func waitUntilStarted() async { while !started { await Task.yield() } }
+    func waitUntilStarted() async -> Bool {
+        for _ in 0..<500 {
+            if started { return true }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        return false
+    }
     func generate(_ request: VoiceRequest, voice: VoiceAsset?, referenceAudioURL: URL?) async -> SpeechResult {
         started = true
         try? await Task.sleep(nanoseconds: 100_000_000)

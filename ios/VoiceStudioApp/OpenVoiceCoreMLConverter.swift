@@ -39,11 +39,12 @@ actor OpenVoiceCoreMLConverter: VoiceConverterProvider {
     init(diagnostics: VoiceStudioDiagnostics? = nil) { self.diagnostics = diagnostics }
     private func reportRuntime(_ state: String) async {
         let bytes = lastTimings.decodedPCMBytes
+        let footprint = await VoiceStudioDiagnostics.physicalFootprintMB()
         await diagnostics?.update {
             guard $0.activeOperationToken != nil else { return }
             $0.openVoiceLoaded = state
             $0.referenceBufferBytes = bytes
-            $0.physicalFootprintMB = VoiceStudioDiagnostics.physicalFootprintMB()
+            $0.physicalFootprintMB = footprint
         }
     }
     private var lastTimings = VoiceConverterTimings()
@@ -292,11 +293,13 @@ actor OpenVoiceCoreMLConverter: VoiceConverterProvider {
             vDSP_vmul(frameSamples, 1, window, 1, &windowed, 1, vDSP_Length(Self.fftSize))
             var real = [Float](repeating: 0, count: half)
             var imaginary = [Float](repeating: 0, count: half)
-            real.withUnsafeMutableBufferPointer { realBuffer in
-                imaginary.withUnsafeMutableBufferPointer { imaginaryBuffer in
-                    var split = DSPSplitComplex(realp: realBuffer.baseAddress!, imagp: imaginaryBuffer.baseAddress!)
-                    windowed.withUnsafeBufferPointer { values in
-                        values.baseAddress!.withMemoryRebound(to: DSPComplex.self, capacity: half) {
+            try real.withUnsafeMutableBufferPointer { realBuffer in
+                try imaginary.withUnsafeMutableBufferPointer { imaginaryBuffer in
+                    guard let realBase = realBuffer.baseAddress, let imaginaryBase = imaginaryBuffer.baseAddress else { throw OpenVoiceRuntimeError.invalidAudio }
+                    var split = DSPSplitComplex(realp: realBase, imagp: imaginaryBase)
+                    try windowed.withUnsafeBufferPointer { values in
+                        guard let base = values.baseAddress else { throw OpenVoiceRuntimeError.invalidAudio }
+                        base.withMemoryRebound(to: DSPComplex.self, capacity: half) {
                             vDSP_ctoz($0, 2, &split, 1, vDSP_Length(half))
                         }
                     }
