@@ -118,4 +118,17 @@ final class VoiceStudioUITests: XCTestCase {
         screenshot("New-text imitation truthfully unavailable")
     }
 
+    func testReducedMotionLayerNavigation() {
+        app.terminate()
+        app.launchArguments.append("-ui-reduce-motion")
+        app.launch()
+        tap("myVoicesButton")
+        let detail = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'voiceDetail-' ")).firstMatch
+        XCTAssertTrue(detail.waitForExistence(timeout: 20)); detail.tap()
+        tap("voiceLanguageButton")
+        screenshot("Reduce Motion layered cards")
+        tap("floatingCardBack"); tap("floatingCardClose")
+        XCTAssertTrue(app.buttons["currentVoiceCard"].waitForExistence(timeout: 20))
+    }
+
 }

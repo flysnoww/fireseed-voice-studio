@@ -74,6 +74,11 @@ private struct VoiceStudioRootView: View {
                 ContentUnavailableView("Voice Studio could not start", systemImage: "waveform")
             }
         }
+        .transformEnvironment(\.accessibilityReduceMotion) { value in
+#if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("-ui-reduce-motion") { value = true }
+#endif
+        }
         .environmentObject(languagePreference)
         .environmentObject(appearancePreference)
         .environment(\.locale, Locale(identifier: languagePreference.language.localeIdentifier ?? Locale.autoupdatingCurrent.identifier))

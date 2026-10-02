@@ -902,6 +902,7 @@ struct StudioImitation: View {
             ScrollView { VStack(alignment: .leading, spacing: 22) {
                 Label(model.voiceName(for: model.currentVoice, locale: locale), systemImage: "person.wave.2")
                 Text("Reference Audio").font(.headline)
+                Text("Use audio up to 30 seconds long.").font(.caption).foregroundStyle(.secondary)
                 HStack {
                     Button { if model.isRecording { model.stopRecording() } else { Task { await model.startRecording(performance: true) } } } label: { Label(model.isRecording ? "Stop Recording" : "Record", systemImage: model.isRecording ? "stop.fill" : "mic.fill") }.disabled(model.isRequestingPermission)
                     Button { importing = true } label: { Label("Import", systemImage: "square.and.arrow.down") }.disabled(model.isRecording || model.isRequestingPermission)

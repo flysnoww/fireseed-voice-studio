@@ -47,6 +47,7 @@ final class VoiceStudioModel: ObservableObject {
     private(set) var operationGeneration = UUID()
     private var renderingTask: Task<Void, Never>?
     private var packOperation = false
+    @Published private(set) var isReleasingRuntime = false
     @Published private(set) var performanceReference: PerformanceReference?
     private var recordingPerformance = false
     private var inputGeneration = UUID()
@@ -178,7 +179,7 @@ final class VoiceStudioModel: ObservableObject {
             guard let self else { return }
             self.cancelGeneration()
             self.statusMessage = "Memory is low. The current operation was stopped. Please try a shorter audio clip."
-            Task { await (self.providers[.tinyLocal] as? KittenLocalSpeechProvider)?.unload() }
+            self.releaseRendererResources()
         }
         refreshSystemVoiceCatalog()
         voiceAvailabilitySubscription = systemVoiceAvailability.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
@@ -300,6 +301,7 @@ final class VoiceStudioModel: ObservableObject {
         }
     }
     var canGenerateCurrentVoice: Bool {
+        guard !isReleasingRuntime else { return false }
         guard !isResolvingVoice else { return false }
         if let id = currentVoice.savedVoiceID {
             guard let voice = savedVoices.first(where: { $0.id == id }), managedURL(for: voice.referenceAudio) != nil else { return false }
@@ -320,7 +322,7 @@ final class VoiceStudioModel: ObservableObject {
     }
 
     func generateCurrentVoice(text: String, preview: Bool = false) async {
-        guard renderingTask == nil, !isRecording, !isRequestingPermission, !isGeneratingSpeech, !isResolvingVoice, !packOperation else { return }
+        guard renderingTask == nil, !isReleasingRuntime, !isRecording, !isRequestingPermission, !isGeneratingSpeech, !isResolvingVoice, !packOperation else { return }
         let task = Task { await performCurrentVoiceGeneration(text: text, preview: preview) }
         renderingTask = task
         await withTaskCancellationHandler(operation: { await task.value }, onCancel: { task.cancel() })
@@ -411,7 +413,7 @@ final class VoiceStudioModel: ObservableObject {
             let asset = try recorder.stopRecording()
             acceptRecording(asset)
             isRecording = false
-            statusMessage = "Recording ready in Voice Studio. Play it or save it as a voice reference."
+            statusMessage = recordingPerformance ? "Reference audio ready for imitation." : "Recording ready in Voice Studio. Play it or save it as a voice reference."
         } catch {
             isRecording = false
             statusMessage = error.localizedDescription
@@ -452,15 +454,26 @@ final class VoiceStudioModel: ObservableObject {
             replacePerformance(copy)
         } catch { statusMessage = "Could not read this audio file. Please choose another." }
     }
+    private func releaseRendererResources() {
+        guard !isReleasingRuntime else { return }
+        isReleasingRuntime = true
+        isLocalSpeechReady = false
+        preparedVoiceID = nil; preparationVoiceID = nil; voicePreparationState = .none
+        let runtime = localPackProvider as? any SpeechRuntimeManaging
+        let tiny = providers[.tinyLocal] as? KittenLocalSpeechProvider
+        Task { await runtime?.unloadRuntime(); await tiny?.unload(); isReleasingRuntime = false }
+    }
     func applicationDidEnterBackground() {
         inputGeneration = UUID()
         cancelGeneration()
+        catalogRestoreTask?.cancel()
+        releaseRendererResources()
         auditionTask?.cancel(); auditionGeneration = UUID()
         stopPlayback()
         if isRecording { stopRecording() }
     }
     var canImitate: Bool {
-        performanceReference != nil && currentVoice.savedVoiceID != nil && isOpenVoicePackReady &&
+        performanceReference != nil && currentVoice.savedVoiceID != nil && isOpenVoicePackReady && !isReleasingRuntime &&
         !isGeneratingSpeech && !isResolvingVoice && !isPreparingOpenVoiceTarget && !packOperation &&
         !isRecording && !isRequestingPermission && renderingTask == nil
     }
