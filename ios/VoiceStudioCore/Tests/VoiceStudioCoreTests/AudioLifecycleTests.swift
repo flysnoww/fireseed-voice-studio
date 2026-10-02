@@ -4,6 +4,33 @@ import XCTest
 @testable import VoiceStudioCore
 
 final class AudioLifecycleTests: XCTestCase {
+    func testImitationMetadataSurvivesSaveRenameAndRelaunchAndLegacyDefaults() throws {
+        let source = try makeStagedAsset()
+        let id = UUID()
+        let output = try store.registerGeneratedAudio(from: store.managedURL(for: source), duration: 1,
+            sourceVoiceID: id, text: "", generationKind: .imitationSameContent, referencePerformanceID: source.id)
+        let saved = try store.promoteToPersistent(output)
+        _ = try store.updateSavedAudio(id: saved.id, displayName: "Imitation")
+        let restored = try AudioFileStore(rootDirectory: temporaryRoot).savedAudioAssets().first { $0.id == saved.id }
+        XCTAssertEqual(restored?.generationKind, .imitationSameContent)
+        XCTAssertEqual(restored?.referencePerformanceID, source.id)
+        XCTAssertEqual(restored?.sourceVoiceID, id)
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(saved)) as? [String: Any])
+        json.removeValue(forKey: "generationKind"); json.removeValue(forKey: "referencePerformanceID")
+        let legacy = try JSONDecoder().decode(AudioAsset.self, from: JSONSerialization.data(withJSONObject: json))
+        XCTAssertEqual(legacy.generationKind, .normal)
+        XCTAssertNil(legacy.referencePerformanceID)
+    }
+    func testOperationLeaseSurvivesSourceEvictionAndClosesIdempotently() throws {
+        let asset = try makeStagedAsset()
+        let lease = try AudioFileLease(source: store.managedURL(for: asset), root: temporaryRoot)
+        let bytes = try Data(contentsOf: lease.url)
+        try store.removeTemporaryAudio(asset)
+        XCTAssertEqual(try Data(contentsOf: lease.url), bytes)
+        lease.close(); lease.close()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: lease.url.path))
+    }
+
     func testLegacyVoiceProfileMigratesAndUpdatedProfilePreservesDurableAssets() throws {
         let saved = try store.saveVoice(VoiceAsset(name: "Legacy name", sourceType: .imported,
                                                     referenceAudio: makeStagedAsset(), languageHint: "zh", defaultAccent: "zh-CN"))

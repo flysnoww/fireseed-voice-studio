@@ -1,6 +1,8 @@
 import Combine
 import Foundation
 import UIKit
+import OSLog
+import MetricKit
 
 enum DiagnosticStage: String, CaseIterable, Sendable {
     case packValidation
@@ -56,6 +58,19 @@ struct DiagnosticStageResult: Sendable {
 }
 
 struct VoiceStudioDiagnosticSnapshot: Sendable {
+    var lastOperation = "none"
+    var lastCompletedOperation = "none"
+    var activeOperationToken: String?
+    var routeDepth = 0
+    var playingAsset: String?
+    var renderingAsset: String?
+    var openVoiceLoaded = "none"
+    var embeddingCache = "unknown"
+    var referenceBufferBytes = 0
+    var sourceDuration: Double?
+    var lastMemoryWarning: String?
+    var lastAudioError: String?
+    var localCrashReport: String?
     var voiceSource = "System Voice"
     var systemVoiceIdentifier: String?
     var systemVoiceQuality: Int?
@@ -106,6 +121,10 @@ final class VoiceStudioDiagnostics: ObservableObject {
     @Published private(set) var stages: [DiagnosticStageResult] = []
     private let breadcrumbDefaults: UserDefaults
     private let breadcrumbKey: String
+    private var memoryObserver: NSObjectProtocol?
+    private var crashCollector: LocalCrashCollector?
+    var memoryWarningHandler: (() -> Void)?
+    private let logger = Logger(subsystem: "com.fireseed.voicestudio", category: "Runtime")
 
     init(defaults: UserDefaults = .standard, breadcrumbKey: String = "voicePrepareBreadcrumb") {
         breadcrumbDefaults = defaults
@@ -132,12 +151,50 @@ final class VoiceStudioDiagnostics: ObservableObject {
             snapshot.memoryWarningCount = breadcrumb.memoryWarningCount
             snapshot.physicalFootprintMB = breadcrumb.physicalFootprintMB
         }
-        NotificationCenter.default.addObserver(
+        if let interrupted = defaults.string(forKey: breadcrumbKey + ".activeOperation") {
+            snapshot.previousSession = "Previous operation ended unexpectedly: " + interrupted + " (crash or interruption not yet established)"
+        }
+        snapshot.localCrashReport = defaults.string(forKey: breadcrumbKey + ".crash")
+        crashCollector = LocalCrashCollector { [weak self] report in
+            Task { @MainActor in
+                guard let self else { return }
+                self.snapshot.localCrashReport = report
+                self.breadcrumbDefaults.set(report, forKey: self.breadcrumbKey + ".crash")
+            }
+        }
+        memoryObserver = NotificationCenter.default.addObserver(
             forName: UIApplication.didReceiveMemoryWarningNotification,
             object: nil, queue: .main
         ) { [weak self] _ in
             Task { @MainActor in self?.recordMemoryWarning() }
         }
+    }
+
+    deinit {
+        if let memoryObserver { NotificationCenter.default.removeObserver(memoryObserver) }
+    }
+
+    func beginOperation(_ name: String, token: UUID) {
+        snapshot.lastOperation = name
+        snapshot.activeOperationToken = token.uuidString
+        snapshot.physicalFootprintMB = Self.physicalFootprintMB()
+        breadcrumbDefaults.set(name + " · " + token.uuidString, forKey: breadcrumbKey + ".activeOperation")
+        logger.info("Operation started: \(name, privacy: .public)")
+    }
+    func endOperation(token: UUID) {
+        guard snapshot.activeOperationToken == token.uuidString else { return }
+        snapshot.lastCompletedOperation = snapshot.lastOperation
+        snapshot.activeOperationToken = nil
+        snapshot.renderingAsset = nil
+        snapshot.openVoiceLoaded = "none"
+        snapshot.physicalFootprintMB = Self.physicalFootprintMB()
+        breadcrumbDefaults.removeObject(forKey: breadcrumbKey + ".activeOperation")
+    }
+    func cancelOperation() {
+        snapshot.activeOperationToken = nil
+        snapshot.renderingAsset = nil
+        snapshot.lastCompletedOperation = snapshot.lastOperation + " · cancelled"
+        breadcrumbDefaults.removeObject(forKey: breadcrumbKey + ".activeOperation")
     }
 
     func update(_ change: (inout VoiceStudioDiagnosticSnapshot) -> Void) {
@@ -194,8 +251,12 @@ final class VoiceStudioDiagnostics: ObservableObject {
         snapshot.physicalFootprintMB = breadcrumb.physicalFootprintMB
     }
 
-    private func recordMemoryWarning() {
+    func recordMemoryWarning() {
         snapshot.memoryWarningCount += 1
+        snapshot.lastMemoryWarning = ISO8601DateFormatter().string(from: Date()) + " · " + snapshot.lastOperation
+        snapshot.physicalFootprintMB = Self.physicalFootprintMB()
+        logger.warning("Memory warning during \(self.snapshot.lastOperation, privacy: .public)")
+        memoryWarningHandler?()
         guard var breadcrumb = Self.loadBreadcrumb(defaults: breadcrumbDefaults, key: breadcrumbKey) else { return }
         breadcrumb.memoryWarningCount = snapshot.memoryWarningCount
         Self.saveBreadcrumb(breadcrumb, defaults: breadcrumbDefaults, key: breadcrumbKey)
@@ -206,6 +267,7 @@ final class VoiceStudioDiagnostics: ObservableObject {
                 operation: String? = nil, file: String? = nil,
                 expected: String? = nil, actual: String? = nil) {
         let nsError = error as NSError?
+        if let nsError { snapshot.lastAudioError = "\(nsError.domain) · \(nsError.code)" }
         let safeUnderlying = nsError.map { Self.redact($0.localizedDescription) }
         set(DiagnosticStageResult(stage: stage, state: error == nil ? .success : .failed,
                                   durationMilliseconds: max(0, Int((ProcessInfo.processInfo.systemUptime - startedAt) * 1000)),
@@ -236,6 +298,19 @@ final class VoiceStudioDiagnostics: ObservableObject {
             "App version: \(version)",
             "Build: \(build)",
             "Timestamp: \(date)",
+            "Last operation: \(snapshot.lastOperation)",
+            "Last completed operation: \(snapshot.lastCompletedOperation)",
+            "Active operation token: \(snapshot.activeOperationToken ?? "none")",
+            "Card depth: \(snapshot.routeDepth)",
+            "Playing asset: \(snapshot.playingAsset ?? "none")",
+            "Rendering asset: \(snapshot.renderingAsset ?? "none")",
+            "OpenVoice loaded: \(snapshot.openVoiceLoaded)",
+            "Embedding cache: \(snapshot.embeddingCache)",
+            "Reference PCM bytes: \(snapshot.referenceBufferBytes)",
+            "Source duration: \(snapshot.sourceDuration.map { String($0) } ?? "none")",
+            "Last memory warning: \(snapshot.lastMemoryWarning ?? "none")",
+            "Last audio error: \(snapshot.lastAudioError ?? "none")",
+            "Local MetricKit crash diagnostic: \(snapshot.localCrashReport.map(Self.redact) ?? "not received")",
             "Provider: \(snapshot.provider)",
             "Voice source: \(snapshot.voiceSource)",
             "System identifier: \(snapshot.systemVoiceIdentifier ?? "--")",
@@ -327,5 +402,24 @@ final class VoiceStudioDiagnostics: ObservableObject {
             return normalized.split(separator: "/").last.map(String.init) ?? "unknown"
         }
         return normalized
+    }
+}
+
+/// Apple delivers these on its own schedule. This collector stores a bounded local report only.
+/// A breadcrumb alone is not classified as a proven crash (force quit may also interrupt work).
+private final class LocalCrashCollector: NSObject, MXMetricManagerSubscriber {
+    private let received: @Sendable (String) -> Void
+    init(received: @escaping @Sendable (String) -> Void) {
+        self.received = received
+        super.init()
+        MXMetricManager.shared.add(self)
+    }
+    deinit { MXMetricManager.shared.remove(self) }
+    func didReceive(_ payloads: [MXDiagnosticPayload]) {
+        let reports = payloads.flatMap { $0.crashDiagnostics ?? [] }.suffix(3).compactMap {
+            String(data: $0.jsonRepresentation(), encoding: .utf8)
+        }
+        guard !reports.isEmpty else { return }
+        received(String(reports.joined(separator: "\n").prefix(196_608)))
     }
 }

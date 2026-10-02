@@ -11,7 +11,7 @@ on:
       build_number:
         description: Unused positive integer build number from App Store Connect
         required: true
-        default: "4"
+        default: "5"
         type: string
 
 permissions:

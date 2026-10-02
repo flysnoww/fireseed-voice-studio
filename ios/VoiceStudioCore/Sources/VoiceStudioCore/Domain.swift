@@ -43,6 +43,16 @@ public enum GeneratedAudioOrdering {
     }
 }
 
+public enum AudioGenerationKind: String, Codable, Sendable {
+    case normal, imitationSameContent, imitationNewText
+}
+
+/// Local performance provenance only. No transcript, model tensors, or cloud identity.
+public struct PerformanceReference: Equatable, Sendable {
+    public let audio: AudioAsset
+    public init(audio: AudioAsset) { self.audio = audio }
+}
+
 public struct AudioAsset: Identifiable, Codable, Equatable, Sendable {
     public let id: UUID
     /// A generated file name relative to the managed audio store, never an arbitrary URL.
@@ -55,12 +65,15 @@ public struct AudioAsset: Identifiable, Codable, Equatable, Sendable {
     public let text: String?
     public let displayName: String
     public let isFavorite: Bool
+    public let generationKind: AudioGenerationKind
+    public let referencePerformanceID: UUID?
     public let persistenceState: AudioPersistenceState
 
     public init(id: UUID = UUID(), fileName: String, duration: TimeInterval, createdAt: Date = Date(),
                 sourceVoiceID: UUID? = nil, sourceVoice: GeneratedAudioVoiceSource? = nil,
                 language: String? = nil, text: String? = nil, displayName: String? = nil,
-                isFavorite: Bool = false,
+                isFavorite: Bool = false, generationKind: AudioGenerationKind = .normal,
+                referencePerformanceID: UUID? = nil,
                 persistenceState: AudioPersistenceState = .temporary) {
         self.id = id
         self.fileName = fileName
@@ -73,11 +86,13 @@ public struct AudioAsset: Identifiable, Codable, Equatable, Sendable {
         let suggested = text?.split(whereSeparator: \.isNewline).first.map(String.init)?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.displayName = displayName ?? suggested.flatMap { $0.isEmpty ? nil : String($0.prefix(48)) } ?? "Generated Audio"
         self.isFavorite = isFavorite
+        self.generationKind = generationKind
+        self.referencePerformanceID = referencePerformanceID
         self.persistenceState = persistenceState
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, fileName, duration, createdAt, sourceVoiceID, sourceVoice, language, text, displayName, isFavorite, persistenceState
+        case id, fileName, duration, createdAt, sourceVoiceID, sourceVoice, language, text, displayName, isFavorite, persistenceState, generationKind, referencePerformanceID
     }
 
     public init(from decoder: Decoder) throws {
@@ -96,6 +111,8 @@ public struct AudioAsset: Identifiable, Codable, Equatable, Sendable {
         self.init(id: id, fileName: fileName, duration: duration, createdAt: createdAt,
                   sourceVoiceID: sourceVoiceID, sourceVoice: sourceVoice, language: language,
                   text: text, displayName: displayName, isFavorite: isFavorite,
+                  generationKind: try values.decodeIfPresent(AudioGenerationKind.self, forKey: .generationKind) ?? .normal,
+                  referencePerformanceID: try values.decodeIfPresent(UUID.self, forKey: .referencePerformanceID),
                   persistenceState: persistenceState)
     }
 }

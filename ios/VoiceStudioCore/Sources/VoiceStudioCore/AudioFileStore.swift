@@ -61,7 +61,9 @@ public final class AudioFileStore {
     /// Copies renderer output into managed staging so it follows the generated-audio cache policy.
     public func registerGeneratedAudio(from source: URL, duration: TimeInterval,
                                        sourceVoiceID: UUID? = nil, sourceVoice: GeneratedAudioVoiceSource? = nil,
-                                       language: String? = nil, text: String) throws -> AudioAsset {
+                                       language: String? = nil, text: String,
+                                       generationKind: AudioGenerationKind = .normal,
+                                       referencePerformanceID: UUID? = nil) throws -> AudioAsset {
         try validateFile(at: source, duration: duration)
         let id = UUID()
         let fileName = "\(id.uuidString.lowercased()).wav"
@@ -69,7 +71,8 @@ public final class AudioFileStore {
         try fileManager.copyItem(at: source, to: destination)
         return AudioAsset(id: id, fileName: fileName, duration: duration,
                           sourceVoiceID: sourceVoiceID, sourceVoice: sourceVoice,
-                          language: language, text: text)
+                          language: language, text: text, generationKind: generationKind,
+                          referencePerformanceID: referencePerformanceID)
     }
 
     public func managedURL(for asset: AudioAsset) throws -> URL {
@@ -102,7 +105,8 @@ public final class AudioFileStore {
                                createdAt: asset.createdAt, sourceVoiceID: asset.sourceVoiceID,
                                sourceVoice: asset.sourceVoice, language: asset.language,
                                text: asset.text, displayName: asset.displayName,
-                               isFavorite: asset.isFavorite, persistenceState: .persistent)
+                               isFavorite: asset.isFavorite, generationKind: asset.generationKind,
+                               referencePerformanceID: asset.referencePerformanceID, persistenceState: .persistent)
         try write(saved, named: "audio-\(saved.id.uuidString.lowercased()).json")
         try fileManager.removeItem(at: source)
         return saved
@@ -172,6 +176,7 @@ public final class AudioFileStore {
                                 sourceVoice: asset.sourceVoice, language: asset.language, text: asset.text,
                                 displayName: name ?? asset.displayName,
                                 isFavorite: isFavorite ?? asset.isFavorite,
+                                generationKind: asset.generationKind, referencePerformanceID: asset.referencePerformanceID,
                                 persistenceState: .persistent)
         try write(updated, named: "audio-\(id.uuidString.lowercased()).json")
         return updated

@@ -17,18 +17,8 @@ final class VoiceStudioUITests: XCTestCase {
         if !element.isHittable { app.swipeUp() }
         element.tap()
     }
-    private func closeCard(_ title: String) {
-        let close = app.navigationBars[title].buttons["floatingCardClose"]
-        XCTAssertTrue(close.waitForExistence(timeout: 20))
-        close.tap()
-        XCTAssertTrue(close.waitForNonExistence(timeout: 20))
-    }
-    private func expandCard(_ title: String) {
-        let close = app.navigationBars[title].buttons["floatingCardClose"]
-        XCTAssertTrue(close.waitForExistence(timeout: 20))
-        let start = app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: app.frame.width / 2, dy: close.frame.minY - 14))
-        start.press(forDuration: 0.2, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.12)))
-    }
+    private func closeCard(_ title: String) { tap("floatingCardBack") }
+    private func expandCard(_ title: String) { XCTAssertTrue(app.buttons["floatingCardBack"].waitForExistence(timeout: 20)) }
     private func generate() {
         let field = app.descendants(matching: .any).matching(identifier: "generationTextField").firstMatch
         XCTAssertTrue(field.waitForExistence(timeout: 20))
@@ -60,6 +50,7 @@ final class VoiceStudioUITests: XCTestCase {
         tap("myVoicesButton"); expandCard("My Voices"); screenshot("My Voices floating card")
         let detail = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'voiceDetail-' ")).firstMatch
         XCTAssertTrue(detail.waitForExistence(timeout: 20)); detail.tap(); expandCard("Shape Voice")
+        tap("voiceCurrentIndicator")
         XCTAssertTrue(app.sliders["voiceSpeedSlider"].waitForExistence(timeout: 20))
         app.sliders["voiceSpeedSlider"].adjust(toNormalizedSliderPosition: 0.4)
         app.sliders["voicePitchSlider"].adjust(toNormalizedSliderPosition: 0.55)
@@ -83,4 +74,48 @@ final class VoiceStudioUITests: XCTestCase {
         app.textFields["Audio Name"].tap(); app.textFields["Audio Name"].typeText(" renamed")
         XCTAssertTrue(app.buttons["Share"].exists)
     }
+    func testLayeredCardTwentyCyclesAndDeleteRecovery() {
+        for _ in 0..<20 {
+            tap("myVoicesButton")
+            let detail = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'voiceDetail-' ")).firstMatch
+            XCTAssertTrue(detail.waitForExistence(timeout: 20)); detail.tap()
+            XCTAssertTrue(app.sliders["voiceSpeedSlider"].waitForExistence(timeout: 20))
+            tap("voiceLanguageButton"); tap("floatingCardBack")
+            tap("floatingCardClose")
+        }
+        tap("myVoicesButton")
+        app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'voiceDetail-' ")).firstMatch.tap()
+        app.swipeUp(); tap("Delete Voice…"); tap("Delete")
+        XCTAssertTrue(app.otherElements["myVoicesFloatingCard"].waitForExistence(timeout: 20))
+        screenshot("Deleted detail recovers to library")
+    }
+    func testRealSameContentImitationRepeatedAndUnsupportedNewText() {
+        tap("myVoicesButton")
+        app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'voiceDetail-' ")).firstMatch.tap()
+        tap("voiceImitateButton")
+        tap("imitationHistoryButton")
+        let source = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'generatedAudio-' ")).firstMatch
+        XCTAssertTrue(source.waitForExistence(timeout: 20)); source.tap()
+        for _ in 0..<10 {
+            let run = app.buttons["runImitationButton"]
+            XCTAssertTrue(run.waitForExistence(timeout: 30))
+            let ready = NSPredicate(format: "enabled == true")
+            expectation(for: ready, evaluatedWith: run)
+            waitForExpectations(timeout: 180)
+            if !run.isHittable { app.swipeDown() }
+            run.tap()
+            let save = app.buttons["saveGeneratedAudioButton"]
+            XCTAssertTrue(save.waitForExistence(timeout: 180))
+            if !save.isHittable { app.swipeUp() }
+            save.tap()
+            XCTAssertTrue(save.waitForNonExistence(timeout: 20))
+        }
+        screenshot("Real same-content imitation saved")
+        let text = app.descendants(matching: .any).matching(identifier: "imitationTextField").firstMatch
+        if !text.isHittable { app.swipeDown() }
+        text.tap(); text.typeText("Different words")
+        XCTAssertFalse(app.buttons["runImitationButton"].isEnabled)
+        screenshot("New-text imitation truthfully unavailable")
+    }
+
 }

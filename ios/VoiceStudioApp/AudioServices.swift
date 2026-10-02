@@ -94,6 +94,7 @@ final class AudioRecorder: NSObject, AVAudioRecorderDelegate, AudioRecording {
             }
         }
 
+        try Task.checkCancellation()
         let session = AVAudioSession.sharedInstance()
         try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker])
         try session.setActive(true)
@@ -137,12 +138,20 @@ final class AudioRecorder: NSObject, AVAudioRecorderDelegate, AudioRecording {
         }
     }
 
-    func audioRecorderEncodeErrorDidOccur(_ recorder: AVAudioRecorder, error: Error?) {
-        didFail = true
+    nonisolated func audioRecorderEncodeErrorDidOccur(_ recorder: AVAudioRecorder, error: Error?) {
+        let identity = ObjectIdentifier(recorder)
+        Task { @MainActor [weak self] in
+            guard let self, self.recorder.map(ObjectIdentifier.init) == identity else { return }
+            self.didFail = true
+        }
     }
 
-    func audioRecorderDidFinishRecording(_ recorder: AVAudioRecorder, successfully flag: Bool) {
-        if !flag { didFail = true }
+    nonisolated func audioRecorderDidFinishRecording(_ recorder: AVAudioRecorder, successfully flag: Bool) {
+        let identity = ObjectIdentifier(recorder)
+        Task { @MainActor [weak self] in
+            guard let self, self.recorder.map(ObjectIdentifier.init) == identity else { return }
+            if !flag { self.didFail = true; self.finishInterruptedRecording() }
+        }
     }
 
     private func finishInterruptedRecording() {
@@ -175,6 +184,8 @@ final class AudioPlayer: NSObject, ObservableObject, AVAudioPlayerDelegate {
     var stateHandler: (@MainActor (Bool) -> Void)?
     private let fileStore: AudioFileStore
     private var player: AVAudioPlayer?
+    private var playbackLease: AudioFileLease?
+    private(set) var playingAssetID: UUID?
     private var interruptionObserver: NSObjectProtocol?
 
     init(fileStore: AudioFileStore) {
@@ -197,7 +208,8 @@ final class AudioPlayer: NSObject, ObservableObject, AVAudioPlayerDelegate {
 
     func play(_ asset: AudioAsset) throws {
         stop()
-        let url = try fileStore.managedURL(for: asset)
+        let lease = try AudioFileLease(source: fileStore.managedURL(for: asset))
+        let url = lease.url
         let session = AVAudioSession.sharedInstance()
         try session.setCategory(.playback, mode: .default)
         try session.setActive(true)
@@ -208,8 +220,12 @@ final class AudioPlayer: NSObject, ObservableObject, AVAudioPlayerDelegate {
                 throw VoiceStudioError.invalidAudioFile
             }
             player = next
+            playbackLease = lease
+            playingAssetID = asset.id
             guard next.play() else {
                 player = nil
+                playbackLease = nil
+                playingAssetID = nil
                 throw VoiceStudioError.invalidAudioFile
             }
             isPlaying = true
@@ -223,17 +239,24 @@ final class AudioPlayer: NSObject, ObservableObject, AVAudioPlayerDelegate {
     func stop() {
         player?.stop()
         player = nil
+        playbackLease = nil
+        playingAssetID = nil
         isPlaying = false
         stateHandler?(false)
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
-    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
-        isPlaying = false
-        stateHandler?(false)
-        self.player = nil
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+    nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        let identity = ObjectIdentifier(player)
+        Task { @MainActor [weak self] in
+            guard let self, self.player.map(ObjectIdentifier.init) == identity else { return }
+            self.stop()
+        }
     }
+    nonisolated func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) {
+        audioPlayerDidFinishPlaying(player, successfully: false)
+    }
+
 }
 
 struct SpeechProviderAssembly {
@@ -262,6 +285,7 @@ actor KittenLocalSpeechProvider: SpeechProvider {
         languages: ["en"])
     private let diagnostics: VoiceStudioDiagnostics
     private var renderer: KittenTTS?
+    private var runtimeInUse = false
 
     private static var config: KittenTTSConfig {
         KittenTTSConfig(model: .nanoInt8, defaultVoice: .bella,
@@ -276,7 +300,11 @@ actor KittenLocalSpeechProvider: SpeechProvider {
               capabilities.supports(language: request.language) else {
             return .unsupported(.speechGeneration)
         }
+        guard !runtimeInUse, !Task.isCancelled else { return .failure("Local voice is busy or cancelled.") }
+        runtimeInUse = true
+        defer { runtimeInUse = false; renderer = nil }
         do {
+            guard isInstalled() else { return .failure("Install the optional local voice first.") }
             if renderer == nil {
                 let loadStarted = ProcessInfo.processInfo.systemUptime
                 await diagnostics.update {
@@ -292,7 +320,9 @@ actor KittenLocalSpeechProvider: SpeechProvider {
             }
             guard let renderer else { return .failure("Local voice is not available right now.") }
             let generationStarted = ProcessInfo.processInfo.systemUptime
+            try Task.checkCancellation()
             let result = try await renderer.generate(request.text, speed: 1)
+            try Task.checkCancellation()
             let output = FileManager.default.temporaryDirectory
                 .appendingPathComponent("tiny-local-\(UUID().uuidString).wav")
             try result.wavData().write(to: output, options: .atomic)
@@ -318,10 +348,16 @@ actor KittenLocalSpeechProvider: SpeechProvider {
     }
 
     func isInstalled() -> Bool { KittenTTS.isModelCached(for: Self.config) }
-    func install() async throws { renderer = try await KittenTTS(Self.config); renderer = nil }
+    func install() async throws {
+        guard !runtimeInUse else { throw VoiceStudioError.invalidAudioFile }
+        runtimeInUse = true
+        defer { runtimeInUse = false; renderer = nil }
+        renderer = try await KittenTTS(Self.config)
+    }
     func unload() { renderer = nil }
 
     func deleteInstalledPack() throws {
+        guard !runtimeInUse else { throw VoiceStudioError.invalidAudioFile }
         renderer = nil
         if FileManager.default.fileExists(atPath: Self.installedPackURL.path) {
             try FileManager.default.removeItem(at: Self.installedPackURL)
@@ -344,6 +380,7 @@ protocol VoiceConverterProvider: Sendable {
 }
 
 struct VoiceConverterTimings: Sendable {
+    var embeddingCacheHit = false
     var loadMilliseconds = 0
     var embeddingMilliseconds = 0
     var conversionMilliseconds = 0
@@ -425,6 +462,7 @@ final class SystemVoiceAvailabilityCache: ObservableObject {
     private(set) var diagnostics: [String: String] = [:]
     private var revision = 0
     private var pending: [String: Task<Bool, Never>] = [:]
+    private var pendingIDs: [String: UUID] = [:]
     var onInvalidation: (() -> Void)?
     private var observer: NSObjectProtocol?
     private let probe: @Sendable (SystemVoiceDescriptor) async -> Bool
@@ -438,7 +476,7 @@ final class SystemVoiceAvailabilityCache: ObservableObject {
     deinit { if let observer { NotificationCenter.default.removeObserver(observer) } }
     func invalidate() {
         revision += 1
-        pending.values.forEach { $0.cancel() }; pending.removeAll()
+        pending.values.forEach { $0.cancel() }; pending.removeAll(); pendingIDs.removeAll()
         results.removeAll(); diagnostics.removeAll(); onInvalidation?()
     }
     func usable(_ voices: [SystemVoiceDescriptor]) -> [SystemVoiceDescriptor] { voices.filter { results[$0.identifier] == .usable } }
@@ -454,9 +492,12 @@ final class SystemVoiceAvailabilityCache: ObservableObject {
                 let probe = self.probe
                 task = Task { await probe(voice) }
                 pending[voice.identifier] = task
+                pendingIDs[voice.identifier] = UUID()
             }
+            let pendingID = pendingIDs[voice.identifier]
             let usable = await withTaskCancellationHandler(operation: { await task.value }, onCancel: { task.cancel() })
-            guard revision == activeRevision else { return }
+            guard revision == activeRevision, pendingIDs[voice.identifier] == pendingID else { return }
+            pendingIDs.removeValue(forKey: voice.identifier)
             pending.removeValue(forKey: voice.identifier)
             if Task.isCancelled || task.isCancelled { results.removeValue(forKey: voice.identifier); return }
             results[voice.identifier] = usable ? .usable : .failed
@@ -465,41 +506,84 @@ final class SystemVoiceAvailabilityCache: ObservableObject {
     }
 }
 
-/// Ends on the first valid PCM buffer; cancellation and timeout always resume once.
-private final class SystemVoiceProbeSession: @unchecked Sendable {
-    private let lock = NSLock()
-    private var continuation: CheckedContinuation<Bool, Never>?
-    private var completed: Bool?
-    private let synthesizer = AVSpeechSynthesizer()
+/// All AVSpeechSynthesizer instances and cancellation are owned by one MainActor queue.
+/// Buffer callbacks only touch the lock-protected writer; they never mutate UI state.
+@MainActor
+final class NativeSpeechEngine {
+    static let shared = NativeSpeechEngine()
+    private struct Job {
+        let id: UUID
+        let text: String
+        let voice: AVSpeechSynthesisVoice
+        let timeout: TimeInterval
+        let continuation: CheckedContinuation<SpeechResult, Never>
+    }
+    private var queue: [Job] = []
+    private var active: Job?
+    private var synthesizer: AVSpeechSynthesizer?
+    private var writer: SpeechBufferWriter?
+    private var timeoutTask: Task<Void, Never>?
+
+    func render(text: String, identifier: String? = nil, language: String? = nil,
+                timeout: TimeInterval = 45) async -> SpeechResult {
+        guard !Task.isCancelled else { return .failure("Speech cancelled.") }
+        let voice = identifier.flatMap(AVSpeechSynthesisVoice.init(identifier:))
+            ?? (identifier == nil ? language.flatMap(AVSpeechSynthesisVoice.init(language:)) : nil)
+        guard let voice else { return .unsupported(.speechGeneration) }
+        let id = UUID()
+        return await withTaskCancellationHandler(operation: {
+            await withCheckedContinuation { continuation in
+                queue.append(Job(id: id, text: text, voice: voice, timeout: timeout, continuation: continuation))
+                startNext()
+            }
+        }, onCancel: { Task { @MainActor [weak self] in self?.cancel(id) } })
+    }
+    private func startNext() {
+        guard active == nil, !queue.isEmpty else { return }
+        let job = queue.removeFirst()
+        active = job
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("system-speech-\(job.id).wav")
+        let sink = SpeechBufferWriter(destination: url) { [weak self] result in
+            Task { @MainActor in self?.complete(job.id, result: result) }
+        }
+        writer = sink
+        let speech = AVSpeechSynthesizer()
+        synthesizer = speech
+        let utterance = AVSpeechUtterance(string: job.text)
+        utterance.voice = job.voice
+        utterance.rate = AVSpeechUtteranceDefaultSpeechRate
+        speech.write(utterance, toBufferCallback: sink.callback)
+        timeoutTask = Task { [weak self] in
+            do { try await Task.sleep(nanoseconds: UInt64(job.timeout * 1_000_000_000)) }
+            catch { return }
+            self?.writer?.finish(.failure("System speech timed out. Please select another voice."))
+        }
+    }
+    private func cancel(_ id: UUID) {
+        if active?.id == id { writer?.finish(.failure("Speech cancelled.")); return }
+        guard let index = queue.firstIndex(where: { $0.id == id }) else { return }
+        queue.remove(at: index).continuation.resume(returning: .failure("Speech cancelled."))
+    }
+    private func complete(_ id: UUID, result: SpeechResult) {
+        guard let job = active, job.id == id else { return }
+        timeoutTask?.cancel(); timeoutTask = nil
+        synthesizer?.stopSpeaking(at: .immediate)
+        synthesizer = nil; writer = nil; active = nil
+        job.continuation.resume(returning: result)
+        startNext()
+    }
+}
+
+private enum SystemVoiceProbeSession {
     static func phrase(_ language: String) -> String {
         ["en": "Hello.", "zh": "你好。", "es": "Hola.", "hi": "नमस्ते।", "ar": "مرحبا.", "fr": "Bonjour.", "pt": "Olá.", "ja": "こんにちは。", "ko": "안녕하세요.", "de": "Hallo.", "ru": "Привет.", "it": "Ciao.", "bn": "হ্যালো।", "tr": "Merhaba.", "vi": "Xin chào.", "id": "Halo.", "th": "สวัสดี", "nl": "Hallo.", "pl": "Cześć.", "uk": "Привіт.", "sv": "Hej."][language] ?? "Hello."
     }
     static func probe(_ voice: SystemVoiceDescriptor) async -> Bool {
-        let session = SystemVoiceProbeSession()
-        return await withTaskCancellationHandler(operation: {
-            await withCheckedContinuation { continuation in session.start(voice, continuation: continuation) }
-        }, onCancel: { session.finish(false) })
-    }
-    private func start(_ voice: SystemVoiceDescriptor, continuation: CheckedContinuation<Bool, Never>) {
-        lock.lock()
-        if let completed { lock.unlock(); continuation.resume(returning: completed); return }
-        self.continuation = continuation; lock.unlock()
-        guard let systemVoice = AVSpeechSynthesisVoice(identifier: voice.identifier) else { finish(false); return }
-        let utterance = AVSpeechUtterance(string: Self.phrase(SystemVoiceCatalog.baseLanguage(voice.language)))
-        utterance.voice = systemVoice
-        synthesizer.write(utterance) { [self] buffer in
-            if let pcm = buffer as? AVAudioPCMBuffer, pcm.frameLength > 0, pcm.format.sampleRate > 0, pcm.format.channelCount > 0 { finish(true) }
-            else { finish(false) }
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in self?.finish(false) }
-    }
-    private func finish(_ usable: Bool) {
-        lock.lock()
-        guard completed == nil else { lock.unlock(); return }
-        completed = usable
-        let pending = continuation; continuation = nil; lock.unlock()
-        pending?.resume(returning: usable)
-        DispatchQueue.main.async { [self] in synthesizer.stopSpeaking(at: .immediate) }
+        let result = await NativeSpeechEngine.shared.render(text: phrase(SystemVoiceCatalog.baseLanguage(voice.language)),
+                                                           identifier: voice.identifier, timeout: 8)
+        guard case .renderedFile(let url, let duration, _) = result else { return false }
+        defer { try? FileManager.default.removeItem(at: url) }
+        return !Task.isCancelled && duration.isFinite && duration > 0
     }
 }
 
@@ -534,35 +618,23 @@ actor AppleSystemSpeechProvider: SpeechProvider {
         default:
             return .unsupported(.voiceCloning)
         }
-        let utterance = AVSpeechUtterance(string: request.text)
-        utterance.voice = speechVoice
-        utterance.rate = AVSpeechUtteranceDefaultSpeechRate
-        let synthesizer = AVSpeechSynthesizer()
-        let outputURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("system-speech-\(UUID().uuidString).wav")
-        return await withCheckedContinuation { continuation in
-            let writer = SpeechBufferWriter(destination: outputURL, continuation: continuation)
-            synthesizer.write(utterance) { buffer in writer.append(buffer) }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 45) {
-                writer.finish(.failure("System speech timed out. Please select another voice."))
-                synthesizer.stopSpeaking(at: .immediate)
-            }
-        }
+        return await NativeSpeechEngine.shared.render(text: request.text, identifier: speechVoice.identifier)
     }
 }
 
 private final class SpeechBufferWriter: @unchecked Sendable {
     private let lock = NSLock()
     private let destination: URL
-    private let continuation: CheckedContinuation<SpeechResult, Never>
+    private let completion: @Sendable (SpeechResult) -> Void
     private var file: AVAudioFile?
     private var frameCount: AVAudioFramePosition = 0
     private var finished = false
 
-    init(destination: URL, continuation: CheckedContinuation<SpeechResult, Never>) {
+    init(destination: URL, completion: @escaping @Sendable (SpeechResult) -> Void) {
         self.destination = destination
-        self.continuation = continuation
+        self.completion = completion
     }
+    var callback: AVSpeechSynthesizer.BufferCallback { { [self] buffer in append(buffer) } }
 
     func append(_ buffer: AVAudioBuffer) {
         guard let pcm = buffer as? AVAudioPCMBuffer else {
@@ -583,19 +655,21 @@ private final class SpeechBufferWriter: @unchecked Sendable {
             file = nil
             finished = true
             lock.unlock()
-            continuation.resume(returning: result)
+            completion(result)
             return
         }
         do {
+            guard pcm.format.sampleRate.isFinite, pcm.format.sampleRate > 0, pcm.format.channelCount > 0 else { throw VoiceStudioError.invalidAudioFile }
             if file == nil { file = try AVAudioFile(forWriting: destination, settings: pcm.format.settings) }
             try file?.write(from: pcm)
             frameCount += AVAudioFramePosition(pcm.frameLength)
             lock.unlock()
         } catch {
             finished = true
+            file = nil
             try? FileManager.default.removeItem(at: destination)
             lock.unlock()
-            continuation.resume(returning: .failure("System speech audio could not be written."))
+            completion(.failure("System speech audio could not be written."))
         }
     }
 
@@ -603,13 +677,20 @@ private final class SpeechBufferWriter: @unchecked Sendable {
         lock.lock()
         guard !finished else { lock.unlock(); return }
         finished = true
+        file = nil
         try? FileManager.default.removeItem(at: destination)
         lock.unlock()
-        continuation.resume(returning: result)
+        completion(result)
     }
 }
 
 struct AudioTimePitchProcessor {
+    func processAsync(_ sourceURL: URL, speed: Double, pitch: Double,
+                      shaping: VoiceShaping = VoiceShaping()) async throws -> URL {
+        let task = Task.detached(priority: .userInitiated) { try self.process(sourceURL, speed: speed, pitch: pitch, shaping: shaping) }
+        return try await withTaskCancellationHandler(operation: { try await task.value }, onCancel: { task.cancel() })
+    }
+
     static func accepts(speed: Double, pitch: Double, shaping: VoiceShaping = VoiceShaping()) -> Bool {
         speed.isFinite && (0.5...2).contains(speed) && pitch.isFinite && (-1200...1200).contains(pitch) &&
             shaping.values.values.allSatisfy { $0.isFinite && (-1...1).contains($0) } &&
@@ -624,6 +705,9 @@ struct AudioTimePitchProcessor {
         guard abs(speed - 1) > 0.001 || abs(pitch) > 0.5 || !shaping.values.isEmpty else { return sourceURL }
         let input = try AVAudioFile(forReading: sourceURL)
         let format = input.processingFormat
+        guard input.length > 0, format.sampleRate.isFinite, format.sampleRate > 0,
+              format.channelCount > 0, format.channelCount <= 2 else { throw VoiceStudioError.invalidAudioFile }
+        try Task.checkCancellation()
         let engine = AVAudioEngine()
         let player = AVAudioPlayerNode()
         let timePitch = AVAudioUnitTimePitch()
@@ -661,7 +745,7 @@ struct AudioTimePitchProcessor {
             outputSettings[AVLinearPCMIsBigEndianKey] = false
             outputSettings[AVLinearPCMIsNonInterleaved] = false
             let output = try AVAudioFile(forWriting: outputURL, settings: outputSettings)
-            let renderBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4096)!
+            guard let renderBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4096) else { throw VoiceStudioError.invalidAudioFile }
             var renderedFrames: AVAudioFramePosition = 0
             let targetFrames = AVAudioFramePosition(ceil(Double(input.length) / speed))
             engine.prepare()
@@ -670,6 +754,7 @@ struct AudioTimePitchProcessor {
             player.play()
             var attempts = 0
             while engine.manualRenderingSampleTime < targetFrames && attempts < 100_000 {
+                try Task.checkCancellation()
                 attempts += 1
                 let remaining = targetFrames - engine.manualRenderingSampleTime
                 let framesToRender = AVAudioFrameCount(min(remaining, AVAudioFramePosition(renderBuffer.frameCapacity)))
@@ -701,3 +786,33 @@ struct AudioTimePitchProcessor {
         }
     }
 }
+
+
+struct PerformanceTransferCapabilities: Sendable {
+    let sameContentConversion: Bool
+    let newTextStyleTransfer: Bool
+}
+protocol PerformanceTransferProvider: Sendable {
+    var performanceCapabilities: PerformanceTransferCapabilities { get }
+    func transfer(referenceAudio: URL, targetVoice: VoiceAsset, targetReference: URL,
+                  optionalText: String, language: String, voiceProfile: VoiceProfile) async throws -> URL
+}
+/// Same-content audio conversion only. A future provider may implement new-text transfer
+/// here; any cloud implementation must require explicit consent before receiving audio.
+struct LocalPerformanceTransfer: PerformanceTransferProvider {
+    let converter: any VoiceConverterProvider
+    let packDirectory: URL
+    let cacheDirectory: URL
+    let performanceCapabilities = PerformanceTransferCapabilities(sameContentConversion: true, newTextStyleTransfer: false)
+    func transfer(referenceAudio: URL, targetVoice: VoiceAsset, targetReference: URL,
+                  optionalText: String, language: String, voiceProfile: VoiceProfile) async throws -> URL {
+        guard optionalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw PerformanceTransferError.newTextUnsupported
+        }
+        try Task.checkCancellation()
+        return try await converter.convert(sourceURL: referenceAudio, targetReferenceURL: targetReference,
+            targetVoiceID: targetVoice.id, targetReferenceID: targetVoice.referenceAudio.id,
+            packDirectory: packDirectory, cacheDirectory: cacheDirectory)
+    }
+}
+enum PerformanceTransferError: Error { case newTextUnsupported }

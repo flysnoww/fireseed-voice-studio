@@ -8,6 +8,89 @@ import VoiceStudioCore
 
 final class VoiceStudioAppTests: XCTestCase {
     @MainActor
+    func testCardStackTwentyCyclesDepthDismissAndDeletedRouteRecovery() {
+        let stack = FloatingCardStack(); let id = UUID()
+        for _ in 0..<20 {
+            stack.push(.voices); stack.push(.voice(.saved(id))); stack.push(.voiceOption(.saved(id), false))
+            XCTAssertEqual(stack.entries.count, 3)
+            stack.pop(); stack.push(.voiceOption(.saved(id), true)); stack.pop()
+            stack.reconcile(voices: [], audio: [])
+            XCTAssertEqual(stack.entries.count, 1)
+            stack.dismissAll(); stack.pop(); XCTAssertTrue(stack.entries.isEmpty)
+        }
+    }
+    func testPerformanceTransferTenConversionsKeepSourceSeparateAndRejectNewText() async throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("performance.wav")
+        let target = root.appendingPathComponent("identity.wav")
+        try makeSilentWaveFile(at: source, duration: 0.5)
+        try makeSilentWaveFile(at: target, duration: 0.25)
+        let voice = VoiceAsset(name: "Target", sourceType: .record, referenceAudio: AudioAsset(fileName: "reference.wav", duration: 0.25))
+        let converter = RecordingConverter()
+        let transfer = LocalPerformanceTransfer(converter: converter, packDirectory: root, cacheDirectory: root)
+        XCTAssertTrue(transfer.performanceCapabilities.sameContentConversion)
+        XCTAssertFalse(transfer.performanceCapabilities.newTextStyleTransfer)
+        for _ in 0..<10 {
+            let output = try await transfer.transfer(referenceAudio: source, targetVoice: voice, targetReference: target, optionalText: "", language: "en", voiceProfile: VoiceProfile())
+            XCTAssertEqual(try Data(contentsOf: output), Data(contentsOf: source))
+            try FileManager.default.removeItem(at: output)
+        }
+        let calls = await converter.calls
+        XCTAssertEqual(calls.count, 10)
+        XCTAssertTrue(calls.allSatisfy { $0.0 == source && $0.1 == target && $0.2 == voice.id })
+        do { _ = try await transfer.transfer(referenceAudio: source, targetVoice: voice, targetReference: target, optionalText: "different words", language: "en", voiceProfile: VoiceProfile()); XCTFail("New text must not run") }
+        catch PerformanceTransferError.newTextUnsupported { }
+        let finalCount = await converter.calls.count
+        XCTAssertEqual(finalCount, 10)
+    }
+    @MainActor
+    func testDelayedGenerationCannotPublishAfterSwitchAndBackground() async throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("source.wav")
+        try makeSilentWaveFile(at: source, duration: 0.25)
+        let provider = DelayedTinyProvider(source: source)
+        let local = StubLocalSpeechProvider()
+        let model = try VoiceStudioModel(rootDirectory: root,
+            providerAssembly: SpeechProviderAssembly(providers: [.tinyLocal: provider], localPackProvider: local))
+        let job = Task { await model.generateSpeech(text: "hello", voice: .tinyLocal, language: "en", accent: nil) }
+        await provider.waitUntilStarted()
+        model.selectVoice(.systemDefault)
+        model.applicationDidEnterBackground()
+        await job.value
+        XCTAssertNil(model.generatedAudio)
+        XCTAssertFalse(model.isGeneratingSpeech)
+        XCTAssertEqual(model.currentVoice, .systemDefault)
+        let output = await provider.output
+        XCTAssertNotNil(output)
+        if let output { XCTAssertFalse(FileManager.default.fileExists(atPath: output.path)) }
+    }
+    func testVeryShortOrInvalidPCMIsRejectedBeforeSTFTIndexing() async {
+        let converter = OpenVoiceCoreMLConverter()
+        for count in [0, 1, 2, 32, 255] {
+            do { _ = try await converter.stft(samples: Array(repeating: 0, count: count)); XCTFail("Short PCM accepted") }
+            catch { }
+        }
+        do { _ = try await converter.stft(samples: Array(repeating: .nan, count: 1024)); XCTFail("NaN PCM accepted") }
+        catch { }
+    }
+    @MainActor
+    func testRapidVoiceSwitchInvalidatesEvenWhenReturningToOriginalVoice() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = try VoiceStudioModel(rootDirectory: root)
+        let original = model.operationGeneration
+        model.selectVoice(.systemVoice("B"))
+        model.selectVoice(.systemDefault)
+        XCTAssertFalse(model.acceptsOperation(original))
+        XCTAssertTrue(model.acceptsOperation(model.operationGeneration))
+        model.diagnostics.recordMemoryWarning()
+        XCTAssertFalse(model.acceptsOperation(original))
+        XCTAssertNotNil(model.diagnostics.snapshot.lastMemoryWarning)
+    }
+
+    @MainActor
     func testAvailabilityRestoreCannotOverwriteANewerManualSelection() async throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -684,7 +767,10 @@ final class VoiceStudioAppTests: XCTestCase {
         XCTAssertEqual(prepareCount, 2)
         let managedURL = try store.managedURL(for: saved.referenceAudio)
         let preparedURL = await local.lastPreparedReferenceURL()
-        XCTAssertEqual(preparedURL, managedURL)
+        XCTAssertNotEqual(preparedURL, managedURL)
+        XCTAssertNotNil(preparedURL)
+        if let preparedURL { XCTAssertFalse(FileManager.default.fileExists(atPath: preparedURL.path)) }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: managedURL.path))
     }
 
     @MainActor
@@ -1272,4 +1358,34 @@ private actor StubTinyLocalSpeechProvider: SpeechProvider {
 private actor ProbeCounter {
     private(set) var count = 0
     func probe(_ voice: SystemVoiceDescriptor) -> Bool { count += 1; return voice.identifier != "bad" }
+}
+
+private actor RecordingConverter: VoiceConverterProvider {
+    nonisolated let capabilities = CapabilityProfile(support: [.voiceConversion: .supported], languages: ["en", "zh"])
+    private(set) var calls: [(URL, URL, UUID)] = []
+    func validateModels(packDirectory: URL, cacheDirectory: URL) async throws {}
+    func prepareReference(referenceURL: URL, voiceID: UUID, referenceAudioID: UUID, packDirectory: URL, cacheDirectory: URL) async throws {}
+    func convert(sourceURL: URL, targetReferenceURL: URL, targetVoiceID: UUID, targetReferenceID: UUID, packDirectory: URL, cacheDirectory: URL) async throws -> URL {
+        calls.append((sourceURL, targetReferenceURL, targetVoiceID))
+        guard FileManager.default.fileExists(atPath: targetReferenceURL.path) else { throw VoiceStudioError.missingManagedAudio }
+        let output = sourceURL.deletingLastPathComponent().appendingPathComponent(UUID().uuidString + ".wav")
+        try FileManager.default.copyItem(at: sourceURL, to: output)
+        return output
+    }
+}
+private actor DelayedTinyProvider: SpeechProvider {
+    nonisolated let id: SpeechProviderID = .tinyLocal
+    nonisolated let capabilities = CapabilityProfile(support: [.speechGeneration: .supported, .languageSelection: .supported], languages: ["en"])
+    let source: URL
+    private var started = false
+    private(set) var output: URL?
+    init(source: URL) { self.source = source }
+    func waitUntilStarted() async { while !started { await Task.yield() } }
+    func generate(_ request: VoiceRequest, voice: VoiceAsset?, referenceAudioURL: URL?) async -> SpeechResult {
+        started = true
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        let url = source.deletingLastPathComponent().appendingPathComponent(UUID().uuidString + ".wav")
+        do { try FileManager.default.copyItem(at: source, to: url); output = url; return .renderedFile(url, duration: 0.25, approximation: nil) }
+        catch { return .failure("fixture") }
+    }
 }

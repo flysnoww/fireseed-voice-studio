@@ -4,10 +4,12 @@ import CoreML
 import Foundation
 import VoiceStudioCore
 
-enum OpenVoiceRuntimeError: Error {
+enum OpenVoiceRuntimeError: Error, Equatable {
     case invalidAudio
     case invalidModelContract
     case predictionFailed
+    case busy
+    case audioTooLong
 }
 
 enum OpenVoiceRuntimeMetrics {
@@ -32,6 +34,7 @@ enum OpenVoiceModelContract {
 /// Loads one Core ML component at a time. Compiled packages and speaker vectors
 /// are disposable cache data; source/reference audio stays in AudioFileStore.
 actor OpenVoiceCoreMLConverter: VoiceConverterProvider {
+    private var busy = false
     private var lastTimings = VoiceConverterTimings()
     func timings() -> VoiceConverterTimings? { lastTimings }
     private static let sampleRate = 22_050.0
@@ -44,6 +47,10 @@ actor OpenVoiceCoreMLConverter: VoiceConverterProvider {
         languages: ["en", "zh"])
 
     func validateModels(packDirectory: URL, cacheDirectory: URL) async throws {
+        guard !busy else { throw OpenVoiceRuntimeError.busy }
+        busy = true
+        defer { busy = false }
+        try Task.checkCancellation()
         try await validateEncoder(packDirectory: packDirectory, cacheDirectory: cacheDirectory)
         try await validateConverter(packDirectory: packDirectory, cacheDirectory: cacheDirectory)
     }
@@ -60,22 +67,32 @@ actor OpenVoiceCoreMLConverter: VoiceConverterProvider {
 
     func prepareReference(referenceURL: URL, voiceID: UUID, referenceAudioID: UUID,
                           packDirectory: URL, cacheDirectory: URL) async throws {
+        guard !busy else { throw OpenVoiceRuntimeError.busy }
+        busy = true
+        defer { busy = false }
+        try Task.checkCancellation()
         let cache = OpenVoiceSpeakerEmbeddingCache(rootDirectory: cacheDirectory.appendingPathComponent("Embeddings", isDirectory: true))
         if cache.load(voiceID: voiceID, referenceAudioID: referenceAudioID,
                       packRevision: OpenVoicePackStore.converterRevision) != nil { return }
         let embedding = try await extractEmbedding(audioURL: referenceURL, packDirectory: packDirectory,
                                                    cacheDirectory: cacheDirectory)
+        try Task.checkCancellation()
         try cache.store(embedding, voiceID: voiceID, referenceAudioID: referenceAudioID,
                         packRevision: OpenVoicePackStore.converterRevision)
     }
 
     func convert(sourceURL: URL, targetReferenceURL: URL, targetVoiceID: UUID,
                  targetReferenceID: UUID, packDirectory: URL, cacheDirectory: URL) async throws -> URL {
+        guard !busy else { throw OpenVoiceRuntimeError.busy }
+        busy = true
+        defer { busy = false }
+        try Task.checkCancellation()
         lastTimings = VoiceConverterTimings()
         let cache = OpenVoiceSpeakerEmbeddingCache(rootDirectory: cacheDirectory.appendingPathComponent("Embeddings", isDirectory: true))
         let targetEmbedding: [Float]
         if let cached = cache.load(voiceID: targetVoiceID, referenceAudioID: targetReferenceID,
                                    packRevision: OpenVoicePackStore.converterRevision) {
+            lastTimings.embeddingCacheHit = true
             targetEmbedding = cached
         } else {
             targetEmbedding = try await extractEmbedding(audioURL: targetReferenceURL,
@@ -84,6 +101,7 @@ actor OpenVoiceCoreMLConverter: VoiceConverterProvider {
             try cache.store(targetEmbedding, voiceID: targetVoiceID, referenceAudioID: targetReferenceID,
                             packRevision: OpenVoicePackStore.converterRevision)
         }
+        try Task.checkCancellation()
         let sourceEmbedding = try await extractEmbedding(audioURL: sourceURL,
                                                         packDirectory: packDirectory,
                                                         cacheDirectory: cacheDirectory)
@@ -91,6 +109,7 @@ actor OpenVoiceCoreMLConverter: VoiceConverterProvider {
             throw OpenVoiceRuntimeError.predictionFailed
         }
 
+        try Task.checkCancellation()
         let converter = try await loadModel(named: "OpenVoice_VoiceConverter", packDirectory: packDirectory,
                                             cacheDirectory: cacheDirectory)
         guard OpenVoiceModelContract.matches(
@@ -114,11 +133,13 @@ actor OpenVoiceCoreMLConverter: VoiceConverterProvider {
         let conversionStarted = ProcessInfo.processInfo.systemUptime
         guard let output = try await converter.prediction(from: input)
             .featureValue(for: "audio")?.multiArrayValue else { throw OpenVoiceRuntimeError.predictionFailed }
+        try Task.checkCancellation()
         lastTimings.conversionMilliseconds = Int((ProcessInfo.processInfo.systemUptime - conversionStarted) * 1000)
         return try writeWAV((0..<output.count).map { output[$0].floatValue })
     }
 
     private func validateConverter(packDirectory: URL, cacheDirectory: URL) async throws {
+        try Task.checkCancellation()
         let converter = try await loadModel(named: "OpenVoice_VoiceConverter", packDirectory: packDirectory,
                                             cacheDirectory: cacheDirectory)
         guard OpenVoiceModelContract.matches(
@@ -129,6 +150,7 @@ actor OpenVoiceCoreMLConverter: VoiceConverterProvider {
     }
 
     private func loadModel(named name: String, packDirectory: URL, cacheDirectory: URL) async throws -> MLModel {
+        try Task.checkCancellation()
         let started = ProcessInfo.processInfo.systemUptime
         defer { lastTimings.loadMilliseconds += Int((ProcessInfo.processInfo.systemUptime - started) * 1000) }
         let packageURL = packDirectory.appendingPathComponent("\(name).mlpackage", isDirectory: true)
@@ -138,8 +160,10 @@ actor OpenVoiceCoreMLConverter: VoiceConverterProvider {
         if !fileManager.fileExists(atPath: compiledURL.path) {
             let temporary = try await MLModel.compileModel(at: packageURL)
             defer { try? fileManager.removeItem(at: temporary) }
-            try fileManager.copyItem(at: temporary, to: compiledURL)
+            try Task.checkCancellation()
+            if !fileManager.fileExists(atPath: compiledURL.path) { try fileManager.copyItem(at: temporary, to: compiledURL) }
         }
+        try Task.checkCancellation()
         let configuration = MLModelConfiguration()
         configuration.computeUnits = .cpuAndGPU
         return try MLModel(contentsOf: compiledURL, configuration: configuration)
@@ -169,6 +193,7 @@ actor OpenVoiceCoreMLConverter: VoiceConverterProvider {
             .featureValue(for: "speaker_embedding")?.multiArrayValue else {
             throw OpenVoiceRuntimeError.predictionFailed
         }
+        try Task.checkCancellation()
         let embedding = (0..<output.count).map { output[$0].floatValue }
         guard embedding.count == 256, embedding.allSatisfy(\.isFinite) else {
             throw OpenVoiceRuntimeError.predictionFailed
@@ -187,6 +212,12 @@ actor OpenVoiceCoreMLConverter: VoiceConverterProvider {
         let file = try AVAudioFile(forReading: url)
         guard file.length > 0, file.length <= AVAudioFramePosition(AVAudioFrameCount.max) else { throw OpenVoiceRuntimeError.invalidAudio }
         let inputFormat = file.processingFormat
+        guard inputFormat.sampleRate.isFinite, inputFormat.sampleRate > 0,
+              inputFormat.sampleRate <= 192_000, inputFormat.channelCount > 0,
+              inputFormat.channelCount <= 2 else { throw OpenVoiceRuntimeError.invalidAudio }
+        // Bound PCM and Core ML activation memory before allocating; never truncate silently.
+        guard Double(file.length) / inputFormat.sampleRate <= 30 else { throw OpenVoiceRuntimeError.audioTooLong }
+        try Task.checkCancellation()
         let frameCount = AVAudioFrameCount(file.length)
         guard let inputBuffer = AVAudioPCMBuffer(pcmFormat: inputFormat, frameCapacity: frameCount) else {
             throw OpenVoiceRuntimeError.invalidAudio
@@ -214,8 +245,8 @@ actor OpenVoiceCoreMLConverter: VoiceConverterProvider {
     }
 
     /// Magnitude STFT layout matches the pinned Core ML conversion contract.
-    private func stft(samples: [Float]) throws -> [Float] {
-        guard samples.count > 1 else { throw OpenVoiceRuntimeError.invalidAudio }
+    func stft(samples: [Float]) throws -> [Float] {
+        guard samples.count >= Self.hopLength, samples.allSatisfy(\.isFinite) else { throw OpenVoiceRuntimeError.invalidAudio }
         let padding = (Self.fftSize - Self.hopLength) / 2
         var padded = [Float](repeating: 0, count: samples.count + 2 * padding)
         for index in 0..<padding {
@@ -237,6 +268,7 @@ actor OpenVoiceCoreMLConverter: VoiceConverterProvider {
         var result = [Float](repeating: 0, count: bins * frames)
         let half = Self.fftSize / 2
         for frame in 0..<frames {
+            try Task.checkCancellation()
             let start = frame * Self.hopLength
             let frameSamples = Array(padded[start..<(start + Self.fftSize)])
             var windowed = [Float](repeating: 0, count: Self.fftSize)
@@ -266,19 +298,23 @@ actor OpenVoiceCoreMLConverter: VoiceConverterProvider {
     }
 
     private func writeWAV(_ samples: [Float]) throws -> URL {
-        guard !samples.isEmpty,
+        guard !samples.isEmpty, samples.count <= 22_050 * 31, samples.allSatisfy(\.isFinite),
               let format = AVAudioFormat(standardFormatWithSampleRate: Self.sampleRate, channels: 1),
               let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(samples.count)) else {
             throw OpenVoiceRuntimeError.invalidAudio
         }
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("openvoice-\(UUID().uuidString).wav")
+        var succeeded = false
+        defer { if !succeeded { try? fileManager.removeItem(at: url) } }
         let file = try AVAudioFile(forWriting: url, settings: format.settings)
         buffer.frameLength = AVAudioFrameCount(samples.count)
         guard let channel = buffer.floatChannelData?.pointee else { throw OpenVoiceRuntimeError.invalidAudio }
         let peak = samples.reduce(Float.zero) { max($0, abs($1)) }
         let scale: Float = peak > 1 ? 0.95 / peak : 1
         for index in samples.indices { channel[index] = min(1, max(-1, samples[index] * scale)) }
+        try Task.checkCancellation()
         try file.write(from: buffer)
+        succeeded = true
         return url
     }
 }

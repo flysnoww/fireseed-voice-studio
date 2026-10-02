@@ -97,7 +97,20 @@ actor QwenRendererAdapter: InstallableSpeechProvider, VoicePreparingSpeechProvid
         if let runtime { qwen3_tts_destroy(runtime) }
     }
 
+    private var runtimeInUse = false
+    private var pendingUnload = false
+    private func finishRuntimeUse() {
+        runtimeInUse = false
+        if pendingUnload {
+            if let runtime { qwen3_tts_destroy(runtime) }
+            runtime = nil; preparedEmbeddings.removeAll(); pendingUnload = false
+        }
+    }
+
     func installPack(at folder: URL) async throws -> CapabilityProfile {
+        guard !runtimeInUse else { throw providerError(code: 30, "Runtime is busy.") }
+        runtimeInUse = true
+        defer { finishRuntimeUse() }
         let securityScoped = folder.startAccessingSecurityScopedResource()
         defer { if securityScoped { folder.stopAccessingSecurityScopedResource() } }
         let validationStarted = ProcessInfo.processInfo.systemUptime
@@ -169,6 +182,9 @@ actor QwenRendererAdapter: InstallableSpeechProvider, VoicePreparingSpeechProvid
     }
 
     func generate(_ request: VoiceRequest, voice: VoiceAsset?, referenceAudioURL: URL?) async -> SpeechResult {
+        guard !runtimeInUse, !Task.isCancelled else { return .failure("Runtime is busy or cancelled.") }
+        runtimeInUse = true
+        defer { finishRuntimeUse() }
         guard let runtime else { return .failure("Speech provider is not ready.") }
         guard case .saved(let voiceID) = request.voice,
               let voice, voice.id == voiceID, let referenceAudioURL else {
@@ -210,6 +226,10 @@ actor QwenRendererAdapter: InstallableSpeechProvider, VoicePreparingSpeechProvid
     }
 
     func prepareVoice(_ voice: VoiceAsset, referenceAudioURL: URL) async throws {
+        guard !runtimeInUse else { throw providerError(code: 30, "Runtime is busy.") }
+        runtimeInUse = true
+        defer { finishRuntimeUse() }
+        try Task.checkCancellation()
         guard let runtime else { throw providerError(code: 20, "Local runtime is not loaded.") }
         await diagnostics.updateVoicePrepareOperation("validateReference", physicalFootprintMB: Self.physicalFootprintMB())
         let normalized = try normalizeReferenceAudio(referenceAudioURL)
@@ -230,12 +250,13 @@ actor QwenRendererAdapter: InstallableSpeechProvider, VoicePreparingSpeechProvid
             physicalFootprintMB: Self.physicalFootprintMB())
         var embedding = [Float](repeating: 0, count: 4096)
         await diagnostics.updateVoicePrepareOperation("speakerEncode", physicalFootprintMB: Self.physicalFootprintMB())
+        try Task.checkCancellation()
         let count = normalized.path.withCString { path in
             embedding.withUnsafeMutableBufferPointer { buffer in
                 qwen3_tts_extract_embedding_file(runtime, path, buffer.baseAddress, Int32(buffer.count))
             }
         }
-        guard count > 0 else {
+        guard count > 0, count <= embedding.count else {
             throw providerError(code: 21, runtimeError(runtime, fallback: "Reference preparation failed."))
         }
         embedding.removeSubrange(Int(count)..<embedding.count)
@@ -244,6 +265,7 @@ actor QwenRendererAdapter: InstallableSpeechProvider, VoicePreparingSpeechProvid
     }
 
     func unloadRuntime() async {
+        guard !runtimeInUse else { pendingUnload = true; return }
         if let runtime { qwen3_tts_destroy(runtime) }
         runtime = nil
         preparedEmbeddings.removeAll()

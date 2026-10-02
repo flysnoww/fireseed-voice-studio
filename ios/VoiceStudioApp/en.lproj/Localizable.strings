@@ -249,3 +249,41 @@
 "This audio could not be shared. Please try again." = "This audio could not be shared. Please try again.";
 "Delete Audio?" = "Delete Audio?";
 "Preparing…" = "Preparing…";
+
+"Audio Imitation" = "Audio Imitation";
+
+"Imitate" = "Imitate";
+
+"Reference Audio" = "Reference Audio";
+
+"Enter new text (optional)" = "Enter new text (optional)";
+
+"Recreate this audio with the current voice." = "Recreate this audio with the current voice.";
+
+"Use the current voice and this delivery for new words." = "Use the current voice and this delivery for new words.";
+
+"Imitation with new text is not supported yet." = "Imitation with new text is not supported yet.";
+
+"Choose a saved voice to imitate." = "Choose a saved voice to imitate.";
+
+"Install the optional voice pack in Settings to imitate." = "Install the optional voice pack in Settings to imitate.";
+
+"Choose a saved voice and reference audio, and install the optional voice pack." = "Choose a saved voice and reference audio, and install the optional voice pack.";
+
+"Imitation ready." = "Imitation ready.";
+
+"Please use audio up to 30 seconds long." = "Please use audio up to 30 seconds long.";
+
+"This audio could not be imitated. Please try another reference." = "This audio could not be imitated. Please try another reference.";
+
+"Could not read this audio file. Please choose another." = "Could not read this audio file. Please choose another.";
+
+"Memory is low. The current operation was stopped. Please try a shorter audio clip." = "Memory is low. The current operation was stopped. Please try a shorter audio clip.";
+
+"No available options." = "No available options.";
+
+"Back" = "Back";
+
+"Close" = "Close";
+
+"More" = "More";
