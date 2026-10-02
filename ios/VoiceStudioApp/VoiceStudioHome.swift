@@ -6,6 +6,15 @@ import UIKit
 import UniformTypeIdentifiers
 import VoiceStudioCore
 
+enum StudioCardMotion {
+    static func reduceMotion(_ systemPreference: Bool) -> Bool {
+#if DEBUG
+        return systemPreference || ProcessInfo.processInfo.arguments.contains("-ui-reduce-motion")
+#else
+        return systemPreference
+#endif
+    }
+}
 enum StudioCardRoute: Equatable {
     case voices, system, systemLanguage(String), voice(VoiceSelection), voiceOption(VoiceSelection, Bool)
     case history(Bool), audio(UUID), imitation, settings, account, appLanguage, skin
@@ -35,7 +44,8 @@ struct VoiceStudioHome: View {
     @StateObject private var cards = FloatingCardStack()
     @EnvironmentObject private var languagePreference: AppLanguagePreference
     @Environment(\.scenePhase) private var scenePhase
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
+    private var reduceMotion: Bool { StudioCardMotion.reduceMotion(systemReduceMotion) }
     @State private var voiceName = "My voice"
     @State private var generationText = ""
     @FocusState private var focusedInput: Bool
@@ -244,7 +254,8 @@ private struct StudioCardLayer<Content: View>: View {
     let height: CGFloat
     @ViewBuilder var content: Content
     @EnvironmentObject private var appearance: AppAppearancePreference
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
+    private var reduceMotion: Bool { StudioCardMotion.reduceMotion(systemReduceMotion) }
     var body: some View {
         content.frame(maxWidth: 620, maxHeight: max(CGFloat(200), height))
             .background(appearance.skin.material, in: RoundedRectangle(cornerRadius: 30))
