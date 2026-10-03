@@ -8,6 +8,20 @@ import VoiceStudioCore
 
 final class VoiceStudioAppTests: XCTestCase {
     @MainActor
+    func testDiagnosticModelsCanReleaseRepeatedlyWithoutDeregisteringMetricKitSubscriber() async {
+        for _ in 0..<100 {
+            weak var released: VoiceStudioDiagnostics?
+            autoreleasepool {
+                let diagnostics = VoiceStudioDiagnostics()
+                released = diagnostics
+            }
+            XCTAssertNil(released)
+        }
+        // Give asynchronously queued system work an opportunity to finish.
+        try? await Task.sleep(nanoseconds: 200_000_000)
+    }
+
+    @MainActor
     func testTinyVoiceAuditionNeverSilentlyUsesSystemVoice() throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }

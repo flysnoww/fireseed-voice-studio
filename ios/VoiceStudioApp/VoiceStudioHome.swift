@@ -259,12 +259,14 @@ private struct StudioCardLayer<Content: View>: View {
     var body: some View {
         content.frame(maxWidth: 620, maxHeight: max(CGFloat(200), height))
             .background(appearance.skin.material, in: RoundedRectangle(cornerRadius: 30))
-            .overlay(RoundedRectangle(cornerRadius: 30).stroke(Color.white.opacity(0.4)))
+            .overlay(RoundedRectangle(cornerRadius: 30).stroke(Color.white.opacity(0.4)).allowsHitTesting(false))
             .shadow(color: .black.opacity(0.18), radius: 22, y: 12)
             .scaleEffect(reduceMotion ? 1 : max(0.86, 1 - CGFloat(depth) * 0.045), anchor: .top)
             .offset(y: reduceMotion ? 0 : -CGFloat(min(depth, 3)) * 14)
             .opacity(depth == 0 ? 1 : 0.82)
-            .allowsHitTesting(depth == 0).accessibilityHidden(depth != 0)
+            .allowsHitTesting(depth == 0)
+            .accessibilityElement(children: depth == 0 ? .contain : .ignore)
+            .accessibilityHidden(depth != 0)
             .transition(reduceMotion ? .opacity : .scale(scale: 0.96).combined(with: .opacity))
     }
 }
@@ -384,7 +386,8 @@ struct StudioSystemLanguageVoices: View {
     var body: some View {
         StudioFloatingCard(title: LocalizedStringKey(locale.localizedString(forLanguageCode: language) ?? language)) {
             ScrollView { VStack(alignment: .leading, spacing: 16) {
-                if isProbing { ProgressView("Checking voices…") }
+                ProgressView("Checking voices…").opacity(isProbing ? 1 : 0)
+                    .accessibilityHidden(!isProbing)
                 if !isProbing && voices.isEmpty { Text("No usable voices are available for this language.") }
                 ForEach(showAll ? voices : Array(voices.prefix(8))) { voice in
                     Button { model.selectVoice(.systemVoice(voice.identifier)); onSelected() } label: {

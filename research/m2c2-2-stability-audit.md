@@ -27,3 +27,7 @@ Required release gates: ios-ci, ios-test-package, unsigned IPA; existing signed 
 
 ## Device checklist
 10–15 minutes switching voices, recording/importing, preview/stop/generation, opening/closing layered cards; ten repeated generations; background during conversion; interruptions; share while navigating; Voice Detail speed/pitch persistence and all actions; same-content imitation content/rhythm/intonation/identity listening. New-text imitation is unavailable. If another exit occurs, export local diagnostics and obtain the matching iOS Analytics .ips/jetsam report before assigning a root cause.
+
+## CI-discovered regression and concrete evidence
+Run 37072558767 exported simulator crash 9EC68D6D-9FED-41BA-9B94-472BD15D8422: EXC_BAD_ACCESS on MetricKit's asynchronous removeSubscriber queue (objc_msgSend → NSConcreteHashTable removeItem → MXMetricManager removeSubscriber). The newly added per-model collector deregistered itself during deinit. It now has process lifetime; individual diagnostics models use removable NotificationCenter observers instead. A 100-model release regression covers this ownership boundary. This is a confirmed candidate-build regression, not proof of the user's Build 4 device crash cause.
+UI evidence also exposed background cards' controls in accessibility. Each layer now explicitly contains front children or ignores back children before hiding it; tests require exactly one Back control. The probe progress area keeps a stable height so arriving voice results do not move the first selection under a tap.

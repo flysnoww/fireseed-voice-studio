@@ -38,6 +38,9 @@ final class VoiceStudioUITests: XCTestCase {
         tap("systemLanguage-en"); expandCard("English")
         let voice = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'systemVoice-' ")).firstMatch
         XCTAssertTrue(voice.waitForExistence(timeout: 120))
+        let probing = app.progressIndicators.firstMatch
+        XCTAssertTrue(NSPredicate(format: "exists == false").evaluate(with: probing) ||
+            XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: probing)], timeout: 120) == .completed)
         screenshot("English usable voices floating card")
         voice.tap()
         XCTAssertTrue(app.buttons["currentVoiceCard"].waitForExistence(timeout: 20))
@@ -80,7 +83,9 @@ final class VoiceStudioUITests: XCTestCase {
             let detail = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'voiceDetail-' ")).firstMatch
             XCTAssertTrue(detail.waitForExistence(timeout: 20)); detail.tap()
             XCTAssertTrue(app.sliders["voiceSpeedSlider"].waitForExistence(timeout: 20))
-            tap("voiceLanguageButton"); tap("floatingCardBack")
+            tap("voiceLanguageButton")
+            XCTAssertEqual(app.buttons.matching(identifier: "floatingCardBack").count, 1)
+            tap("floatingCardBack")
             tap("floatingCardClose")
         }
         tap("myVoicesButton")

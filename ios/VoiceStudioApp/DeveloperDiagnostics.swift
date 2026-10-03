@@ -122,7 +122,7 @@ final class VoiceStudioDiagnostics: ObservableObject {
     private let breadcrumbDefaults: UserDefaults
     private let breadcrumbKey: String
     private var memoryObserver: NSObjectProtocol?
-    private var crashCollector: LocalCrashCollector?
+    private var crashObserver: NSObjectProtocol?
     var memoryWarningHandler: (() -> Void)?
     private let logger = Logger(subsystem: "com.fireseed.voicestudio", category: "Runtime")
 
@@ -154,13 +154,13 @@ final class VoiceStudioDiagnostics: ObservableObject {
         if let interrupted = defaults.string(forKey: breadcrumbKey + ".activeOperation") {
             snapshot.previousSession = "Previous operation ended unexpectedly: " + interrupted + " (crash or interruption not yet established)"
         }
-        snapshot.localCrashReport = defaults.string(forKey: breadcrumbKey + ".crash")
-        crashCollector = LocalCrashCollector { [weak self] report in
-            Task { @MainActor in
-                guard let self else { return }
-                self.snapshot.localCrashReport = report
-                self.breadcrumbDefaults.set(report, forKey: self.breadcrumbKey + ".crash")
-            }
+        // MetricKit's subscriber has process lifetime; individual models only observe reports.
+        _ = LocalCrashCollector.shared
+        snapshot.localCrashReport = LocalCrashCollector.latestReport
+        crashObserver = NotificationCenter.default.addObserver(
+            forName: LocalCrashCollector.reportNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.snapshot.localCrashReport = LocalCrashCollector.latestReport }
         }
         memoryObserver = NotificationCenter.default.addObserver(
             forName: UIApplication.didReceiveMemoryWarningNotification,
@@ -172,6 +172,7 @@ final class VoiceStudioDiagnostics: ObservableObject {
 
     deinit {
         if let memoryObserver { NotificationCenter.default.removeObserver(memoryObserver) }
+        if let crashObserver { NotificationCenter.default.removeObserver(crashObserver) }
     }
 
     func beginOperation(_ name: String, token: UUID) {
@@ -407,19 +408,23 @@ final class VoiceStudioDiagnostics: ObservableObject {
 
 /// Apple delivers these on its own schedule. This collector stores a bounded local report only.
 /// A breadcrumb alone is not classified as a proven crash (force quit may also interrupt work).
-private final class LocalCrashCollector: NSObject, MXMetricManagerSubscriber {
-    private let received: @Sendable (String) -> Void
-    init(received: @escaping @Sendable (String) -> Void) {
-        self.received = received
+private final class LocalCrashCollector: NSObject, MXMetricManagerSubscriber, @unchecked Sendable {
+    static let shared = LocalCrashCollector()
+    static let reportNotification = Notification.Name("VoiceStudioLocalCrashReport")
+    private static let reportKey = "VoiceStudioLocalCrashReport"
+    static var latestReport: String? { UserDefaults.standard.string(forKey: reportKey) }
+    private override init() {
         super.init()
         MXMetricManager.shared.add(self)
     }
-    deinit { MXMetricManager.shared.remove(self) }
+    // Never deregister a deinitializing object: MetricKit removes subscribers asynchronously.
+    // The shared instance remains strongly retained for the entire process.
     func didReceive(_ payloads: [MXDiagnosticPayload]) {
         let reports = payloads.flatMap { $0.crashDiagnostics ?? [] }.suffix(3).compactMap {
             String(data: $0.jsonRepresentation(), encoding: .utf8)
         }
         guard !reports.isEmpty else { return }
-        received(String(reports.joined(separator: "\n").prefix(196_608)))
+        UserDefaults.standard.set(String(reports.joined(separator: "\n").prefix(196_608)), forKey: Self.reportKey)
+        NotificationCenter.default.post(name: Self.reportNotification, object: nil)
     }
 }
