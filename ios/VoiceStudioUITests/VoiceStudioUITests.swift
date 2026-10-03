@@ -96,7 +96,9 @@ final class VoiceStudioUITests: XCTestCase {
         tap("myVoicesButton")
         app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'voiceDetail-' ")).firstMatch.tap()
         app.swipeUp(); tap("Delete Voice…"); tap("Delete")
-        XCTAssertTrue(app.otherElements["myVoicesFloatingCard"].waitForExistence(timeout: 20))
+        XCTAssertTrue(app.scrollViews["myVoicesFloatingCard"].waitForExistence(timeout: 20))
+        XCTAssertFalse(app.sliders["voiceSpeedSlider"].exists)
+        XCTAssertEqual(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'voiceDetail-' ")).count, 0)
         screenshot("Deleted detail recovers to library")
     }
     func testRealSameContentImitationRepeatedAndUnsupportedNewText() {
