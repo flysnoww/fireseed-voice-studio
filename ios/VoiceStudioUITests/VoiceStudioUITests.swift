@@ -12,13 +12,18 @@ final class VoiceStudioUITests: XCTestCase {
         attachment.name = name; attachment.lifetime = .keepAlways; add(attachment)
     }
     private func tap(_ identifier: String) {
-        let element = app.buttons[identifier]
-        XCTAssertTrue(element.waitForExistence(timeout: 30), identifier)
-        if !element.isHittable { app.swipeUp() }
-        element.tap()
+        let matches = app.buttons.matching(identifier: identifier)
+        XCTAssertTrue(matches.firstMatch.waitForExistence(timeout: 30), identifier)
+        // XCTest includes controls from visually retained back layers. Only the front
+        // layer may receive input; never choose an arbitrary first/last duplicate.
+        if !matches.allElementsBoundByIndex.contains(where: { $0.isHittable }) { app.swipeUp() }
+        let interactive = matches.allElementsBoundByIndex.filter { $0.isHittable }
+        XCTAssertEqual(interactive.count, 1, "Exactly one interactive control: " + identifier)
+        guard interactive.count == 1 else { return }
+        interactive[0].tap()
     }
     private func closeCard(_ title: String) { tap("floatingCardBack") }
-    private func expandCard(_ title: String) { XCTAssertTrue(app.buttons["floatingCardBack"].waitForExistence(timeout: 20)) }
+    private func expandCard(_ title: String) { XCTAssertTrue(app.buttons.matching(identifier: "floatingCardBack").firstMatch.waitForExistence(timeout: 20)) }
     private func generate() {
         let field = app.descendants(matching: .any).matching(identifier: "generationTextField").firstMatch
         XCTAssertTrue(field.waitForExistence(timeout: 20))
@@ -84,7 +89,7 @@ final class VoiceStudioUITests: XCTestCase {
             XCTAssertTrue(detail.waitForExistence(timeout: 20)); detail.tap()
             XCTAssertTrue(app.sliders["voiceSpeedSlider"].waitForExistence(timeout: 20))
             tap("voiceLanguageButton")
-            XCTAssertEqual(app.buttons.matching(identifier: "floatingCardBack").count, 1)
+            XCTAssertEqual(app.buttons.matching(identifier: "floatingCardBack").allElementsBoundByIndex.filter { $0.isHittable }.count, 1)
             tap("floatingCardBack")
             tap("floatingCardClose")
         }
