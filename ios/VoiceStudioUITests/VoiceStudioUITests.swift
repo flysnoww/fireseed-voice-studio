@@ -147,6 +147,7 @@ final class VoiceStudioUITests: XCTestCase {
         let source = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'generatedAudio-' ")).firstMatch
         XCTAssertTrue(source.waitForExistence(timeout: 20)); source.tap()
         for _ in 0..<11 {
+            tap("performancePlayButton")
             let run = app.buttons["runImitationButton"]
             XCTAssertTrue(run.waitForExistence(timeout: 30))
             let ready = NSPredicate(format: "enabled == true")
@@ -157,6 +158,7 @@ final class VoiceStudioUITests: XCTestCase {
             let save = app.buttons["saveGeneratedAudioButton"]
             XCTAssertTrue(save.waitForExistence(timeout: 180))
             if !save.isHittable { app.swipeUp() }
+            tap("resultPlayButton")
             save.tap()
             XCTAssertTrue(save.waitForNonExistence(timeout: 20))
         }

@@ -387,7 +387,11 @@ struct StudioVoiceLibrary: View {
                             StudioIcon("Shape Voice", symbol: "slider.horizontal.3") { cards.push(.voice(.saved(voice.id))) }
                             StudioShare(model: model, audio: voice.referenceAudio)
                             Spacer()
-                            StudioIcon("Favorite", symbol: voice.isFavorite ? "star.fill" : "star") { model.setSavedVoiceFavorite(id: voice.id, isFavorite: !voice.isFavorite) }
+                            Menu {
+                                Button { model.setSavedVoiceFavorite(id: voice.id, isFavorite: !voice.isFavorite) } label: { Label("Favorite", systemImage: voice.isFavorite ? "star.fill" : "star") }
+                                Button { cards.push(.voice(.saved(voice.id))) } label: { Label("Rename", systemImage: "pencil") }
+                                Button { cards.push(.voice(.saved(voice.id))) } label: { Label("Delete Voice…", systemImage: "trash") }
+                            } label: { Image(systemName: "ellipsis").frame(minWidth: 44, minHeight: 44) }.accessibilityLabel("More")
                         }
                     }.padding(16).background(.thinMaterial, in: RoundedRectangle(cornerRadius: 22))
                         .overlay(RoundedRectangle(cornerRadius: 22).stroke(model.currentVoice == .saved(voice.id) ? Color.accentColor : .clear, lineWidth: 2))
@@ -517,9 +521,9 @@ struct StudioVoiceDetail: View {
                 }
                 Section("Voice Shaping") {
                     LabeledContent("Speed", value: String(format: "%.2f×", profile.speed))
-                    Slider(value: profileBinding(\.speed), in: 0.5...2, step: 0.05, onEditingChanged: { if !$0 { commitProfile() } }).accessibilityLabel("Speed").accessibilityIdentifier("voiceSpeedSlider")
+                    Slider(value: profileBinding(\.speed, deferPersistence: true), in: 0.5...2, step: 0.05, onEditingChanged: { if !$0 { commitProfile() } }).accessibilityLabel("Speed").accessibilityIdentifier("voiceSpeedSlider")
                     LabeledContent("Pitch", value: String(format: "%.0f", profile.pitch))
-                    Slider(value: profileBinding(\.pitch), in: -1200...1200, step: 50, onEditingChanged: { if !$0 { commitProfile() } }).accessibilityLabel("Pitch").accessibilityIdentifier("voicePitchSlider")
+                    Slider(value: profileBinding(\.pitch, deferPersistence: true), in: -1200...1200, step: 50, onEditingChanged: { if !$0 { commitProfile() } }).accessibilityLabel("Pitch").accessibilityIdentifier("voicePitchSlider")
                 }
                 Section {
                     Button { commitProfile(); Task { await model.previewShapedVoice(selection, locale: locale) } } label: {
@@ -571,8 +575,12 @@ struct StudioVoiceDetail: View {
 
         }
     }
-    private func profileBinding<T>(_ key: WritableKeyPath<VoiceProfile, T>) -> Binding<T> {
-        Binding(get: { profile[keyPath: key] }, set: { value in var updated = profile; updated[keyPath: key] = value; draftProfile = updated })
+    private func profileBinding<T>(_ key: WritableKeyPath<VoiceProfile, T>, deferPersistence: Bool = false) -> Binding<T> {
+        Binding(get: { profile[keyPath: key] }, set: { value in
+            var updated = profile; updated[keyPath: key] = value
+            if deferPersistence { draftProfile = updated }
+            else { draftProfile = nil; model.updateProfile(updated, for: selection) }
+        })
     }
     private func commitProfile() {
         if let draftProfile { model.updateProfile(draftProfile, for: selection); self.draftProfile = nil }
@@ -600,9 +608,12 @@ struct StudioAudioLibrary: View {
         StudioFloatingCard(title: "Generation History") {
             ScrollView { VStack(spacing: 12) {
                 ForEach(model.pagedGeneratedAudio) { audio in
+                    HStack(spacing: 12) {
+                    StudioAssetPlay(model: model, audio: audio)
                     Button { if choosingPerformance { model.usePerformance(audio); cards.pop() } else { cards.push(.audio(audio.id)) } } label: {
-                        HStack { VStack(alignment: .leading) { Text(audio.displayName).font(.headline); Text(SavedVoiceLibrary.formattedDuration(audio.duration)).font(.caption) }; Spacer(); Image(systemName: choosingPerformance ? "plus.circle" : "chevron.right") }.padding(20).background(.thinMaterial, in: RoundedRectangle(cornerRadius: 20))
-                    }.accessibilityIdentifier("generatedAudio-\(audio.id.uuidString)")
+                        HStack { VStack(alignment: .leading) { Text(audio.displayName).font(.headline); Text(SavedVoiceLibrary.formattedDuration(audio.duration)).font(.caption) }; Spacer(); Image(systemName: choosingPerformance ? "plus.circle" : "chevron.right") }
+                    }.buttonStyle(.plain).accessibilityIdentifier("generatedAudio-\(audio.id.uuidString)")
+                    }.padding(16).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20))
                 }
                 if model.savedGeneratedAudio.isEmpty { Text("No saved audio yet.") }
                 if model.generatedAudioPageCount > 1 { HStack { Button("Previous") { model.setGeneratedAudioPage(model.generatedAudioPage - 1) }.disabled(model.generatedAudioPage == 0); Spacer(); Button("Next") { model.setGeneratedAudioPage(model.generatedAudioPage + 1) }.disabled(model.generatedAudioPage + 1 >= model.generatedAudioPageCount) } }
@@ -975,7 +986,7 @@ struct StudioResult: View {
     let audio: AudioAsset
     var body: some View {
         HStack {
-            StudioAssetPlay(model: model, audio: audio, size: .large)
+            StudioAssetPlay(model: model, audio: audio, size: .large).accessibilityIdentifier("resultPlayButton")
             Text(SavedVoiceLibrary.formattedDuration(audio.duration)).font(.caption)
             StudioShare(model: model, audio: audio)
             Spacer()
@@ -1005,7 +1016,7 @@ struct StudioImitation: View {
                 if let reference = model.performanceReference {
                     VStack(alignment: .leading, spacing: 12) {
                         HStack {
-                            StudioAssetPlay(model: model, audio: reference.audio, size: .large)
+                            StudioAssetPlay(model: model, audio: reference.audio, size: .large).accessibilityIdentifier("performancePlayButton")
                             VStack(alignment: .leading) {
                                 Text(model.performanceName ?? String(localized: "Reference Audio", locale: locale)).font(.headline)
                                 Text(LocalizedStringKey(model.performanceSourceLabel)).font(.caption)
@@ -1013,7 +1024,11 @@ struct StudioImitation: View {
                             }
                         }
                         HStack {
-                            Menu { Button("Import") { importing = true }; Button("Generation History") { cards.push(.history(true)) }; Button("Record") { Task { await model.startRecording(performance: true) } } label: { Label("Replace", systemImage: "arrow.triangle.2.circlepath") }
+                            Menu {
+                                Button("Import") { importing = true }
+                                Button("Generation History") { cards.push(.history(true)) }
+                                Button("Record") { Task { await model.startRecording(performance: true) } }
+                            } label: { Label("Replace", systemImage: "arrow.triangle.2.circlepath") }
                             Spacer()
                             Button("Remove", role: .destructive) { model.removePerformance() }.accessibilityIdentifier("removePerformanceButton")
                         }.disabled(model.isRecording || model.isRequestingPermission || model.isGeneratingSpeech)
