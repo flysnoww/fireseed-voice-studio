@@ -28,8 +28,120 @@ final class VoiceStudioAppTests: XCTestCase {
         let model = try VoiceStudioModel(rootDirectory: root)
         model.audition(.tinyLocal, locale: Locale(identifier: "en"))
         XCTAssertFalse(model.isPlaying)
-        XCTAssertEqual(model.statusMessage, "Enter text and use Preview to hear this voice.")
+        XCTAssertEqual(model.statusMessage, "Install the local voice in Settings to hear this voice.")
     }
+    @MainActor
+    func testShapedPreviewUsesProfileWithoutSelectingOrSavingAndSliderUpdatesNeverRender() async throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("source.wav")
+        try makeSilentWaveFile(at: source, duration: 0.25)
+        let provider = DelayedTinyProvider(source: source)
+        let model = try VoiceStudioModel(rootDirectory: root,
+            providerAssembly: SpeechProviderAssembly(providers: [.tinyLocal: provider], localPackProvider: StubLocalSpeechProvider()))
+        let selected = model.currentVoice
+        var profile = model.profile(for: .tinyLocal)
+        profile.speed = 1.15; profile.pitch = 50
+        model.updateProfile(profile, for: .tinyLocal)
+        let before = await provider.requests
+        XCTAssertTrue(before.isEmpty)
+        await model.previewShapedVoice(.tinyLocal, locale: Locale(identifier: "en"))
+        let lastRequest = await provider.lastRequest()
+        let request = try XCTUnwrap(lastRequest)
+        XCTAssertEqual(request.renderMode, .preview)
+        XCTAssertEqual(request.speed, 1.15)
+        XCTAssertEqual(request.pitch, 50)
+        XCTAssertEqual(request.language, "en")
+        XCTAssertFalse(request.text.isEmpty)
+        XCTAssertEqual(model.currentVoice, selected)
+        XCTAssertTrue(model.savedGeneratedAudio.isEmpty)
+        XCTAssertNil(model.generatedAudio)
+        XCTAssertNotNil(model.shapedPreviewAudio)
+        XCTAssertEqual(model.playbackSource, .shaped(.tinyLocal))
+        model.stopAudition()
+        XCTAssertNil(model.playbackSource)
+    }
+
+    @MainActor
+    func testTwelvePlaybackReplacementReferenceAndSharingCycles() async throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("source.wav")
+        try makeSilentWaveFile(at: source, duration: 3)
+        let store = try AudioFileStore(rootDirectory: root)
+        var voices: [VoiceAsset] = []
+        for index in 0..<2 {
+            let audio = try store.importAudio(from: source, duration: 3)
+            voices.append(try store.saveVoice(VoiceAsset(name: "Voice \(index)", sourceType: .imported, referenceAudio: audio)))
+        }
+        let model = try VoiceStudioModel(rootDirectory: root)
+        let selected = model.currentVoice
+        for _ in 0..<12 {
+            model.audition(.saved(voices[0].id), locale: Locale(identifier: "en"))
+            XCTAssertEqual(model.playbackSource, .voice(.saved(voices[0].id)))
+            model.audition(.saved(voices[1].id), locale: Locale(identifier: "en"))
+            XCTAssertEqual(model.playbackSource, .voice(.saved(voices[1].id)))
+            XCTAssertEqual(model.currentVoice, selected)
+            model.stopAudition()
+            XCTAssertFalse(model.isPlaying)
+            model.importPerformance(from: source)
+            let first = try XCTUnwrap(model.performanceReference?.audio)
+            model.toggleAudio(first)
+            XCTAssertEqual(model.playbackSource, .asset(first.id))
+            let lease = try model.audioLease(for: first)
+            model.importPerformance(from: source)
+            XCTAssertNil(model.managedURL(for: first))
+            XCTAssertNil(model.playbackSource)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: lease.url.path))
+            let second = try XCTUnwrap(model.performanceReference?.audio)
+            model.toggleAudio(second); model.stopAudition()
+            XCTAssertEqual(model.playbackSource, .asset(second.id))
+            model.removePerformance()
+            XCTAssertNil(model.performanceReference)
+            XCTAssertNil(model.playbackSource)
+            XCTAssertNil(model.managedURL(for: second))
+            lease.close()
+            XCTAssertNotNil(model.managedURL(for: voices[0].referenceAudio))
+        }
+    }
+
+    @MainActor
+    func testTinyAuditionUsesInjectedTinyProviderAndShareUsesRenderedFile() async throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("source.wav")
+        try makeSilentWaveFile(at: source, duration: 1)
+        let provider = DelayedTinyProvider(source: source)
+        let model = try VoiceStudioModel(rootDirectory: root,
+            providerAssembly: SpeechProviderAssembly(providers: [.tinyLocal: provider], localPackProvider: StubLocalSpeechProvider()))
+        let selected = model.currentVoice
+        let rendered = await model.auditionForSharing(.tinyLocal, locale: Locale(identifier: "en"))
+        let asset = try XCTUnwrap(rendered)
+        XCTAssertNotNil(model.managedURL(for: asset))
+        XCTAssertEqual(model.currentVoice, selected)
+        XCTAssertEqual(model.playbackSource, .voice(.tinyLocal))
+        let requests = await provider.requests
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertEqual(requests[0].voice, .tinyLocal)
+        XCTAssertEqual(requests[0].renderMode, .preview)
+        XCTAssertTrue(model.savedGeneratedAudio.isEmpty)
+        let again = await model.auditionForSharing(.tinyLocal, locale: Locale(identifier: "en"))
+        XCTAssertEqual(again?.id, asset.id)
+        model.stopPlayback()
+    }
+
+    @MainActor
+    func testUnsupportedImitationDoesNotCreateOutputAndReportsCapability() async throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = try VoiceStudioModel(rootDirectory: root)
+        await model.imitate(optionalText: "new words")
+        XCTAssertNil(model.generatedAudio)
+        XCTAssertEqual(model.diagnostics.snapshot.imitationMode, "new-text (unsupported)")
+        XCTAssertEqual(model.diagnostics.snapshot.imitationCapability, "unsupported")
+        XCTAssertFalse(model.canImitate)
+    }
+
     @MainActor
     func testTenGenerationsEvictOnlyVolatileAudioAndKeepShareSnapshot() async throws {
         let root = try makeTemporaryRoot()
@@ -1449,6 +1561,8 @@ private actor DelayedTinyProvider: SpeechProvider {
     nonisolated let capabilities = CapabilityProfile(support: [.speechGeneration: .supported, .languageSelection: .supported], languages: ["en"])
     let source: URL
     private var started = false
+    private(set) var requests: [VoiceRequest] = []
+    func lastRequest() -> VoiceRequest? { requests.last }
     private(set) var output: URL?
     init(source: URL) { self.source = source }
     func waitUntilStarted() async -> Bool {
@@ -1460,6 +1574,7 @@ private actor DelayedTinyProvider: SpeechProvider {
     }
     func generate(_ request: VoiceRequest, voice: VoiceAsset?, referenceAudioURL: URL?) async -> SpeechResult {
         started = true
+        requests.append(request)
         try? await Task.sleep(nanoseconds: 100_000_000)
         let url = source.deletingLastPathComponent().appendingPathComponent(UUID().uuidString + ".wav")
         do { try FileManager.default.copyItem(at: source, to: url); output = url; return .renderedFile(url, duration: 0.25, approximation: nil) }

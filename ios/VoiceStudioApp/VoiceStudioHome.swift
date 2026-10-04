@@ -70,10 +70,10 @@ struct VoiceStudioHome: View {
                                 }
                             }.accessibilityIdentifier("currentVoiceCard")
                             HStack {
-                                StudioIcon("Play", symbol: "play.fill") { model.audition(model.currentVoice, locale: locale) }
-                                StudioIcon("Stop", symbol: "stop.fill") { model.stopPlayback() }
+                                StudioVoicePlay(model: model, selection: model.currentVoice, size: .large)
                                 Spacer()
                                 Button { cards.push(.voice(model.currentVoice)) } label: { Label("Shape Voice", systemImage: "slider.horizontal.3") }.accessibilityIdentifier("shapeVoiceButton")
+                                Button { cards.push(.imitation) } label: { Label("Imitate", systemImage: "person.wave.2") }.accessibilityIdentifier("imitateButton")
                             }
                         }
                         voiceSourceCard
@@ -92,8 +92,7 @@ struct VoiceStudioHome: View {
                             if model.isGeneratingSpeech || model.isResolvingVoice { HStack { ProgressView("Preparing…"); Spacer(); StudioIcon("Cancel", symbol: "xmark") { model.cancelGeneration() } } }
                             if let audio = model.generatedAudio {
                                 HStack {
-                                    StudioIcon("Play", symbol: "play.fill") { model.playGeneratedAudio() }
-                                    StudioIcon("Stop", symbol: "stop.fill") { model.stopPlayback() }
+                                    StudioAssetPlay(model: model, audio: audio, size: .large)
                                     Button("Save Audio") { model.saveGeneratedAudio() }
                                         .disabled(audio.persistenceState == .persistent)
                                         .accessibilityIdentifier("saveGeneratedAudioButton")
@@ -104,7 +103,6 @@ struct VoiceStudioHome: View {
                                 .accessibilityIdentifier("statusMessage")
                         }
                         HStack {
-                            Button { cards.push(.imitation) } label: { Label("Imitate", systemImage: "person.wave.2") }.accessibilityIdentifier("imitateButton")
                             Spacer()
                             Button("Generation History") { cards.push(.history(false)) }.accessibilityIdentifier("generatedAudioLibraryButton")
                         }
@@ -141,7 +139,7 @@ struct VoiceStudioHome: View {
             .tint(appearance.skin.accent)
             .environmentObject(cards)
             .animation(reduceMotion ? .easeInOut(duration: 0.15) : .interactiveSpring(response: 0.36, dampingFraction: 0.88), value: cards.entries.map(\.id))
-            .onChange(of: cards.entries.count) { _, depth in focusedInput = false; UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil); model.diagnostics.update { $0.routeDepth = depth } }
+            .onChange(of: cards.entries.count) { _, depth in focusedInput = false; UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil); model.diagnostics.update { $0.routeDepth = depth }; model.stopAudition() }
             .onChange(of: model.savedVoices.map(\.id)) { _, _ in reconcile() }
             .onChange(of: model.savedGeneratedAudio.map(\.id)) { _, _ in reconcile() }
             .onChange(of: scenePhase) { _, phase in if phase == .background { model.applicationDidEnterBackground() } }
@@ -170,7 +168,7 @@ struct VoiceStudioHome: View {
                 if model.isRecording { model.stopRecording() } else { Task { await model.startRecording() } }
             } label: { VStack { Image(systemName: model.isRecording ? "stop.circle" : "mic.fill").font(.title3); Text(model.isRecording ? "Stop Recording" : "Record Voice").font(.caption) }.frame(maxWidth: .infinity, minHeight: 58) }
                 .disabled(model.isRequestingPermission && !model.isRecording).accessibilityIdentifier("recordNewVoiceButton")
-            }.buttonStyle(.bordered)
+            }.buttonStyle(StudioSourceButtonStyle())
             if model.isRecording { Label("Recording in progress", systemImage: "record.circle.fill").foregroundStyle(.red) }
             if model.microphonePermissionDenied {
                 Button("Open Settings") { if let url = URL(string: UIApplication.openSettingsURLString) { openURL(url) } }
@@ -181,7 +179,7 @@ struct VoiceStudioHome: View {
                 TextField("Voice Name", text: $voiceName).textFieldStyle(.roundedBorder)
                     .accessibilityIdentifier("voiceNameField")
                 HStack {
-                    StudioIcon("Play", symbol: "play.fill") { model.playCurrentAudio() }.accessibilityIdentifier("playReferenceButton")
+                    if let audio = model.currentReference?.asset { StudioAssetPlay(model: model, audio: audio).accessibilityIdentifier("playReferenceButton") }
                     Button("Save Voice") { model.saveVoice(name: voiceName); focusedInput = false }
                         .disabled(!model.canSaveVoice || voiceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                         .accessibilityIdentifier("saveVoiceButton")
@@ -236,6 +234,14 @@ struct VoiceStudioHome: View {
             LabeledContent("Quality", value: snapshot.systemVoiceQuality.map(String.init) ?? "—")
             LabeledContent("Language", value: model.currentVoiceProfile.language)
             LabeledContent("Accent", value: model.currentVoiceProfile.accent ?? "—")
+            LabeledContent("Playback source", value: snapshot.playbackSource ?? "—")
+            LabeledContent("Playing asset", value: snapshot.playingAsset ?? "—")
+            LabeledContent("Imitation mode", value: snapshot.imitationMode ?? "—")
+            LabeledContent("Reference ID", value: snapshot.imitationReferenceID ?? "—")
+            LabeledContent("Target voice ID", value: snapshot.imitationTargetID ?? "—")
+            LabeledContent("Imitation capability", value: snapshot.imitationCapability ?? "—")
+            LabeledContent("Imitation ms", value: snapshot.imitationMilliseconds.map(String.init) ?? "—")
+            LabeledContent("Imitation error", value: snapshot.lastImitationError ?? "—")
             LabeledContent("Route", value: snapshot.provider)
             LabeledContent("Load ms", value: snapshot.openVoiceLoadMilliseconds.map(String.init) ?? "—")
             LabeledContent("Embedding ms", value: snapshot.embeddingPrepareMilliseconds.map(String.init) ?? "—")
@@ -268,6 +274,60 @@ private struct StudioCardLayer<Content: View>: View {
             .accessibilityElement(children: depth == 0 ? .contain : .ignore)
             .accessibilityHidden(depth != 0)
             .transition(reduceMotion ? .opacity : .scale(scale: 0.96).combined(with: .opacity))
+    }
+}
+enum StudioAudioPlayState { case idle, loading, playing }
+enum StudioAudioPlaySize {
+    case small, medium, large
+    var dimension: CGFloat { switch self { case .small: 44; case .medium: 52; case .large: 60 } }
+}
+struct StudioAudioPlayButton: View {
+    let state: StudioAudioPlayState
+    var size: StudioAudioPlaySize = .medium
+    var accent: Color = .accentColor
+    let action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                Circle().fill(accent.opacity(0.16))
+                if state == .loading { ProgressView().tint(accent) }
+                else { Image(systemName: state == .playing ? "stop.fill" : "play.fill").font(.system(size: size.dimension * 0.35, weight: .semibold)).foregroundStyle(accent) }
+            }.frame(width: size.dimension, height: size.dimension)
+                .overlay(Circle().stroke(accent.opacity(0.35), lineWidth: 1))
+        }.buttonStyle(.plain).accessibilityLabel(state == .idle ? "Play" : (state == .playing ? "Stop" : "Cancel"))
+            .accessibilityValue(state == .loading ? "Loading" : (state == .playing ? "Playing" : "Ready"))
+    }
+}
+struct StudioVoicePlay: View {
+    @ObservedObject var model: VoiceStudioModel
+    let selection: VoiceSelection
+    var size: StudioAudioPlaySize = .medium
+    @Environment(\.locale) private var locale
+    var body: some View {
+        StudioAudioPlayButton(state: model.loadingPlaybackSource == .voice(selection) ? .loading : (model.playbackSource == .voice(selection) ? .playing : .idle), size: size) {
+            model.audition(selection, locale: locale)
+        }
+    }
+}
+struct StudioAssetPlay: View {
+    @ObservedObject var model: VoiceStudioModel
+    let audio: AudioAsset
+    var size: StudioAudioPlaySize = .medium
+    var body: some View {
+        StudioAudioPlayButton(state: model.playbackSource == .asset(audio.id) ? .playing : .idle, size: size) { model.toggleAudio(audio) }
+    }
+}
+struct StudioSourceButtonStyle: ButtonStyle {
+    @EnvironmentObject private var appearance: AppAppearancePreference
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label.foregroundStyle(Color.primary).padding(.horizontal, 4).padding(.vertical, 8)
+            .background(appearance.skin.material, in: RoundedRectangle(cornerRadius: 18))
+            .background(Color(uiColor: .secondarySystemBackground).opacity(0.8), in: RoundedRectangle(cornerRadius: 18))
+            .overlay(RoundedRectangle(cornerRadius: 18).stroke(Color.accentColor.opacity(configuration.isPressed ? 0.7 : 0.3), lineWidth: 1))
+            .shadow(color: .black.opacity(0.12), radius: configuration.isPressed ? 2 : 6, y: 3)
+            .scaleEffect(configuration.isPressed && !reduceMotion ? 0.97 : 1)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }
 struct StudioIcon: View {
@@ -308,6 +368,8 @@ struct StudioVoiceLibrary: View {
                 if model.savedVoices.isEmpty { Text("No saved voices yet.").foregroundStyle(.secondary) }
                 ForEach(model.pagedSavedVoices) { voice in
                     VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 14) {
+                        StudioVoicePlay(model: model, selection: .saved(voice.id), size: .large)
                         Button { cards.push(.voice(.saved(voice.id))) } label: {
                             HStack {
                                 VStack(alignment: .leading, spacing: 5) {
@@ -319,8 +381,9 @@ struct StudioVoiceLibrary: View {
                                 if model.currentVoice == .saved(voice.id) { Image(systemName: "checkmark.circle.fill") }
                             }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 8).contentShape(Rectangle())
                         }.buttonStyle(.plain).accessibilityIdentifier("voiceDetail-\(voice.id.uuidString)")
+                        }
                         HStack {
-                            StudioIcon("Play", symbol: "play.fill") { model.playVoiceReference(voice) }
+                            StudioIcon("Imitate", symbol: "person.wave.2") { model.selectVoice(.saved(voice.id)); cards.push(.imitation) }
                             StudioIcon("Shape Voice", symbol: "slider.horizontal.3") { cards.push(.voice(.saved(voice.id))) }
                             StudioShare(model: model, audio: voice.referenceAudio)
                             Spacer()
@@ -390,6 +453,9 @@ struct StudioSystemLanguageVoices: View {
                     .accessibilityHidden(!isProbing)
                 if !isProbing && voices.isEmpty { Text("No usable voices are available for this language.") }
                 ForEach(showAll ? voices : Array(voices.prefix(8))) { voice in
+                    HStack(spacing: 14) {
+                    StudioVoicePlay(model: model, selection: .systemVoice(voice.identifier), size: .large)
+                        .accessibilityIdentifier("systemAudition-\(voice.identifier)")
                     Button { model.selectVoice(.systemVoice(voice.identifier)); onSelected() } label: {
                         HStack {
                             VStack(alignment: .leading) {
@@ -401,8 +467,8 @@ struct StudioSystemLanguageVoices: View {
                             Spacer()
                             Image(systemName: model.currentVoice == .systemVoice(voice.identifier) ? "checkmark.circle.fill" : "circle")
                         }
-                    }.padding(16).background(.thinMaterial, in: RoundedRectangle(cornerRadius: 20)).accessibilityIdentifier("systemVoice-\(voice.identifier)")
-                    StudioIcon("Play", symbol: "play.fill") { model.audition(.systemVoice(voice.identifier), locale: locale) }
+                    }.buttonStyle(.plain).accessibilityIdentifier("systemVoice-\(voice.identifier)")
+                    }.padding(16).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20)).accessibilityIdentifier("systemVoiceCard-\(voice.identifier)")
                 }
                 if !showAll && model.systemVoiceCandidates.filter({ SystemVoiceCatalog.baseLanguage($0.language) == language }).count > 8 {
                     Button("More Voices") { showAll = true }
@@ -422,10 +488,11 @@ struct StudioVoiceDetail: View {
     @State private var name = ""
     @EnvironmentObject private var cards: FloatingCardStack
     @State private var deleting = false
+    @State private var draftProfile: VoiceProfile?
     @Environment(\.dismiss) private var dismiss
     @Environment(\.locale) private var locale
     private var voice: VoiceAsset? { selection.savedVoiceID.flatMap { id in model.savedVoices.first { $0.id == id } } }
-    private var profile: VoiceProfile { model.profile(for: selection) }
+    private var profile: VoiceProfile { draftProfile ?? model.profile(for: selection) }
     var body: some View {
         StudioFloatingCard(title: "Shape Voice") {
             ScrollView { VStack(alignment: .leading, spacing: 22) {
@@ -436,11 +503,12 @@ struct StudioVoiceDetail: View {
                         model.selectVoice(selection)
                     } label: { Label(model.currentVoice == selection ? "Current Voice" : "Select Voice", systemImage: model.currentVoice == selection ? "checkmark.circle.fill" : "circle") }
                         .accessibilityIdentifier("voiceCurrentIndicator")
+                    HStack {
+                        StudioVoicePlay(model: model, selection: selection, size: .large).accessibilityIdentifier("voiceAuditionButton")
+                        StudioVoiceShare(model: model, selection: selection)
+                    }
+                    Text("\(displayLanguage(profile.language)) · \(displayAccent(profile.accent))").font(.caption).foregroundStyle(.secondary)
                     if let voice {
-                        HStack {
-                            StudioIcon("Play", symbol: "play.fill") { model.playVoiceReference(voice) }
-                            StudioShare(model: model, audio: voice.referenceAudio)
-                        }
                         StudioIcon("Favorite", symbol: voice.isFavorite ? "star.fill" : "star") { model.setSavedVoiceFavorite(id: voice.id, isFavorite: !voice.isFavorite) }
                     }
                 }
@@ -449,9 +517,24 @@ struct StudioVoiceDetail: View {
                 }
                 Section("Voice Shaping") {
                     LabeledContent("Speed", value: String(format: "%.2f×", profile.speed))
-                    Slider(value: profileBinding(\.speed), in: 0.5...2, step: 0.05).accessibilityLabel("Speed").accessibilityIdentifier("voiceSpeedSlider")
+                    Slider(value: profileBinding(\.speed), in: 0.5...2, step: 0.05, onEditingChanged: { if !$0 { commitProfile() } }).accessibilityLabel("Speed").accessibilityIdentifier("voiceSpeedSlider")
                     LabeledContent("Pitch", value: String(format: "%.0f", profile.pitch))
-                    Slider(value: profileBinding(\.pitch), in: -1200...1200, step: 50).accessibilityLabel("Pitch").accessibilityIdentifier("voicePitchSlider")
+                    Slider(value: profileBinding(\.pitch), in: -1200...1200, step: 50, onEditingChanged: { if !$0 { commitProfile() } }).accessibilityLabel("Pitch").accessibilityIdentifier("voicePitchSlider")
+                }
+                Section {
+                    Button { commitProfile(); Task { await model.previewShapedVoice(selection, locale: locale) } } label: {
+                        Label("Preview Shaped Voice", systemImage: "waveform").frame(maxWidth: .infinity, minHeight: 48)
+                    }.buttonStyle(.borderedProminent).disabled(model.isGeneratingSpeech || model.isResolvingVoice)
+                        .accessibilityIdentifier("previewShapedVoiceButton")
+                    if model.isGeneratingSpeech || model.isResolvingVoice { ProgressView("Preparing…") }
+                    if model.shapedPreviewVoice == selection, let audio = model.shapedPreviewAudio, model.managedURL(for: audio) != nil {
+                        HStack {
+                            StudioAudioPlayButton(state: model.playbackSource == .shaped(selection) || model.playbackSource == .asset(audio.id) ? .playing : .idle, size: .large) {
+                                if model.playbackSource == .shaped(selection) { model.stopPlayback() } else { model.toggleAudio(audio) }
+                            }
+                            StudioShare(model: model, audio: audio)
+                        }.accessibilityIdentifier("shapedPreviewResult")
+                    }
                 }
                 Section {
                     if !languages.isEmpty {
@@ -463,6 +546,7 @@ struct StudioVoiceDetail: View {
                             .accessibilityIdentifier("voiceAccentButton")
                     } else if let accent = profile.accent { LabeledContent("Accent", value: displayAccent(accent)) }
                 }
+                Text(LocalizedStringKey(model.statusMessage)).font(.footnote).foregroundStyle(.secondary)
                 if let voice {
                     Section {
                         TextField("Voice Name", text: $name).accessibilityIdentifier("renameVoiceField")
@@ -475,18 +559,11 @@ struct StudioVoiceDetail: View {
                         }
                         StudioIcon("Delete Voice…", symbol: "trash") { deleting = true }.tint(.red)
                     }
-                } else {
-                    Section {
-                        TextField("Preview Text", text: $name)
-                        Button("Preview") { model.selectVoice(selection); Task { let previous = model.generatedAudio?.id; await model.generateCurrentVoice(text: name, preview: true); if model.generatedAudio?.id != previous { model.playGeneratedAudio() } } }
-                            .disabled(model.isGeneratingSpeech || name.isEmpty)
-                        if let audio = model.generatedAudio, audio.sourceVoice == source {
-                            StudioShare(model: model, audio: audio)
-                        }
-                    }
                 }
             }.padding(20) }.accessibilityIdentifier("voiceDetailFloatingCard")
-                .onAppear { name = voice?.name ?? String(localized: "Hello.", locale: locale) }
+                .onAppear { name = voice?.name ?? "" }
+                .onDisappear { commitProfile(); model.stopAudition() }
+                .onChange(of: model.profile(for: selection)) { _, _ in draftProfile = nil }
                 .task(id: profile.language) { if selection.savedVoiceID != nil { await model.probeSystemAccents(profile.language) } }
                 .confirmationDialog("Delete Voice?", isPresented: $deleting, titleVisibility: .visible) {
                     Button("Delete", role: .destructive) { if let voice { model.deleteSavedVoice(id: voice.id) } }
@@ -495,7 +572,10 @@ struct StudioVoiceDetail: View {
         }
     }
     private func profileBinding<T>(_ key: WritableKeyPath<VoiceProfile, T>) -> Binding<T> {
-        Binding(get: { profile[keyPath: key] }, set: { value in var updated = profile; updated[keyPath: key] = value; model.updateProfile(updated, for: selection) })
+        Binding(get: { profile[keyPath: key] }, set: { value in var updated = profile; updated[keyPath: key] = value; draftProfile = updated })
+    }
+    private func commitProfile() {
+        if let draftProfile { model.updateProfile(draftProfile, for: selection); self.draftProfile = nil }
     }
     private var source: GeneratedAudioVoiceSource {
         switch selection { case .tinyLocal: .tinyLocalVoice("tiny-local"); case .systemVoice(let id): .systemVoice(id); default: .systemVoice(nil) }
@@ -895,8 +975,8 @@ struct StudioResult: View {
     let audio: AudioAsset
     var body: some View {
         HStack {
-            StudioIcon("Play", symbol: "play.fill") { model.playAudioAsset(audio) }
-            StudioIcon("Stop", symbol: "stop.fill") { model.stopPlayback() }
+            StudioAssetPlay(model: model, audio: audio, size: .large)
+            Text(SavedVoiceLibrary.formattedDuration(audio.duration)).font(.caption)
             StudioShare(model: model, audio: audio)
             Spacer()
             if audio.persistenceState != .persistent {
@@ -923,7 +1003,21 @@ struct StudioImitation: View {
                 }
                 Button { cards.push(.history(true)) } label: { Label("Generation History", systemImage: "square.stack") }.accessibilityIdentifier("imitationHistoryButton")
                 if let reference = model.performanceReference {
-                    HStack { Text(SavedVoiceLibrary.formattedDuration(reference.audio.duration)); StudioIcon("Play", symbol: "play.fill") { model.playAudioAsset(reference.audio) }; StudioIcon("Stop", symbol: "stop.fill") { model.stopPlayback() } }
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            StudioAssetPlay(model: model, audio: reference.audio, size: .large)
+                            VStack(alignment: .leading) {
+                                Text(model.performanceName ?? String(localized: "Reference Audio", locale: locale)).font(.headline)
+                                Text(LocalizedStringKey(model.performanceSourceLabel)).font(.caption)
+                                Text(SavedVoiceLibrary.formattedDuration(reference.audio.duration)).font(.caption)
+                            }
+                        }
+                        HStack {
+                            Menu { Button("Import") { importing = true }; Button("Generation History") { cards.push(.history(true)) }; Button("Record") { Task { await model.startRecording(performance: true) } } label: { Label("Replace", systemImage: "arrow.triangle.2.circlepath") }
+                            Spacer()
+                            Button("Remove", role: .destructive) { model.removePerformance() }.accessibilityIdentifier("removePerformanceButton")
+                        }.disabled(model.isRecording || model.isRequestingPermission || model.isGeneratingSpeech)
+                    }.padding(16).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20)).accessibilityIdentifier("performanceReferenceCard")
                 }
                 TextField("Enter new text (optional)", text: $text, axis: .vertical).lineLimit(2...5).textFieldStyle(.roundedBorder).accessibilityIdentifier("imitationTextField")
                 Text(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Recreate this audio with the current voice." : "Use the current voice and this delivery for new words.").font(.footnote).foregroundStyle(.secondary)
@@ -933,7 +1027,11 @@ struct StudioImitation: View {
                 if model.isGeneratingSpeech { HStack { ProgressView("Preparing…"); StudioIcon("Cancel", symbol: "xmark") { model.cancelGeneration() } } }
                 if model.currentVoice.savedVoiceID == nil { Text("Choose a saved voice to imitate.").font(.footnote) }
                 if !model.isOpenVoicePackReady { Text("Install the optional voice pack in Settings to imitate.").font(.footnote) }
-                if let audio = model.generatedAudio, audio.generationKind == .imitationSameContent { StudioResult(model: model, audio: audio) }
+                if let audio = model.generatedAudio, audio.generationKind == .imitationSameContent {
+                    StudioResult(model: model, audio: audio)
+                    Button { Task { await model.imitate(optionalText: text) } } label: { Label("Retry", systemImage: "arrow.clockwise") }
+                        .disabled(!model.canImitate || !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty).accessibilityIdentifier("retryImitationButton")
+                }
                 Text(LocalizedStringKey(model.statusMessage)).font(.footnote)
             }.padding(22) }.fileImporter(isPresented: $importing, allowedContentTypes: [.audio]) { result in
                 switch result { case .success(let url): model.importPerformance(from: url)
@@ -945,6 +1043,25 @@ struct StudioImitation: View {
 private final class ShareAudioItem: Identifiable {
     let id = UUID(); let lease: AudioFileLease
     init(lease: AudioFileLease) { self.lease = lease }
+}
+struct StudioVoiceShare: View {
+    @ObservedObject var model: VoiceStudioModel
+    let selection: VoiceSelection
+    @State private var item: ShareAudioItem?
+    @State private var request: Task<Void, Never>?
+    @Environment(\.locale) private var locale
+    var body: some View {
+        StudioIcon("Share", symbol: "square.and.arrow.up") {
+            request = Task {
+                defer { request = nil }
+                guard let audio = await model.auditionForSharing(selection, locale: locale), !Task.isCancelled else { return }
+                do { item = ShareAudioItem(lease: try model.audioLease(for: audio)) }
+                catch { model.statusMessage = "This audio could not be shared. Please try again." }
+            }
+        }.disabled(request != nil).accessibilityIdentifier("voiceShareButton")
+            .sheet(item: $item) { item in AudioActivitySheet(item: item) }
+            .onDisappear { request?.cancel(); request = nil }
+    }
 }
 struct StudioShare: View {
     @ObservedObject var model: VoiceStudioModel

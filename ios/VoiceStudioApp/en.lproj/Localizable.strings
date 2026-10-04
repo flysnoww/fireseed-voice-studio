@@ -293,3 +293,21 @@
 "Reference audio ready for imitation." = "Reference audio ready for imitation.";
 
 "Use audio up to 30 seconds long." = "Use audio up to 30 seconds long.";
+
+"Hello. This is a preview of my voice." = "Hello. This is a preview of my voice.";
+
+"Preview Shaped Voice" = "Preview Shaped Voice";
+
+"Install the local voice in Settings to hear this voice." = "Install the local voice in Settings to hear this voice.";
+
+"Replace" = "Replace";
+
+"Remove" = "Remove";
+
+"Retry" = "Retry";
+
+"Loading" = "Loading";
+
+"Playing" = "Playing";
+
+"Ready" = "Ready";

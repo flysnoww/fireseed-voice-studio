@@ -54,6 +54,44 @@ final class VoiceStudioUITests: XCTestCase {
         XCTAssertFalse(app.buttons["Prepare Voice"].exists)
     }
 
+    func testSystemCardAuditionIsIndependentAndDetailHasPlayShare() {
+        XCTAssertTrue(app.buttons["imitateButton"].exists)
+        let original = app.buttons["currentVoiceCard"].label
+        tap("systemVoicesButton"); tap("systemLanguage-en")
+        let auditions = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'systemAudition-'"))
+        XCTAssertTrue(auditions.firstMatch.waitForExistence(timeout: 120))
+        let buttons = auditions.allElementsBoundByIndex
+        XCTAssertGreaterThan(buttons.count, 0)
+        for button in buttons.prefix(2) {
+            if !button.isHittable { app.swipeUp() }
+            button.tap()
+            XCTAssertTrue(button.value as? String == "Loading" || button.value as? String == "Playing")
+        }
+        screenshot("System cards with independent large audition")
+        tap("floatingCardClose")
+        XCTAssertEqual(app.buttons["currentVoiceCard"].label, original)
+        tap("shapeVoiceButton")
+        XCTAssertTrue(app.buttons["voiceAuditionButton"].exists)
+        XCTAssertTrue(app.buttons["voiceShareButton"].exists)
+        XCTAssertTrue(app.buttons["previewShapedVoiceButton"].exists)
+    }
+
+    func testShapedPreviewNeedsNoHomeTextAndDoesNotCreateHistory() {
+        tap("myVoicesButton")
+        app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'voiceDetail-' ")).firstMatch.tap()
+        XCTAssertTrue(app.buttons["voiceAuditionButton"].exists)
+        XCTAssertTrue(app.buttons["voiceShareButton"].exists)
+        app.sliders["voiceSpeedSlider"].adjust(toNormalizedSliderPosition: 0.35)
+        XCTAssertFalse(app.otherElements["shapedPreviewResult"].exists)
+        tap("previewShapedVoiceButton")
+        let result = app.descendants(matching: .any).matching(identifier: "shapedPreviewResult").firstMatch
+        XCTAssertTrue(result.waitForExistence(timeout: 180))
+        screenshot("Automatic shaped short phrase preview")
+        XCTAssertFalse(app.buttons["saveGeneratedAudioButton"].exists)
+        tap("floatingCardClose")
+        XCTAssertFalse(app.buttons["saveGeneratedAudioButton"].exists)
+    }
+
     func testSavedVoiceShapingAutomaticConversionAndAudioObjectCard() {
         tap("myVoicesButton"); expandCard("My Voices"); screenshot("My Voices floating card")
         let detail = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'voiceDetail-' ")).firstMatch
@@ -108,7 +146,7 @@ final class VoiceStudioUITests: XCTestCase {
         tap("imitationHistoryButton")
         let source = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'generatedAudio-' ")).firstMatch
         XCTAssertTrue(source.waitForExistence(timeout: 20)); source.tap()
-        for _ in 0..<10 {
+        for _ in 0..<11 {
             let run = app.buttons["runImitationButton"]
             XCTAssertTrue(run.waitForExistence(timeout: 30))
             let ready = NSPredicate(format: "enabled == true")

@@ -62,6 +62,13 @@ struct VoiceStudioDiagnosticSnapshot: Sendable {
     var lastCompletedOperation = "none"
     var activeOperationToken: String?
     var routeDepth = 0
+    var playbackSource: String?
+    var imitationMode: String?
+    var imitationReferenceID: String?
+    var imitationTargetID: String?
+    var imitationCapability: String?
+    var imitationMilliseconds: Int?
+    var lastImitationError: String?
     var playingAsset: String?
     var renderingAsset: String?
     var openVoiceLoaded = "none"
@@ -303,6 +310,13 @@ final class VoiceStudioDiagnostics: ObservableObject {
             "Last completed operation: \(snapshot.lastCompletedOperation)",
             "Active operation token: \(snapshot.activeOperationToken ?? "none")",
             "Card depth: \(snapshot.routeDepth)",
+            "Playback source: \(snapshot.playbackSource ?? "none")",
+            "Imitation mode: \(snapshot.imitationMode ?? "none")",
+            "Imitation reference: \(snapshot.imitationReferenceID ?? "none")",
+            "Imitation target: \(snapshot.imitationTargetID ?? "none")",
+            "Imitation capability: \(snapshot.imitationCapability ?? "none")",
+            "Imitation ms: \(snapshot.imitationMilliseconds.map(String.init) ?? "none")",
+            "Imitation error: \(snapshot.lastImitationError ?? "none")",
             "Playing asset: \(snapshot.playingAsset ?? "none")",
             "Rendering asset: \(snapshot.renderingAsset ?? "none")",
             "OpenVoice loaded: \(snapshot.openVoiceLoaded)",

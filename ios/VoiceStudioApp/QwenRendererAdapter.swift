@@ -190,7 +190,7 @@ actor QwenRendererAdapter: InstallableSpeechProvider, VoicePreparingSpeechProvid
               let voice, voice.id == voiceID, let referenceAudioURL else {
             return .unsupported(.voiceCloning)
         }
-        guard request.renderMode == .generate else { return .unsupported(.speechGeneration) }
+        // Preview and Generate use the same synthesis; the caller owns separate cache policies.
         guard let languageID = Self.languageID(for: request.language) else {
             return .failure("Choose a supported speech language.")
         }

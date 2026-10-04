@@ -296,7 +296,7 @@ actor KittenLocalSpeechProvider: SpeechProvider {
 
     func generate(_ request: VoiceRequest, voice: VoiceAsset?, referenceAudioURL: URL?) async -> SpeechResult {
         guard case .tinyLocal = request.voice,
-              request.renderMode == .generate,
+              (request.renderMode == .generate || request.renderMode == .preview),
               capabilities.supports(language: request.language) else {
             return .unsupported(.speechGeneration)
         }
@@ -605,7 +605,7 @@ actor AppleSystemSpeechProvider: SpeechProvider {
     init(voices: [AVSpeechSynthesisVoice]? = nil) { catalogOverride = voices?.map(SystemVoiceDescriptor.init) }
 
     func generate(_ request: VoiceRequest, voice: VoiceAsset?, referenceAudioURL: URL?) async -> SpeechResult {
-        guard request.renderMode == .generate else { return .unsupported(.speechGeneration) }
+        // Preview and Generate use the same synthesis; the caller owns separate cache policies.
         let speechVoice: AVSpeechSynthesisVoice
         switch request.voice {
         case .systemDefault:

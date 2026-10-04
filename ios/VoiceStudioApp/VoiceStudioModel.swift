@@ -17,6 +17,12 @@ struct CurrentReferenceAudio {
     }
 }
 
+enum StudioPlaybackSource: Equatable {
+    case asset(UUID), voice(VoiceSelection), shaped(VoiceSelection)
+    var isAudition: Bool { if case .asset = self { return false }; return true }
+    var diagnosticName: String { switch self { case .asset: "audio"; case .voice: "voice audition"; case .shaped: "shaped preview" } }
+}
+
 enum VoiceAvailabilityPolicy {
     static func canSave(hasCurrentReference: Bool, isRecording: Bool, isRequestingPermission: Bool,
                         isSavingVoice: Bool = false) -> Bool {
@@ -66,6 +72,14 @@ final class VoiceStudioModel: ObservableObject {
     @Published private(set) var isRequestingPermission = false
     @Published private(set) var microphonePermissionDenied = false
     @Published private(set) var isPlaying = false
+    @Published private(set) var playbackSource: StudioPlaybackSource?
+    @Published private(set) var loadingPlaybackSource: StudioPlaybackSource?
+    @Published private(set) var voiceAuditionAudio: [VoiceSelection: AudioAsset] = [:]
+    @Published private(set) var shapedPreviewAudio: AudioAsset?
+    @Published private(set) var shapedPreviewVoice: VoiceSelection?
+    @Published private(set) var shapingPreviewInFlight: VoiceSelection?
+    @Published private(set) var performanceSourceLabel = "Imported"
+    @Published private(set) var performanceName: String?
     @Published private(set) var isSavingVoice = false
     @Published private(set) var isInstallingLocalSpeech = false
     @Published private(set) var isGeneratingSpeech = false
@@ -194,6 +208,7 @@ final class VoiceStudioModel: ObservableObject {
         self.player.stateHandler = { [weak self] playing in
             guard let self else { return }
             self.isPlaying = playing
+            if !playing { self.playbackSource = nil; self.diagnostics.update { $0.playbackSource = nil } }
             self.diagnostics.update { $0.playingAsset = self.player.playingAssetID?.uuidString }
         }
         activeRecorder.interruptionHandler = { [weak self] result in
@@ -329,12 +344,12 @@ final class VoiceStudioModel: ObservableObject {
         renderingTask = nil
     }
 
-    private func performCurrentVoiceGeneration(text: String, preview: Bool) async {
+    private func performCurrentVoiceGeneration(text: String, preview: Bool, voice: VoiceSelection? = nil) async {
         let token = operationGeneration
         diagnostics.beginOperation(preview ? "preview" : "generate", token: token)
         defer { diagnostics.endOperation(token: token) }
-        let selection = currentVoice
-        let profile = currentVoiceProfile
+        let selection = voice ?? currentVoice
+        let profile = profile(for: selection)
         let baseLanguage = SystemVoiceCatalog.baseLanguage(profile.language)
         guard !isGeneratingSpeech, !isResolvingVoice, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         isResolvingVoice = true
@@ -432,17 +447,17 @@ final class VoiceStudioModel: ObservableObject {
     }
 
     private func acceptRecording(_ asset: AudioAsset) {
-        if recordingPerformance { replacePerformance(asset) }
+        if recordingPerformance { replacePerformance(asset); performanceSourceLabel = "Recorded"; performanceName = nil }
         else { setCurrentReference(asset, source: .record) }
     }
     private func replacePerformance(_ asset: AudioAsset) {
-        cancelGeneration()
+        cancelGeneration(); stopPlayback()
         if let old = performanceReference?.audio { try? audioFileStore.removeTemporaryAudio(old) }
         performanceReference = PerformanceReference(audio: asset)
     }
     func importPerformance(from url: URL) {
         guard !isRecording, !isRequestingPermission else { return }
-        do { replacePerformance(try importer.importDocument(at: url)) }
+        do { replacePerformance(try importer.importDocument(at: url)); performanceSourceLabel = "Imported"; performanceName = url.deletingPathExtension().lastPathComponent }
         catch { statusMessage = "Could not read this audio file. Please choose another." }
     }
     func usePerformance(_ asset: AudioAsset) {
@@ -452,6 +467,8 @@ final class VoiceStudioModel: ObservableObject {
             let copy = try audioFileStore.registerGeneratedAudio(from: lease.url, duration: asset.duration,
                 text: "", referencePerformanceID: asset.id)
             replacePerformance(copy)
+            performanceSourceLabel = "Generation History"
+            performanceName = asset.displayName
         } catch { statusMessage = "Could not read this audio file. Please choose another." }
     }
     private func releaseRendererResources() {
@@ -478,6 +495,12 @@ final class VoiceStudioModel: ObservableObject {
         !isRecording && !isRequestingPermission && renderingTask == nil
     }
     func imitate(optionalText: String) async {
+        diagnostics.update {
+            $0.imitationMode = optionalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "same-content" : "new-text (unsupported)"
+            $0.imitationReferenceID = performanceReference?.audio.id.uuidString
+            $0.imitationTargetID = currentVoice.savedVoiceID?.uuidString
+            $0.imitationCapability = currentVoice.savedVoiceID != nil && isOpenVoicePackReady ? "same-content" : "unsupported"
+        }
         guard optionalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             statusMessage = "Imitation with new text is not supported yet."; return
         }
@@ -492,6 +515,8 @@ final class VoiceStudioModel: ObservableObject {
               let target = savedVoices.first(where: { $0.id == id }) else { return }
         let token = operationGeneration
         let profile = target.profile
+        stopPlayback()
+        let imitationStarted = ProcessInfo.processInfo.systemUptime
         isGeneratingSpeech = true
         diagnostics.beginOperation("imitationSameContent", token: token)
         diagnostics.update {
@@ -499,7 +524,7 @@ final class VoiceStudioModel: ObservableObject {
             $0.referenceBufferBytes = 0
             $0.openVoiceLoaded = "conversion running"
         }
-        defer { isGeneratingSpeech = false; diagnostics.endOperation(token: token) }
+        defer { isGeneratingSpeech = false; diagnostics.endOperation(token: token); diagnostics.update { $0.imitationMilliseconds = Int((ProcessInfo.processInfo.systemUptime - imitationStarted) * 1000) } }
         var work: [URL] = []
         defer { work.forEach { try? FileManager.default.removeItem(at: $0) } }
         do {
@@ -532,45 +557,110 @@ final class VoiceStudioModel: ObservableObject {
             statusMessage = "Imitation ready."
         } catch {
             guard acceptsOperation(token), !(error is CancellationError) else { return }
-            diagnostics.update { $0.lastAudioError = "imitation · \((error as NSError).domain) · \((error as NSError).code)" }
+            diagnostics.update { $0.lastImitationError = "imitation failed"; $0.lastAudioError = "imitation · \((error as NSError).domain) · \((error as NSError).code)" }
             statusMessage = (error as? OpenVoiceRuntimeError) == .audioTooLong
                 ? "Please use audio up to 30 seconds long."
                 : "This audio could not be imitated. Please try another reference."
         }
     }
     func audition(_ selection: VoiceSelection, locale: Locale) {
-        guard selection != .tinyLocal else {
-            statusMessage = "Enter text and use Preview to hear this voice."
-            return
-        }
+        let source = StudioPlaybackSource.voice(selection)
+        if playbackSource == source || loadingPlaybackSource == source { stopPlayback(); return }
+        guard !isGeneratingSpeech, !isResolvingVoice, !isRecording, !isRequestingPermission, !isReleasingRuntime else { return }
+        stopPlayback()
         if let id = selection.savedVoiceID, let voice = savedVoices.first(where: { $0.id == id }) {
-            playVoiceReference(voice); return
+            play(voice.referenceAudio, source: source); return
         }
-        guard !isGeneratingSpeech, !isRecording else { return }
-        auditionTask?.cancel(); auditionGeneration = UUID()
+        if selection == .tinyLocal, providers[.tinyLocal] == nil || (providers[.tinyLocal] is KittenLocalSpeechProvider && !isTinyLocalModelReady) {
+            statusMessage = "Install the local voice in Settings to hear this voice."; return
+        }
         let token = auditionGeneration
-        let identifier: String?
-        if case .systemVoice(let id) = selection { identifier = id } else { identifier = nil }
+        loadingPlaybackSource = source
+        let language = profile(for: selection).language
+        let phrase = Self.auditionText(language: language, locale: locale)
         auditionTask = Task { [weak self] in
-            let result = await NativeSpeechEngine.shared.render(text: String(localized: "Hello.", locale: locale),
-                identifier: identifier, language: self?.profile(for: selection).language ?? "en", timeout: 15)
-            guard case .renderedFile(let url, let duration, _) = result else { return }
+            guard let self else { return }
+            defer { if self.auditionGeneration == token { self.loadingPlaybackSource = nil; self.auditionTask = nil } }
+            let result: SpeechResult
+            if selection == .tinyLocal, let provider = self.providers[.tinyLocal] {
+                result = await provider.generate(VoiceRequest(text: phrase, voice: selection, language: "en", renderMode: .preview), voice: nil, referenceAudioURL: nil)
+            } else {
+                let identifier: String?
+                if case .systemVoice(let id) = selection { identifier = id } else { identifier = nil }
+                result = await NativeSpeechEngine.shared.render(text: phrase, identifier: identifier, language: language, timeout: 15)
+            }
+            guard case .renderedFile(let url, let duration, _) = result else {
+                if self.auditionGeneration == token { self.statusMessage = "This audio could not be played." }; return
+            }
             defer { try? FileManager.default.removeItem(at: url) }
-            guard let self, self.auditionGeneration == token, !Task.isCancelled else { return }
+            guard self.auditionGeneration == token, !Task.isCancelled else { return }
             do {
                 let asset = try self.audioFileStore.registerGeneratedAudio(from: url, duration: duration, text: "")
-                defer { try? self.audioFileStore.removeTemporaryAudio(asset) }
-                self.playAudioAsset(asset)
+                try self.audioLifecycle.cache(asset, as: .preview)
+                self.voiceAuditionAudio = self.voiceAuditionAudio.filter { self.managedURL(for: $0.value) != nil }
+                self.voiceAuditionAudio[selection] = asset
+                self.play(asset, source: source)
             } catch { self.statusMessage = "This audio could not be played." }
         }
     }
 
-    func playCurrentAudio() {
-        guard let currentReference else { return }
-        play(currentReference.asset)
+    static func auditionText(language: String, locale: Locale) -> String {
+        String(localized: "Hello. This is a preview of my voice.", locale: Locale(identifier: language.isEmpty ? locale.identifier : language))
     }
 
-    func playVoiceReference(_ voice: VoiceAsset) { play(voice.referenceAudio) }
+    func previewShapedVoice(_ selection: VoiceSelection, locale: Locale) async {
+        guard renderingTask == nil, !isGeneratingSpeech, !isResolvingVoice, !isRecording, !isRequestingPermission, !packOperation, !isReleasingRuntime else { return }
+        stopPlayback()
+        let token = operationGeneration
+        shapingPreviewInFlight = selection
+        defer { shapingPreviewInFlight = nil }
+        let previous = generatedAudio
+        let previousKind = generatedAudioCacheKind
+        let task = Task {
+            await self.performCurrentVoiceGeneration(text: Self.auditionText(language: self.profile(for: selection).language, locale: locale), preview: true, voice: selection)
+            guard self.acceptsOperation(token) else { return }
+            if let audio = self.generatedAudio, audio.id != previous?.id {
+                self.shapedPreviewAudio = audio
+                self.shapedPreviewVoice = selection
+                self.generatedAudio = previous.flatMap { self.managedURL(for: $0) == nil ? nil : $0 }
+                self.generatedAudioCacheKind = previousKind
+                self.play(audio, source: .shaped(selection))
+            }
+        }
+        renderingTask = task
+        await withTaskCancellationHandler(operation: { await task.value }, onCancel: { task.cancel() })
+        renderingTask = nil
+    }
+
+    func stopAudition() {
+        if shapingPreviewInFlight != nil { cancelGeneration() }
+        if loadingPlaybackSource != nil || playbackSource?.isAudition == true { stopPlayback() }
+    }
+    func auditionForSharing(_ selection: VoiceSelection, locale: Locale) async -> AudioAsset? {
+        if let id = selection.savedVoiceID { return savedVoices.first(where: { $0.id == id })?.referenceAudio }
+        if let audio = voiceAuditionAudio[selection], managedURL(for: audio) != nil { return audio }
+        if loadingPlaybackSource != .voice(selection) { audition(selection, locale: locale) }
+        await auditionTask?.value
+        guard let audio = voiceAuditionAudio[selection], managedURL(for: audio) != nil else { return nil }
+        return audio
+    }
+    func toggleAudio(_ asset: AudioAsset) {
+        if playbackSource == .asset(asset.id) { stopPlayback() }
+        else { playAudioAsset(asset) }
+    }
+    func removePerformance() {
+        cancelGeneration(); stopPlayback()
+        if let asset = performanceReference?.audio { try? audioFileStore.removeTemporaryAudio(asset) }
+        performanceReference = nil
+        performanceName = nil
+    }
+
+    func playCurrentAudio() {
+        guard let currentReference else { return }
+        playAudioAsset(currentReference.asset)
+    }
+
+    func playVoiceReference(_ voice: VoiceAsset) { stopPlayback(); play(voice.referenceAudio, source: .voice(.saved(voice.id))) }
 
     func capabilities(for selection: VoiceSelection, usingVoiceConverter: Bool = false) -> CapabilityProfile {
         if usingVoiceConverter || (selection.savedVoiceID != nil && profile(for: selection).renderingPreference == .automatic) {
@@ -985,7 +1075,7 @@ final class VoiceStudioModel: ObservableObject {
             let referenceLease = try audioLease(for: targetVoice.referenceAudio)
             defer { referenceLease.close() }
             let systemRequest = VoiceRequest(text: text, voice: systemSource, language: language,
-                                            accent: accent, speed: speed, renderMode: .generate)
+                                            accent: accent, speed: speed, renderMode: cacheKind == .preview ? .preview : .generate)
             let speechResult = await systemProvider.generate(systemRequest, voice: nil, referenceAudioURL: nil)
             guard case .renderedFile(let rawURL, _, _) = speechResult else {
                 throw NSError(domain: "OpenVoice.SourceSpeech", code: 1,
@@ -1114,7 +1204,7 @@ final class VoiceStudioModel: ObservableObject {
             let referenceURL = referenceLease?.url
             let request = VoiceRequest(text: text, voice: selection, language: language,
                                        accent: accent, shaping: shaping, expression: expression,
-                                       speed: speed, pitch: pitch, renderMode: .generate)
+                                       speed: speed, pitch: pitch, renderMode: cacheKind == .preview ? .preview : .generate)
             diagnostics.finish(.requestBuild, startedAt: requestStarted)
             activeStage = nil
             let synthesisStarted = ProcessInfo.processInfo.systemUptime
@@ -1208,10 +1298,10 @@ final class VoiceStudioModel: ObservableObject {
 
     func playGeneratedAudio() {
         guard let generatedAudio else { return }
-        play(generatedAudio)
+        playAudioAsset(generatedAudio)
     }
 
-    func playAudioAsset(_ asset: AudioAsset) { play(asset) }
+    func playAudioAsset(_ asset: AudioAsset) { stopPlayback(); play(asset) }
 
     func managedURL(for asset: AudioAsset) -> URL? { try? audioFileStore.managedURL(for: asset) }
 
@@ -1241,6 +1331,8 @@ final class VoiceStudioModel: ObservableObject {
 
     func stopPlayback() {
         auditionTask?.cancel(); auditionGeneration = UUID()
+        loadingPlaybackSource = nil
+        playbackSource = nil
         player.stop()
         isPlaying = false
     }
@@ -1349,10 +1441,12 @@ final class VoiceStudioModel: ObservableObject {
         currentReference = CurrentReferenceAudio(asset: asset, source: source)
     }
 
-    private func play(_ asset: AudioAsset) {
+    private func play(_ asset: AudioAsset, source: StudioPlaybackSource? = nil) {
         guard !isRecording, !isRequestingPermission else { return }
         do {
             try player.play(asset)
+            playbackSource = source ?? .asset(asset.id)
+            diagnostics.update { $0.playbackSource = playbackSource?.diagnosticName }
             isPlaying = true
         } catch {
             isPlaying = false

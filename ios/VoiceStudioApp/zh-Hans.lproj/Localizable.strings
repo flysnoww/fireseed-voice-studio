@@ -262,7 +262,7 @@
 
 "Use the current voice and this delivery for new words." = "用当前声音和这段语气说新内容。";
 
-"Imitation with new text is not supported yet." = "暂不支持用参考语气生成新文字。";
+"Imitation with new text is not supported yet." = "当前本地引擎暂不支持使用参考语气生成新文本。";
 
 "Choose a saved voice to imitate." = "请选择已保存的声音作为目标声音。";
 
@@ -293,3 +293,21 @@
 "Reference audio ready for imitation." = "参考音频已就绪，可以进行声音模仿。";
 
 "Use audio up to 30 seconds long." = "请使用不超过 30 秒的音频。";
+
+"Hello. This is a preview of my voice." = "你好，这是我的声音试听。";
+
+"Preview Shaped Voice" = "试听塑形后的声音";
+
+"Install the local voice in Settings to hear this voice." = "请在设置中安装本地声音后试听。";
+
+"Replace" = "替换";
+
+"Remove" = "移除";
+
+"Retry" = "重试";
+
+"Loading" = "正在加载";
+
+"Playing" = "正在播放";
+
+"Ready" = "就绪";
