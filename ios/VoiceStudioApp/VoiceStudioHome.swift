@@ -472,7 +472,7 @@ struct StudioSystemLanguageVoices: View {
                             Image(systemName: model.currentVoice == .systemVoice(voice.identifier) ? "checkmark.circle.fill" : "circle")
                         }
                     }.buttonStyle(.plain).accessibilityIdentifier("systemVoice-\(voice.identifier)")
-                    }.padding(16).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20)).accessibilityIdentifier("systemVoiceCard-\(voice.identifier)")
+                    }.padding(16).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20))
                 }
                 if !showAll && model.systemVoiceCandidates.filter({ SystemVoiceCatalog.baseLanguage($0.language) == language }).count > 8 {
                     Button("More Voices") { showAll = true }
@@ -537,7 +537,7 @@ struct StudioVoiceDetail: View {
                                 if model.playbackSource == .shaped(selection) { model.stopPlayback() } else { model.toggleAudio(audio) }
                             }
                             StudioShare(model: model, audio: audio)
-                        }.accessibilityIdentifier("shapedPreviewResult")
+                        }.accessibilityElement(children: .contain).accessibilityIdentifier("shapedPreviewResult")
                     }
                 }
                 Section {
@@ -1032,7 +1032,7 @@ struct StudioImitation: View {
                             Spacer()
                             Button("Remove", role: .destructive) { model.removePerformance() }.accessibilityIdentifier("removePerformanceButton")
                         }.disabled(model.isRecording || model.isRequestingPermission || model.isGeneratingSpeech)
-                    }.padding(16).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20)).accessibilityIdentifier("performanceReferenceCard")
+                    }.padding(16).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20))
                 }
                 TextField("Enter new text (optional)", text: $text, axis: .vertical).lineLimit(2...5).textFieldStyle(.roundedBorder).accessibilityIdentifier("imitationTextField")
                 Text(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Recreate this audio with the current voice." : "Use the current voice and this delivery for new words.").font(.footnote).foregroundStyle(.secondary)

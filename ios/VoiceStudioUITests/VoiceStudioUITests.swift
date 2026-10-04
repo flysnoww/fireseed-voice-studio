@@ -16,7 +16,11 @@ final class VoiceStudioUITests: XCTestCase {
         XCTAssertTrue(matches.firstMatch.waitForExistence(timeout: 30), identifier)
         // XCTest includes controls from visually retained back layers. Only the front
         // layer may receive input; never choose an arbitrary first/last duplicate.
-        if !matches.allElementsBoundByIndex.contains(where: { $0.isHittable }) { app.swipeUp() }
+        for _ in 0..<4 {
+            if matches.allElementsBoundByIndex.contains(where: { $0.isHittable }) { break }
+            if matches.firstMatch.frame.midY < app.frame.midY { app.swipeDown() }
+            else { app.swipeUp() }
+        }
         let interactive = matches.allElementsBoundByIndex.filter { $0.isHittable }
         XCTAssertEqual(interactive.count, 1, "Exactly one interactive control: " + identifier)
         guard interactive.count == 1 else { return }
@@ -56,6 +60,10 @@ final class VoiceStudioUITests: XCTestCase {
 
     func testSystemCardAuditionIsIndependentAndDetailHasPlayShare() {
         XCTAssertTrue(app.buttons["imitateButton"].exists)
+        for identifier in ["myVoicesButton", "systemVoicesButton", "importButton", "recordNewVoiceButton"] {
+            XCTAssertTrue(app.buttons[identifier].isEnabled)
+        }
+        XCTAssertLessThan(app.buttons["imitateButton"].frame.midY, app.buttons["myVoicesButton"].frame.midY)
         let original = app.buttons["currentVoiceCard"].label
         tap("systemVoicesButton"); tap("systemLanguage-en")
         let auditions = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'systemAudition-'"))
@@ -153,8 +161,7 @@ final class VoiceStudioUITests: XCTestCase {
             let ready = NSPredicate(format: "enabled == true")
             expectation(for: ready, evaluatedWith: run)
             waitForExpectations(timeout: 180)
-            if !run.isHittable { app.swipeDown() }
-            run.tap()
+            tap("runImitationButton")
             let save = app.buttons["saveGeneratedAudioButton"]
             XCTAssertTrue(save.waitForExistence(timeout: 180))
             if !save.isHittable { app.swipeUp() }
