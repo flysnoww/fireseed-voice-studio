@@ -42,14 +42,16 @@ Kitten SDK 保持 0.1.0 / `4da0abbb92af4e7faf61affabbdb80d334ea768e`，ORT 保�
 
 MIG-MAC-02 禁止上传。以下是未来独立授权后的门禁说明，本阶段不执行。
 
-CLI 上传还需要既有 `API_KEY_ID`、`API_ISSUER_ID`、`API_PRIVATE_KEY_BASE64` 凭据，经安全的仓库外方式提供。不要把 P8/密码贴进聊天、脚本参数、Git 或日志。脚本只在上传时把 Key 临时放入权限受限的目录，退出后删除临时副本；不修改用户原 Key。
+上传默认使用 Xcode Settings → Accounts 中已登录的 Apple 开发者账号。IPA preflight 后，脚本对同一个 Archive 再执行一次 `xcodebuild -exportArchive`，参数为 `method=app-store-connect`、`destination=upload`，并关闭 Xcode 自动管理版本/构建号；不需要 P8。该路径的上传日志保存在 release 输出目录。Xcode 上传成功只确认 Apple 接收，`result.json` 会保留 `PENDING_ASC_CONFIRMATION`，不表示处理完成或已可安装。
 
-未来运行需同时指定 `--execute --upload --confirmed-unused-build`，以及精确的 `--upload-authorization 'UPLOAD com.fireseed.voicestudio VERSION (BUILD)'`。该参数表示操作者已经获得本次明确上传授权，不能由 agent 自行补填以推导授权。保留默认不上传，不提供跳过测试的选项。
+无人值守 API Key 路径仍可通过 `--upload-mode api-key` 选择，需要既有 `API_KEY_ID`、`API_ISSUER_ID`、`API_PRIVATE_KEY_BASE64` 凭据，经安全的仓库外方式提供。不要把 P8/密码贴进聊天、脚本参数、Git 或日志。脚本只在上传时把 Key 临时放入权限受限的目录，退出后删除临时副本；不修改用户原 Key。此路径会查询 Apple processing 状态。
 
-上传后查询现有 App 的 Apple processing 状态，只有 `VALID` 才记录成功。`uploaded=true` 但处理失败/查询超时不算发布成功，应保留日志并继续核实该编号，不能盲目重传。Organizer 账号可用于未来人工上传，但不能代替本脚本所需的 API 凭据。
+所有上传都必须显式指定 `--execute --upload --confirmed-unused-build`、ASC 已核验未占用的 `--build-number`，以及精确的 `--upload-authorization 'UPLOAD com.fireseed.voicestudio VERSION (BUILD)'`。`--upload-mode` 默认是 `xcode-account`；指定 `api-key` 才读取 API 凭据。该参数表示操作者已经获得本次明确上传授权，不能由 agent 自行补填以推导授权。脚本不提供跳过测试的选项。Build 1 永远保留给本地验证；不得从历史 Build 6 推断 Build 7 未占用。
+
+`xcode-account` 模式下 `uploaded=true` 只记录 Xcode 上传命令成功，processing 状态仍需在 ASC 核实；API Key 模式仅在查询返回 `VALID` 后记录 Apple 验证成功。任何上传成功但 processing 未验证、失败或查询超时的情况都应保留日志并继续核实同一构建，不能盲目重传。
 
 签名若卡住：先执行最小副本签名验证，检查实际进程和日志；确认挂起进程已终止、保留原输出后才在新目录受控 `-jobs 1` 重试。不通过重建证书解决。
 
-本次完整通过基线的模拟器为 `D2B8AFD6-E1A3-4EA1-91C7-7274575F2BAF`（iPhone17/iOS27.0）。未来本地重现可传 `--simulator-id D2B8AFD6-E1A3-4EA1-91C7-7274575F2BAF`；未指定时仍用 CI 的首个 iPhone 选择逻辑，当前可能选到尚有两项 UI 失败的 Duo/iOS27.1。切换设备不等于修复该失败，详见 MIG-MAC-02 验收报告。
+MIG-MAC-05 在 iPhone Duo / iOS 27.1 完整运行 App XCTest 与 UI Tests，并要求 66+7 项全通过；Core、Python、Node 测试也各自运行。发布入口默认仍选择首个名称以 iPhone 开头的可用模拟器；正式验收可传 `--simulator-id <UDID>` 固定设备。
 
 Archive 不全局覆盖 CODE_SIGN_IDENTITY，以免与 Swift Package 的自动签名静态目标冲突；App target 继续使用工程内既有手动 Apple Distribution 配置和专用 profile。导出和实际签名叶证书校验固定本次验证的 identity SHA-1。

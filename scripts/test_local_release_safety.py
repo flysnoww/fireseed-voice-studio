@@ -21,8 +21,22 @@ class ReleaseSafetyTests(unittest.TestCase):
             self.assertFalse(out.exists())
             plan = json.loads(result.stdout)
             self.assertFalse(plan['upload'])
+            self.assertEqual(plan['upload_mode'], 'xcode-account')
             self.assertEqual(plan['bundle'], 'com.fireseed.voicestudio')
             self.assertIn('App XCTest + all UI tests', plan['stages'])
+
+    def test_xcode_account_upload_plan_stays_dry_without_execute(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp) / 'release'
+            result = self.invoke('--upload', '--upload-mode', 'xcode-account', '--build-number', '7',
+                                 '--confirmed-unused-build', '--upload-authorization',
+                                 'UPLOAD com.fireseed.voicestudio 0.1 (7)', '--output', str(out))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(out.exists())
+            plan = json.loads(result.stdout)
+            self.assertEqual(plan['mode'], 'DRY-RUN')
+            self.assertTrue(plan['upload'])
+            self.assertIn('destination=upload', plan['stages'][-1])
 
     def test_upload_refuses_missing_or_wrong_authorization(self):
         for extra in [['--build-number', '2'], ['--build-number', '2', '--confirmed-unused-build'],

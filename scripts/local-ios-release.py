@@ -38,6 +38,8 @@ def main():
     parser.add_argument('--output', type=Path)
     parser.add_argument('--simulator-id', help='Explicit available iPhone UDID; otherwise use CI first-iPhone selection')
     parser.add_argument('--upload', action='store_true')
+    parser.add_argument('--upload-mode', choices=('xcode-account', 'api-key'), default='xcode-account',
+                        help='Use the Xcode signed-in account (default) or the existing App Store Connect API-key route')
     parser.add_argument('--upload-authorization', help='Exact phrase: UPLOAD com.fireseed.voicestudio VERSION (BUILD)')
     parser.add_argument('--confirmed-unused-build', action='store_true', help='Operator has checked ASC including failed/processing uploads')
     args = parser.parse_args()
@@ -59,22 +61,25 @@ def main():
     if not args.execute:
         print(json.dumps({'mode': 'DRY-RUN', 'output': str(out), 'bundle': BUNDLE, 'team': TEAM,
                           'profile': PROFILE, 'version': args.version, 'build': args.build_number,
+                          'upload_mode': args.upload_mode,
                           'stages': ['Core/Node/Python tests', 'pinned simulator runtime', 'Debug build',
                                      'install verified OpenVoice fixture', 'App XCTest + all UI tests',
                                      'pinned device runtime', 'Release build', 'ORT minimum OS alignment',
                                      'manual Distribution archive', 'archive signature/metadata verification',
                                      'exportArchive (destination=export)', 'IPA preflight',
-                                     'authorized upload + Apple processing query' if args.upload else 'STOP: no upload'],
+                                     ('xcodebuild exportArchive (method=app-store-connect, destination=upload)'
+                                      if args.upload_mode == 'xcode-account' else 'authorized API-key upload + Apple processing query')
+                                     if args.upload else 'STOP: no upload'],
                           'upload': args.upload, 'simulator_id': args.simulator_id}, indent=2))
         return 0
     os.chdir(ROOT)
-    if args.upload:
+    if args.upload and args.upload_mode == 'api-key':
         for key in ('API_KEY_ID', 'API_ISSUER_ID', 'API_PRIVATE_KEY_BASE64'):
             if not os.environ.get(key):
                 parser.error('Missing credential environment variable: ' + key)
     out.mkdir(parents=True)
     state = {'version': args.version, 'build': args.build_number, 'bundle': BUNDLE,
-             'team': TEAM, 'upload_authorized': args.upload, 'uploaded': False,
+             'team': TEAM, 'upload_authorized': args.upload, 'upload_mode': args.upload_mode, 'uploaded': False,
              'status': 'RUNNING', 'stages': [], 'started_utc': datetime.datetime.utcnow().isoformat() + 'Z'}
     def save():
         (out / 'result.json').write_text(json.dumps(state, indent=2))
@@ -158,26 +163,46 @@ def main():
         state['status'] = 'PASS_LOCAL_NO_UPLOAD'
         save()
         if args.upload:
-            # Authorization above is explicit; never invoke this branch during migration.
-            with tempfile.TemporaryDirectory(prefix='voicestudio-upload-') as key_dir:
-                private_keys = Path(key_dir) / 'private_keys'
-                private_keys.mkdir(mode=0o700)
-                key_id = os.environ['API_KEY_ID']
-                require(re.fullmatch(r'[A-Za-z0-9]+', key_id), 'Invalid API key ID')
-                key = private_keys / ('AuthKey_' + key_id + '.p8')
-                with key.open('xb') as stream:
-                    os.chmod(key, 0o600)
-                    stream.write(base64.b64decode(os.environ['API_PRIVATE_KEY_BASE64'], validate=True))
-                run('upload', ['xcrun', 'altool', '--upload-app', '--type', 'ios', '--file', ipa,
-                               '--apiKey', key_id, '--apiIssuer', os.environ['API_ISSUER_ID']], cwd=key_dir)
+            if args.upload_mode == 'xcode-account':
+                # Xcode uses the account already configured in Xcode > Settings > Accounts.
+                # Keep the exact build from the archive and never request provisioning changes.
+                upload_options = dict(options)
+                upload_options['method'] = 'app-store-connect'
+                upload_options['destination'] = 'upload'
+                upload_options['manageAppVersionAndBuildNumber'] = False
+                upload_export_options = out / 'ExportOptions-Upload.plist'
+                upload_export_options.write_bytes(plistlib.dumps(upload_options))
+                run('upload', ['xcodebuild', '-exportArchive', '-archivePath', archive,
+                               '-exportPath', out / 'upload-export',
+                               '-exportOptionsPlist', upload_export_options])
+                state['upload_result'] = 'UPLOAD_SUCCEEDED'
+                state['apple_processing'] = 'PENDING_ASC_CONFIRMATION'
+                state['status'] = 'UPLOAD_SUCCEEDED_PROCESSING_UNVERIFIED'
+                save()
+            else:
+                # API-key upload remains available for unattended runs.
+                with tempfile.TemporaryDirectory(prefix='voicestudio-upload-') as key_dir:
+                    private_keys = Path(key_dir) / 'private_keys'
+                    private_keys.mkdir(mode=0o700)
+                    key_id = os.environ['API_KEY_ID']
+                    require(re.fullmatch(r'[A-Za-z0-9]+', key_id), 'Invalid API key ID')
+                    key = private_keys / ('AuthKey_' + key_id + '.p8')
+                    with key.open('xb') as stream:
+                        os.chmod(key, 0o600)
+                        stream.write(base64.b64decode(os.environ['API_PRIVATE_KEY_BASE64'], validate=True))
+                    run('upload', ['xcrun', 'altool', '--upload-app', '--type', 'ios', '--file', ipa,
+                                   '--apiKey', key_id, '--apiIssuer', os.environ['API_ISSUER_ID']], cwd=key_dir)
+                state['upload_result'] = 'UPLOAD_SUCCEEDED'
+                state['status'] = 'UPLOADED_PROCESSING_UNVERIFIED'
+                save()
+                env = dict(os.environ, RUNNER_TEMP=str(out))
+                run('apple-processing', ['python3', 'scripts/verify-appstore-build-ingestion.py', '--key-id', os.environ['API_KEY_ID'],
+                                         '--issuer-id', os.environ['API_ISSUER_ID'], '--bundle-id', BUNDLE,
+                                         '--version', args.version, '--build-number', args.build_number], env=env)
+                state['apple_processing'] = 'VALID'
+                state['status'] = 'PASS_APPLE_VALID'
             state['uploaded'] = True
-            state['status'] = 'UPLOADED_PROCESSING_UNVERIFIED'
             save()
-            env = dict(os.environ, RUNNER_TEMP=str(out))
-            run('apple-processing', ['python3', 'scripts/verify-appstore-build-ingestion.py', '--key-id', os.environ['API_KEY_ID'],
-                                     '--issuer-id', os.environ['API_ISSUER_ID'], '--bundle-id', BUNDLE,
-                                     '--version', args.version, '--build-number', args.build_number], env=env)
-            state['status'] = 'PASS_APPLE_VALID'
         save()
         return 0
     except Exception as error:
