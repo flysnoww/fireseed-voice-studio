@@ -29,6 +29,14 @@ python3 scripts/local-ios-release.py --execute --version 0.1 --build-number 1
 
 Archive 和导出 App 都要检查真实签名、证书与 profile 的匹配、Team、Bundle、entitlements、版本、build、MinimumOSVersion、iPhone family、AppIcon、embedded frameworks 和 Mach-O metadata。导出配置固定 `destination=export`，关闭自动管理版本号；导出本身不会上传。
 
+## Export Compliance 声明
+
+VoiceStudio App target 的 Debug 与 Release 均将 `INFOPLIST_KEY_ITSAppUsesNonExemptEncryption` 设为 `NO`；本地发布流程分别读取两种构建产物中的最终 `Info.plist`，要求 `ITSAppUsesNonExemptEncryption` 确实是布尔值 `false`。Archive 和导出 IPA preflight 也执行相同检查，缺失、字符串值或 `true` 都会阻断。
+
+声明判断基于本仓库 app target 和锁定依赖的审计：App/Core 中 `CryptoKit` 仅用于 SHA-256 文件完整性校验及缓存键，不实现数据加密、解密、密钥交换或自有加密协议；应用存储走普通本地文件和 `UserDefaults`。KittenTTS Swift 0.1.0（锁定 revision `4da0abbb92af4e7faf61affabbdb80d334ea768e`）通过 Foundation `URLSession` 从 Hugging Face 下载模型，网络传输使用系统 HTTPS/TLS；该包的 Sources 未发现应用层加密实现。ONNX Runtime Swift Package Manager 1.24.2（锁定 revision `b7fb7f7dea8a2469e6335d95a61b8f36d0dc83b2`）作为本地模型推理运行时使用，检查其 Swift bindings 未发现加密/密钥功能。Qwen/OpenVoice 资源在本地加载，SHA-256 用于校验；未发现非 Apple 加密库或其他第三方网络 SDK。因而当前构建仅涉及散列和系统提供的 HTTPS/TLS，满足 Apple 对 `NO` 值的定义（未使用加密或仅使用豁免加密）。如果新增自有加密、非 Apple 加密库、加密 SDK 或改变依赖网络/存储能力，必须重新做出口合规判定后再发布；此布尔值是基于当前版本功能与依赖的申报，不替代法律审查。
+
+Apple 说明该键为 Boolean，`NO` 表示 App 及其第三方库没有加密，或只使用符合豁免条件的加密；操作系统提供的 HTTPS（例如 `URLSession`）通常属于豁免形式。依据：[ITSAppUsesNonExemptEncryption](https://developer.apple.com/documentation/BundleResources/Information-Property-List/ITSAppUsesNonExemptEncryption)、[Complying with Encryption Export Regulations](https://developer.apple.com/documentation/security/complying-with-encryption-export-regulations)。
+
 ## Xcode 27.1 构建兼容
 
 Kitten SDK 保持 0.1.0 / `4da0abbb92af4e7faf61affabbdb80d334ea768e`，ORT 保持 1.24.2 / `b7fb7f7dea8a2469e6335d95a61b8f36d0dc83b2`。

@@ -1,6 +1,7 @@
 """Exercise the release CLI's external upload and overwrite boundaries without Xcode."""
 from pathlib import Path
 import json
+import plistlib
 import subprocess
 import sys
 import tempfile
@@ -76,6 +77,27 @@ class ReleaseSafetyTests(unittest.TestCase):
             self.assertEqual(result.returncode, 2)
             self.assertEqual(sentinel.read_text(), 'preserve')
 
+    def test_export_compliance_preflight_requires_boolean_false(self):
+        verifier = Path(__file__).with_name('local-ios-verify.py')
+        with tempfile.TemporaryDirectory() as temp:
+            app = Path(temp) / 'VoiceStudio.app'
+            app.mkdir()
+            info = {'CFBundleIdentifier': 'com.fireseed.voicestudio',
+                    'ITSAppUsesNonExemptEncryption': False}
+            plist = app / 'Info.plist'
+            for value, expected in [(False, 0), (True, 1), ('false', 1), (None, 1)]:
+                if value is None:
+                    info.pop('ITSAppUsesNonExemptEncryption', None)
+                else:
+                    info['ITSAppUsesNonExemptEncryption'] = value
+                plist.write_bytes(plistlib.dumps(info))
+                report = Path(temp) / 'compliance.json'
+                result = subprocess.run([sys.executable, str(verifier), str(app),
+                                         '--check-export-compliance-only', '--report', str(report)],
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, expected, result.stderr)
+                if expected == 0:
+                    self.assertFalse(json.loads(report.read_text())['ITSAppUsesNonExemptEncryption'])
 
 if __name__ == '__main__':
     unittest.main()

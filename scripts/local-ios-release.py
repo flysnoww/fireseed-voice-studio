@@ -103,6 +103,9 @@ def main():
         run('resolve-packages', xcode + ['-resolvePackageDependencies'])
         run('kitten-manifest-compatibility', ['python3', 'scripts/prepare-local-kitten-package.py', derived])
         run('debug-build', xcode + ['-sdk', 'iphonesimulator', '-configuration', 'Debug', 'CODE_SIGNING_ALLOWED=NO', 'ARCHS=arm64', 'build'])
+        run('debug-export-compliance', ['python3', 'scripts/local-ios-verify.py',
+                                        derived / 'Build/Products/Debug-iphonesimulator/VoiceStudio.app',
+                                        '--check-export-compliance-only', '--report', out / 'debug-export-compliance.json'])
         devices = json.loads(subprocess.check_output(['xcrun', 'simctl', 'list', 'devices', 'available', '-j']))['devices']
         candidates = [d for runtime in devices.values() for d in runtime if d['name'].startswith('iPhone') or d['udid'] == args.simulator_id]
         device = next(d for d in candidates if not args.simulator_id or d['udid'] == args.simulator_id)
@@ -134,6 +137,9 @@ def main():
         require(summary['failedTests'] == 0 and summary['skippedTests'] == 0 and summary['passedTests'] >= 73, 'Require full baseline App/UI suite: at least 73 passed, zero failed/skipped')
         run('runtime-device', ['bash', 'experiments/m2b-qwen-ios/scripts/build_formal_ios_runtime.sh', 'device'])
         run('release-build', xcode + ['-sdk', 'iphoneos', '-configuration', 'Release', 'CODE_SIGNING_ALLOWED=NO', 'CODE_SIGNING_REQUIRED=NO', 'build'])
+        run('release-export-compliance', ['python3', 'scripts/local-ios-verify.py',
+                                          derived / 'Build/Products/Release-iphoneos/VoiceStudio.app',
+                                          '--check-export-compliance-only', '--report', out / 'release-export-compliance.json'])
         ort = next((derived / 'SourcePackages/artifacts').glob('**/onnxruntime.xcframework/ios-arm64/onnxruntime.framework'))
         run('align-ort', ['python3', 'scripts/align-onnxruntime-framework-minimum-os.py', ort, '17.0'])
         archive = out / 'VoiceStudio.xcarchive'

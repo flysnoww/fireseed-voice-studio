@@ -24,8 +24,18 @@ def output(*args):
     return subprocess.check_output(args)
 
 
+def verify_export_compliance(app):
+    info = plistlib.loads((app / 'Info.plist').read_bytes())
+    require(info.get('CFBundleIdentifier') == BUNDLE, 'Wrong bundle for export compliance check')
+    require(type(info.get('ITSAppUsesNonExemptEncryption')) is bool and
+            info['ITSAppUsesNonExemptEncryption'] is False,
+            'ITSAppUsesNonExemptEncryption must be boolean false')
+    return {'bundle': BUNDLE, 'ITSAppUsesNonExemptEncryption': False, 'status': 'PASS'}
+
+
 def verify(app, version, build):
     info = plistlib.loads((app / 'Info.plist').read_bytes())
+    verify_export_compliance(app)
     require(info['CFBundleIdentifier'] == BUNDLE, 'Wrong bundle')
     require(info['CFBundleShortVersionString'] == version, 'Wrong version')
     require(info['CFBundleVersion'] == build, 'Wrong build')
@@ -70,8 +80,12 @@ def verify(app, version, build):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('app', type=pathlib.Path)
-    parser.add_argument('--version', required=True)
-    parser.add_argument('--build', required=True)
+    parser.add_argument('--version')
+    parser.add_argument('--build')
     parser.add_argument('--report', type=pathlib.Path, required=True)
+    parser.add_argument('--check-export-compliance-only', action='store_true')
     args = parser.parse_args()
-    args.report.write_text(json.dumps(verify(args.app, args.version, args.build), indent=2))
+    if not args.check_export_compliance_only and (not args.version or not args.build):
+        parser.error('--version and --build are required for full preflight')
+    result = verify_export_compliance(args.app) if args.check_export_compliance_only else verify(args.app, args.version, args.build)
+    args.report.write_text(json.dumps(result, indent=2))
