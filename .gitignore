@@ -49,3 +49,8 @@ experiments/m2a/results/**/*.wav
 .DS_Store
 Thumbs.db
 .vscode/
+
+# Private local migration evidence, historical audio and release outputs
+/migration/
+/local-releases/
+*.xcarchive/

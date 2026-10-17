@@ -89,7 +89,9 @@ final class VoiceStudioUITests: XCTestCase {
         app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'voiceDetail-' ")).firstMatch.tap()
         XCTAssertTrue(app.buttons["voiceAuditionButton"].exists)
         XCTAssertTrue(app.buttons["voiceShareButton"].exists)
-        app.sliders["voiceSpeedSlider"].adjust(toNormalizedSliderPosition: 0.35)
+        let speed = app.sliders["voiceSpeedSlider"]
+        XCTAssertTrue(speed.waitForExistence(timeout: 20))
+        speed.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 0.1, thenDragTo: speed.coordinate(withNormalizedOffset: CGVector(dx: 0.35, dy: 0.5)))
         XCTAssertFalse(app.otherElements["shapedPreviewResult"].exists)
         tap("previewShapedVoiceButton")
         let result = app.descendants(matching: .any).matching(identifier: "shapedPreviewResult").firstMatch
@@ -105,9 +107,19 @@ final class VoiceStudioUITests: XCTestCase {
         let detail = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'voiceDetail-' ")).firstMatch
         XCTAssertTrue(detail.waitForExistence(timeout: 20)); detail.tap(); expandCard("Shape Voice")
         tap("voiceCurrentIndicator")
-        XCTAssertTrue(app.sliders["voiceSpeedSlider"].waitForExistence(timeout: 20))
-        app.sliders["voiceSpeedSlider"].adjust(toNormalizedSliderPosition: 0.4)
-        app.sliders["voicePitchSlider"].adjust(toNormalizedSliderPosition: 0.55)
+        let detailScrollView = app.scrollViews.containing(.button, identifier: "voiceCurrentIndicator").firstMatch
+        XCTAssertTrue(detailScrollView.waitForExistence(timeout: 20))
+        let scrollStart = detailScrollView.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.8))
+        scrollStart.press(forDuration: 0.1, thenDragTo: detailScrollView.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.5)))
+        let speed = app.sliders["voiceSpeedSlider"]
+        XCTAssertTrue(speed.waitForExistence(timeout: 20))
+        let pitch = app.sliders["voicePitchSlider"]
+        XCTAssertTrue(speed.isHittable, "Speed slider must be inside the visible Shape Voice card")
+        XCTAssertTrue(pitch.isHittable, "Pitch slider must be inside the visible Shape Voice card")
+        speed.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 0.1, thenDragTo: speed.coordinate(withNormalizedOffset: CGVector(dx: 0.4, dy: 0.5)))
+        XCTAssertTrue(app.buttons["floatingCardBack"].exists, "Shape Voice card must remain open after Speed drag")
+        XCTAssertTrue(pitch.waitForExistence(timeout: 20))
+        pitch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 0.1, thenDragTo: pitch.coordinate(withNormalizedOffset: CGVector(dx: 0.55, dy: 0.5)))
         XCTAssertFalse(app.sliders["Brightness"].exists)
         XCTAssertFalse(app.buttons["Confirm Voice"].exists)
         screenshot("Voice Detail shaping and current indicator")

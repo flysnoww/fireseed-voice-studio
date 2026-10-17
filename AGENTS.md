@@ -40,7 +40,7 @@ Do not implement Language Learning, pronunciation scoring, Speech Comparator, Du
 
 - Audit existing files before changing them. Keep changes scoped and reversible; prefer platform capabilities and existing dependencies before adding dependencies.
 - The product target is native iOS, using Swift, SwiftUI, and AVFoundation. Keep future local AI rendering behind a separate `RendererAdapter`.
-- Windows is the local development host; use the established GitHub repository → GitHub Actions macOS runner → Xcode build/test → IPA artifact → Sideloadly device-test workflow. Reuse a verified Fireseed workflow when available. Do not switch to Android or wrap the web harness in a WebView.
+- Mac Studio is the primary host for native iOS development, testing, signing and release. Windows RTX 5070 Ti is for GPU model experiments and collaborative development. MacBook Pro is for mobile and backup development. GitHub provides source synchronization, backup and optional fallback CI. Daily TestFlight releases may use the verified local Xcode archive/export pipeline; GitHub Actions is not mandatory. Do not switch to Android or wrap the web harness in a WebView.
 - Keep the M0 JavaScript/Web harness as a domain/cache prototype and quick test tool only. Do not expand it into the product UI.
 - Test every code change with the smallest relevant tests. Do not delete tests or weaken assertions to make tests pass.
 - Validate written data and important invariants after changes. Do not hide or bypass an architecture issue to obtain a green result.
@@ -55,12 +55,15 @@ Keep the current implementation local to this product. Extract a shared capabili
 
 - The authorized native audio slice is Record → managed audio file → playback, and Import → managed audio copy → playback, with Save Voice promoting its reference audio to durable storage.
 - M1 does not include AI rendering, voice cloning, model downloads, complex UI, or excluded future products. Preview and Generate stay clearly unavailable until a real renderer is authorized and integrated.
-- On Windows, do not claim an Apple build passed locally. The GitHub Actions macOS workflow is authoritative. Internal device packages are unsigned IPA artifacts for Sideloadly; do not add Apple signing secrets or certificates.
+- On Windows, do not claim an Apple build passed locally. Native build evidence must come from a Mac or a macOS CI runner. Internal unsigned device packages may use Sideloadly. Keep all signing secrets, certificates, profiles, models and private audio out of Git. Local releases must run Core, App XCTest, UI, Node and Python tests, Debug/Release builds, signing checks and IPA preflight. Upload requires explicit authorization and a confirmed unused build number; default to no upload. Never create or revoke Apple certificates as a migration shortcut.
 
 ## CI Closed-Loop Rule — Mandatory
 
-For any task whose acceptance criteria include GitHub Actions, CI, builds,
-tests, IPA/APK/package generation, or downloadable artifacts:
+For tasks whose acceptance criteria explicitly require GitHub Actions or remote CI,
+apply the closed loop below. Local-only build, test, archive and release tasks use
+the same verify-and-fix principle locally and do not require a commit, push or CI run.
+Never push or upload merely to satisfy this rule when the user prohibits it.
+For required remote CI:
 
 1. A successful `git push` is NOT task completion.
 2. `queued`, `pending`, or `in_progress` CI is NOT task completion.

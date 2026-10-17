@@ -110,6 +110,8 @@ def main() -> int:
         )
         deadline = time.monotonic() + args.timeout_minutes * 60
         while True:
+            # A processing wait may exceed the 15-minute JWT lifetime.
+            token = jwt_token(args.key_id, args.issuer_id, key_path)
             uploads_response = get_json(f"/apps/{app_id}/buildUploads?{upload_query}", token)
             uploads = [
                 item for item in uploads_response.get("data", [])

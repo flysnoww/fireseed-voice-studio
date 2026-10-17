@@ -82,26 +82,7 @@ struct VoiceStudioHome: View {
                                 .lineLimit(3...8).textFieldStyle(.roundedBorder).focused($focusedInput)
                                 .accessibilityIdentifier("generationTextField")
                         }
-                        StudioCard(title: "Generate", symbol: "waveform") {
-                            HStack {
-                                Button("Preview") { generate(preview: true) }
-                                    .accessibilityIdentifier("previewSpeechButton")
-                                Button { generate(preview: false) } label: { Label(model.isGeneratingSpeech ? "Generating…" : "Generate", systemImage: "waveform").frame(maxWidth: .infinity).padding(.vertical, 8) }.buttonStyle(.borderedProminent)
-                                    .accessibilityIdentifier("generateSpeechButton")
-                            }.disabled(model.isGeneratingSpeech || !model.canGenerateCurrentVoice || generationText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                            if model.isGeneratingSpeech || model.isResolvingVoice { HStack { ProgressView("Preparing…"); Spacer(); StudioIcon("Cancel", symbol: "xmark") { model.cancelGeneration() } } }
-                            if let audio = model.generatedAudio {
-                                HStack {
-                                    StudioAssetPlay(model: model, audio: audio, size: .large)
-                                    Button("Save Audio") { model.saveGeneratedAudio() }
-                                        .disabled(audio.persistenceState == .persistent)
-                                        .accessibilityIdentifier("saveGeneratedAudioButton")
-                                    assetShare(audio)
-                                }
-                            }
-                            Text(LocalizedStringKey(model.statusMessage)).font(.footnote).foregroundStyle(.secondary)
-                                .accessibilityIdentifier("statusMessage")
-                        }
+                        generationCard
                         HStack {
                             Spacer()
                             Button("Generation History") { cards.push(.history(false)) }.accessibilityIdentifier("generatedAudioLibraryButton")
@@ -152,6 +133,32 @@ struct VoiceStudioHome: View {
                 if id != nil, model.currentReference?.source == .record { voiceName = String(localized: "My voice", locale: locale) }
             }
         }
+    }
+    private var generationCard: some View {
+        StudioCard(title: "Generate", symbol: "waveform") {
+            generationButtons
+            if model.isGeneratingSpeech || model.isResolvingVoice { HStack { ProgressView("Preparing…"); Spacer(); StudioIcon("Cancel", symbol: "xmark") { model.cancelGeneration() } } }
+            if let audio = model.generatedAudio {
+                HStack {
+                    StudioAssetPlay(model: model, audio: audio, size: .large)
+                    Button("Save Audio") { model.saveGeneratedAudio() }
+                        .disabled(audio.persistenceState == .persistent)
+                        .accessibilityIdentifier("saveGeneratedAudioButton")
+                    assetShare(audio)
+                }
+            }
+            Text(LocalizedStringKey(model.statusMessage)).font(.footnote).foregroundStyle(.secondary)
+                .accessibilityIdentifier("statusMessage")
+        }
+    }
+    // Separate the type-checking boundary for Swift 6.4; preserve controls and behavior.
+    private var generationButtons: some View {
+        HStack {
+            Button("Preview") { generate(preview: true) }
+                .accessibilityIdentifier("previewSpeechButton")
+            Button { generate(preview: false) } label: { Label(model.isGeneratingSpeech ? "Generating…" : "Generate", systemImage: "waveform").frame(maxWidth: .infinity).padding(.vertical, 8) }.buttonStyle(.borderedProminent)
+                .accessibilityIdentifier("generateSpeechButton")
+        }.disabled(model.isGeneratingSpeech || !model.canGenerateCurrentVoice || generationText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
     }
     private var voiceSourceCard: some View {
         VStack(spacing: 14) {
