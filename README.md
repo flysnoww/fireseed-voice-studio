@@ -29,4 +29,8 @@ Recording, managed audio import, playback, and durable voice references are impl
 - Prefer system capabilities, then DSP, then the smallest sufficient local model; advanced large renderers remain optional.
 - Keep providers and models replaceable. User-owned Voice assets and durable reference audio survive renderer replacement.
 
-The Windows workspace cannot run Xcode. Treat GitHub Actions macOS results as the authoritative Apple build and test results.
+Mac Studio is the primary iOS build/test/signing host; Windows supports GPU model experiments, and GitHub Actions is fallback CI. The verified local workflow is described in [Mac local release](docs/mac-local-release.md).
+
+## Fireseed Identity V1
+
+Voice Studio uses the shared Fireseed Logto service with its own Native Client and callbacks. Apple/Google sign-in uses the system authentication browser; tokens stay in Keychain. Private audio and Current Voice are scoped by verified issuer/subject. Existing local libraries remain intact and require an explicit, backed-up claim before being assigned to an account. See [Identity architecture, data ownership and test instructions](docs/identity-v1.md). Automated test fixtures do not establish real-provider or iPhone acceptance; consult the execution evidence before making release claims.

@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>Fireseed Voice Studio Identity</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>com.fireseed.voicestudio</string>
+			</array>
+		</dict>
+	</array>
+	<key>FireseedIdentityClientID</key>
+	<string>ghducpbvjml6ovk92e392</string>
+	<key>FireseedIdentityEndpoint</key>
+	<string>https://auth.fireseed.work</string>
+	<key>FireseedIdentityEnvironment</key>
+	<string>PRODUCTION</string>
+	<key>FireseedIdentityIssuer</key>
+	<string>https://auth.fireseed.work/oidc</string>
+	<key>FireseedIdentityPostLogoutRedirectURI</key>
+	<string>com.fireseed.voicestudio://oauth/signed-out</string>
+	<key>FireseedIdentityRedirectURI</key>
+	<string>com.fireseed.voicestudio://oauth/callback</string>
+</dict>
+</plist>

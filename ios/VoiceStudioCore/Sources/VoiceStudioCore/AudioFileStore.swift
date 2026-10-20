@@ -10,8 +10,13 @@ public final class AudioFileStore {
     private let fileManager: FileManager
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
+    private let allowsPersistentWrites: Bool
+    private var isAccessible = true
+    public func invalidateAccess() { isAccessible = false }
+    private func requireAccess() throws { guard isAccessible else { throw WorkspaceError.invalidOwner } }
 
-    public init(rootDirectory: URL, fileManager: FileManager = .default) throws {
+    public init(rootDirectory: URL, fileManager: FileManager = .default, allowsPersistentWrites: Bool = true) throws {
+        self.allowsPersistentWrites = allowsPersistentWrites
         self.stagingDirectory = rootDirectory.appendingPathComponent("StagedAudio", isDirectory: true).standardizedFileURL
         self.audioDirectory = rootDirectory.appendingPathComponent("ManagedAudio", isDirectory: true).standardizedFileURL
         self.metadataDirectory = rootDirectory.appendingPathComponent("Metadata", isDirectory: true).standardizedFileURL
@@ -27,6 +32,7 @@ public final class AudioFileStore {
     }
 
     public func registerRecording(at destination: URL, duration: TimeInterval) throws -> AudioAsset {
+        try requireAccess()
         let standardized = destination.standardizedFileURL
         guard standardized.deletingLastPathComponent() == stagingDirectory else {
             throw VoiceStudioError.invalidManagedAudioPath
@@ -76,6 +82,7 @@ public final class AudioFileStore {
     }
 
     public func managedURL(for asset: AudioAsset) throws -> URL {
+        try requireAccess()
         let ext = URL(fileURLWithPath: asset.fileName).pathExtension.lowercased()
         guard Self.supportedAudioExtensions.contains(ext),
               asset.fileName == "\(asset.id.uuidString.lowercased()).\(ext)" else {
@@ -87,10 +94,17 @@ public final class AudioFileStore {
             throw VoiceStudioError.invalidManagedAudioPath
         }
         guard fileManager.fileExists(atPath: url.path) else { throw VoiceStudioError.missingManagedAudio }
+        let attributes = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+        guard attributes.isRegularFile == true, attributes.isSymbolicLink != true,
+              url.resolvingSymlinksInPath().deletingLastPathComponent() == directory.resolvingSymlinksInPath() else {
+            throw VoiceStudioError.invalidManagedAudioPath
+        }
         return url
     }
 
     public func promoteToPersistent(_ asset: AudioAsset) throws -> AudioAsset {
+        try requireAccess()
+        guard allowsPersistentWrites else { throw WorkspaceError.invalidOwner }
         if asset.persistenceState == .persistent {
             _ = try managedURL(for: asset)
             return asset
@@ -220,6 +234,7 @@ public final class AudioFileStore {
 
     /// Deletes a voice and removes its reference audio only when no other saved voice uses it.
     public func deleteVoice(id: UUID) throws {
+        try requireAccess()
         let voiceURL = metadataDirectory.appendingPathComponent("voice-\(id.uuidString.lowercased()).json")
         let voiceData = try Data(contentsOf: voiceURL)
         let voice = try decoder.decode(VoiceAsset.self, from: voiceData)
@@ -278,8 +293,10 @@ public final class AudioFileStore {
     }
 
     private func validateFile(at url: URL, duration: TimeInterval) throws {
+        try requireAccess()
         guard duration.isFinite, duration > 0,
-              let values = try? url.resourceValues(forKeys: [.fileSizeKey]),
+              let values = try? url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey, .isSymbolicLinkKey]),
+              values.isRegularFile == true, values.isSymbolicLink != true,
               let size = values.fileSize, size > 0,
               fileManager.fileExists(atPath: url.path) else {
             throw VoiceStudioError.invalidAudioFile
@@ -287,11 +304,14 @@ public final class AudioFileStore {
     }
 
     private func write<T: Encodable>(_ record: T, named fileName: String) throws {
+        try requireAccess()
+        guard allowsPersistentWrites else { throw WorkspaceError.invalidOwner }
         let destination = metadataDirectory.appendingPathComponent(fileName)
         try encoder.encode(record).write(to: destination, options: .atomic)
     }
 
     private func loadRecords<T: Decodable>(_ type: T.Type, prefix: String) -> [T] {
+        guard isAccessible else { return [] }
         guard let urls = try? fileManager.contentsOfDirectory(at: metadataDirectory, includingPropertiesForKeys: nil) else { return [] }
         return urls.filter { $0.lastPathComponent.hasPrefix(prefix) && $0.pathExtension == "json" }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }

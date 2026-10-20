@@ -1,23 +1,51 @@
 {
+  "originHash" : "7dafa7e298205ae28ef4cf8947c99714ed8ed15256766dca55d340527791d712",
   "pins" : [
-      {
-        "identity" : "kittentts-swift",
-        "kind" : "remoteSourceControl",
-        "location" : "https://github.com/KittenML/KittenTTS-swift",
-        "state" : {
-          "revision" : "4da0abbb92af4e7faf61affabbdb80d334ea768e",
-          "version" : "0.1.0"
-        }
-      },
-      {
-        "identity" : "onnxruntime-swift-package-manager",
-        "kind" : "remoteSourceControl",
-        "location" : "https://github.com/microsoft/onnxruntime-swift-package-manager",
-        "state" : {
-          "revision" : "b7fb7f7dea8a2469e6335d95a61b8f36d0dc83b2",
-          "version" : "1.24.2"
-        }
+    {
+      "identity" : "joseswift",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/airsidemobile/JOSESwift.git",
+      "state" : {
+        "revision" : "c2664a902e75c0426a1d43132bd4babc6fd173d3",
+        "version" : "3.0.0"
       }
+    },
+    {
+      "identity" : "keychainaccess",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/kishikawakatsumi/KeychainAccess.git",
+      "state" : {
+        "revision" : "84e546727d66f1adc5439debad16270d0fdd04e7",
+        "version" : "4.2.2"
+      }
+    },
+    {
+      "identity" : "kittentts-swift",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/KittenML/KittenTTS-swift",
+      "state" : {
+        "revision" : "4da0abbb92af4e7faf61affabbdb80d334ea768e",
+        "version" : "0.1.0"
+      }
+    },
+    {
+      "identity" : "onnxruntime-swift-package-manager",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/microsoft/onnxruntime-swift-package-manager",
+      "state" : {
+        "revision" : "b7fb7f7dea8a2469e6335d95a61b8f36d0dc83b2",
+        "version" : "1.24.2"
+      }
+    },
+    {
+      "identity" : "swift",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/logto-io/swift.git",
+      "state" : {
+        "revision" : "fdc4a979d1d940dc58c9c3c8553ede4eb696186c",
+        "version" : "2.0.0-beta.1"
+      }
+    }
   ],
   "version" : 3
 }

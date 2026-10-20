@@ -39,6 +39,52 @@ final class VoiceStudioUITests: XCTestCase {
         screenshot("Generated unsaved output")
     }
 
+    func testIdentityLegacyClaimAndAccountSwitchIsolation() {
+        app.terminate()
+        app.launchArguments = ["-ui-identity", "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
+        app.launch()
+        tap("settingsButton"); tap("accountPlaceholderLink")
+        XCTAssertTrue(app.buttons["identityApple"].waitForExistence(timeout: 10))
+        tap("identityApple")
+        tap("settingsButton"); tap("accountPlaceholderLink")
+        XCTAssertTrue(app.buttons["claimLegacyButton"].waitForExistence(timeout: 10))
+        tap("claimLegacyButton")
+        tap("Back up and claim sounds")
+        tap("myVoicesButton")
+        XCTAssertTrue(app.staticTexts["Legacy Fixture Voice"].waitForExistence(timeout: 10))
+        closeCard("My Voices")
+        tap("settingsButton"); tap("accountPlaceholderLink")
+        XCTAssertFalse(app.buttons["claimLegacyButton"].exists)
+        tap("identitySignOut")
+        tap("settingsButton"); tap("accountPlaceholderLink"); tap("identityGoogle")
+        tap("myVoicesButton")
+        XCTAssertFalse(app.staticTexts["Legacy Fixture Voice"].exists)
+        closeCard("My Voices")
+        tap("settingsButton"); tap("accountPlaceholderLink")
+        XCTAssertFalse(app.buttons["claimLegacyButton"].exists)
+        XCTAssertTrue(app.staticTexts["UI Fixture google"].waitForExistence(timeout: 10))
+        screenshot("Identity fixture B has no inherited legacy claim")
+    }
+
+    func testIdentityFirstSaveRequestsSignInWithoutDiscardingGeneratedAudio() {
+        app.terminate()
+        app.launchArguments = ["-ui-identity", "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
+        app.launch()
+        generate()
+        tap("saveGeneratedAudioButton")
+        XCTAssertTrue(app.buttons["identityApple"].waitForExistence(timeout: 10))
+        // Dismissing the auth sheet keeps the actual unsaved output available.
+        app.swipeDown()
+        XCTAssertTrue(app.buttons["saveGeneratedAudioButton"].waitForExistence(timeout: 10))
+        tap("saveGeneratedAudioButton"); tap("identityApple")
+        XCTAssertTrue(app.buttons["saveGeneratedAudioButton"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["saveGeneratedAudioButton"].isEnabled, "Signing in must not automatically save the draft")
+        tap("saveGeneratedAudioButton")
+        XCTAssertFalse(app.buttons["saveGeneratedAudioButton"].isEnabled, "The saved output must no longer be saveable again")
+        XCTAssertEqual(app.staticTexts["statusMessage"].label, "Audio saved to Generation History.")
+        screenshot("Explicit save after fixture sign-in")
+    }
+
     func testSystemVoiceSelectionAndRealSystemGeneration() {
         screenshot("Home source row")
         XCTAssertFalse(app.buttons["Confirm Voice"].exists)

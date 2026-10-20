@@ -17,6 +17,14 @@ struct CurrentReferenceAudio {
     }
 }
 
+struct TemporaryStudioDraft {
+    var reference: (AudioFileLease, AudioAsset, VoiceSourceType)?
+    var performance: (AudioFileLease, AudioAsset)?
+    var generated: (AudioFileLease, AudioAsset)?
+    var performanceName: String?
+    var performanceSourceLabel: String
+}
+
 enum StudioPlaybackSource: Equatable {
     case asset(UUID), voice(VoiceSelection), shaped(VoiceSelection)
     var isAudition: Bool { if case .asset = self { return false }; return true }
@@ -133,6 +141,8 @@ final class VoiceStudioModel: ObservableObject {
     }
 
     private let audioFileStore: AudioFileStore
+    private let privatePersistenceAllowed: Bool
+    var requestIdentity: (() -> Void)?
     private let audioLifecycle: AudioLifecycle
     private let providers: [SpeechProviderID: any SpeechProvider]
     private let localPackProvider: any InstallableSpeechProvider
@@ -146,6 +156,8 @@ final class VoiceStudioModel: ObservableObject {
     private let player: AudioPlayer
 
     init(rootDirectory: URL? = nil,
+         privatePersistenceAllowed: Bool = false,
+         sharedResourcesRoot: URL? = nil,
          microphonePermissionClient: (any MicrophonePermissionClient)? = nil,
          audioRecorder: (any AudioRecording)? = nil,
          audioImporter: (any AudioImporting)? = nil,
@@ -162,7 +174,8 @@ final class VoiceStudioModel: ObservableObject {
                                                       appropriateFor: nil, create: true)
             storeRoot = support.appendingPathComponent("VoiceStudio", isDirectory: true)
         }
-        let fileStore = try AudioFileStore(rootDirectory: storeRoot)
+        self.privatePersistenceAllowed = privatePersistenceAllowed
+        let fileStore = try AudioFileStore(rootDirectory: storeRoot, allowsPersistentWrites: privatePersistenceAllowed)
         self.audioFileStore = fileStore
         self.catalogOverride = systemVoices
         self.systemVoiceAvailability = voiceAvailability ?? SystemVoiceAvailabilityCache()
@@ -170,7 +183,7 @@ final class VoiceStudioModel: ObservableObject {
         self.openVoiceConverter = voiceConverter ?? OpenVoiceCoreMLConverter(diagnostics: diagnostics)
         self.voiceSelectionStore = VoiceSelectionStore(root: storeRoot)
         self.audioLifecycle = AudioLifecycle(fileStore: fileStore)
-        self.openVoicePackStore = OpenVoicePackStore(rootDirectory: storeRoot.appendingPathComponent("RendererPacks", isDirectory: true))
+        self.openVoicePackStore = OpenVoicePackStore(rootDirectory: (sharedResourcesRoot ?? storeRoot).appendingPathComponent("RendererPacks", isDirectory: true), privateCacheRoot: storeRoot.appendingPathComponent("RendererCache/OpenVoiceV2"))
         let assembly = providerAssembly ?? SpeechProviderAssembly.production(diagnostics: diagnostics)
         self.diagnostics = diagnostics
         self.providers = assembly.providers
@@ -488,6 +501,52 @@ final class VoiceStudioModel: ObservableObject {
         auditionTask?.cancel(); auditionGeneration = UUID()
         stopPlayback()
         if isRecording { stopRecording() }
+    }
+    func invalidateIdentityContext() {
+        applicationDidEnterBackground()
+        audioFileStore.invalidateAccess()
+        shareLeases.removeAll()
+        savedVoices = []; savedGeneratedAudio = []
+        currentReference = nil; performanceReference = nil; generatedAudio = nil
+        currentVoice = .systemDefault
+        requestIdentity = nil
+    }
+
+    /// Only the guest -> verified-account transition may carry an unsaved draft.
+    /// No automatic save occurs: the user must press Save again after signing in.
+    func copyTemporaryDraft(to target: VoiceStudioModel) throws {
+        try target.restoreTemporaryDraft(temporaryDraft())
+    }
+    func temporaryDraft() throws -> TemporaryStudioDraft {
+        var draft = TemporaryStudioDraft(performanceName: performanceName, performanceSourceLabel: performanceSourceLabel)
+        if let reference = currentReference, reference.asset.persistenceState == .temporary {
+            draft.reference = (try audioLease(for: reference.asset), reference.asset, reference.source)
+        }
+        if let performance = performanceReference?.audio, performance.persistenceState == .temporary {
+            draft.performance = (try audioLease(for: performance), performance)
+        }
+        if let audio = generatedAudio, audio.persistenceState == .temporary {
+            draft.generated = (try audioLease(for: audio), audio)
+        }
+        return draft
+    }
+    func restoreTemporaryDraft(_ draft: TemporaryStudioDraft) throws {
+        if let (lease, audio, source) = draft.reference {
+            let asset = try audioFileStore.importAudio(from: lease.url, duration: audio.duration)
+            currentReference = CurrentReferenceAudio(asset: asset, source: source)
+        }
+        if let (lease, audio) = draft.performance {
+            let asset = try audioFileStore.importAudio(from: lease.url, duration: audio.duration)
+            performanceReference = PerformanceReference(audio: asset)
+            performanceName = draft.performanceName; performanceSourceLabel = draft.performanceSourceLabel
+        }
+        if let (lease, audio) = draft.generated {
+            let asset = try audioFileStore.registerGeneratedAudio(from: lease.url, duration: audio.duration,
+                sourceVoiceID: audio.sourceVoiceID, sourceVoice: audio.sourceVoice, language: audio.language,
+                text: audio.text ?? "", generationKind: audio.generationKind, referencePerformanceID: audio.referencePerformanceID)
+            try audioLifecycle.cache(asset, as: .generated)
+            generatedAudio = asset; generatedAudioCacheKind = .generated
+        }
     }
     var canImitate: Bool {
         performanceReference != nil && currentVoice.savedVoiceID != nil && isOpenVoicePackReady && !isReleasingRuntime &&
@@ -1306,6 +1365,7 @@ final class VoiceStudioModel: ObservableObject {
     func managedURL(for asset: AudioAsset) -> URL? { try? audioFileStore.managedURL(for: asset) }
 
     func saveGeneratedAudio() {
+        guard privatePersistenceAllowed else { requestIdentity?(); return }
         guard let generatedAudio, generatedAudio.persistenceState == .temporary else { return }
         do {
             self.generatedAudio = try audioLifecycle.save(id: generatedAudio.id, from: generatedAudioCacheKind)
@@ -1338,6 +1398,7 @@ final class VoiceStudioModel: ObservableObject {
     }
 
     func saveVoice(name: String) {
+        guard privatePersistenceAllowed else { requestIdentity?(); return }
         guard canSaveVoice, let currentReference else { return }
         guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             statusMessage = "Voice name cannot be blank."

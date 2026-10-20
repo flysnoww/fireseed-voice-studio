@@ -92,21 +92,21 @@ public struct OpenVoicePackStore: Sendable {
     private let expectedConverterRevision: String
     private let expectedFiles: [String: PinnedFile]
 
-    public init(rootDirectory: URL) {
+    public init(rootDirectory: URL, privateCacheRoot: URL? = nil) {
         self.init(rootDirectory: rootDirectory,
                   sourceRevision: Self.sourceRevision,
                   converterRevision: Self.converterRevision,
-                  expectedFiles: Self.pinnedFiles)
+                  expectedFiles: Self.pinnedFiles, privateCacheRoot: privateCacheRoot)
     }
 
     init(rootDirectory: URL, sourceRevision: String, converterRevision: String,
-         expectedFiles: [String: PinnedFile]) {
+         expectedFiles: [String: PinnedFile], privateCacheRoot: URL? = nil) {
         self.rootDirectory = rootDirectory
         expectedSourceRevision = sourceRevision.lowercased()
         expectedConverterRevision = converterRevision.lowercased()
         self.expectedFiles = expectedFiles
         installedPackURL = rootDirectory.appendingPathComponent(Self.installFolderName, isDirectory: true)
-        cacheDirectory = rootDirectory.deletingLastPathComponent()
+        cacheDirectory = privateCacheRoot ?? rootDirectory.deletingLastPathComponent()
             .appendingPathComponent("RendererCache", isDirectory: true)
             .appendingPathComponent(Self.cacheFolderName, isDirectory: true)
     }

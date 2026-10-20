@@ -33,9 +33,27 @@ def verify_export_compliance(app):
     return {'bundle': BUNDLE, 'ITSAppUsesNonExemptEncryption': False, 'status': 'PASS'}
 
 
+def verify_identity_configuration(app):
+    info = plistlib.loads((app / 'Info.plist').read_bytes())
+    expected = {
+        'FireseedIdentityEnvironment': 'PRODUCTION',
+        'FireseedIdentityEndpoint': 'https://auth.fireseed.work',
+        'FireseedIdentityIssuer': 'https://auth.fireseed.work/oidc',
+        'FireseedIdentityClientID': 'ghducpbvjml6ovk92e392',
+        'FireseedIdentityRedirectURI': 'com.fireseed.voicestudio://oauth/callback',
+        'FireseedIdentityPostLogoutRedirectURI': 'com.fireseed.voicestudio://oauth/signed-out',
+    }
+    for key, value in expected.items():
+        require(info.get(key) == value, 'Wrong Identity configuration: ' + key)
+    schemes = [scheme for entry in info.get('CFBundleURLTypes', []) for scheme in entry.get('CFBundleURLSchemes', [])]
+    require(schemes == ['com.fireseed.voicestudio'], 'Wrong Identity callback scheme')
+    return expected
+
+
 def verify(app, version, build):
     info = plistlib.loads((app / 'Info.plist').read_bytes())
     verify_export_compliance(app)
+    identity = verify_identity_configuration(app)
     require(info['CFBundleIdentifier'] == BUNDLE, 'Wrong bundle')
     require(info['CFBundleShortVersionString'] == version, 'Wrong version')
     require(info['CFBundleVersion'] == build, 'Wrong build')
@@ -74,7 +92,7 @@ def verify(app, version, build):
     return {'bundle': BUNDLE, 'team': TEAM, 'version': version, 'build': build,
             'profile_uuid': profile['UUID'], 'profile_expiration_utc': str(profile['ExpirationDate']),
             'minimum_os': info['MinimumOSVersion'], 'frameworks': frameworks,
-            'entitlements': ent, 'signature': signature, 'status': 'PASS'}
+            'entitlements': ent, 'identity': identity, 'signature': signature, 'status': 'PASS'}
 
 
 if __name__ == '__main__':
@@ -84,8 +102,12 @@ if __name__ == '__main__':
     parser.add_argument('--build')
     parser.add_argument('--report', type=pathlib.Path, required=True)
     parser.add_argument('--check-export-compliance-only', action='store_true')
+    parser.add_argument('--check-config-only', action='store_true')
     args = parser.parse_args()
-    if not args.check_export_compliance_only and (not args.version or not args.build):
+    if not (args.check_export_compliance_only or args.check_config_only) and (not args.version or not args.build):
         parser.error('--version and --build are required for full preflight')
-    result = verify_export_compliance(args.app) if args.check_export_compliance_only else verify(args.app, args.version, args.build)
+    if args.check_config_only:
+        result = dict(verify_export_compliance(args.app), identity=verify_identity_configuration(args.app))
+    else:
+        result = verify_export_compliance(args.app) if args.check_export_compliance_only else verify(args.app, args.version, args.build)
     args.report.write_text(json.dumps(result, indent=2))

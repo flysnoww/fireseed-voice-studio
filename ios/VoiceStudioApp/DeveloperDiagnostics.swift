@@ -133,7 +133,7 @@ final class VoiceStudioDiagnostics: ObservableObject {
     var memoryWarningHandler: (() -> Void)?
     private let logger = Logger(subsystem: "com.fireseed.voicestudio", category: "Runtime")
 
-    init(defaults: UserDefaults = .standard, breadcrumbKey: String = "voicePrepareBreadcrumb") {
+    init(defaults: UserDefaults = .standard, breadcrumbKey: String = "voicePrepareBreadcrumb", includeDeviceCrashReports: Bool = true) {
         breadcrumbDefaults = defaults
         self.breadcrumbKey = breadcrumbKey
         if var breadcrumb = Self.loadBreadcrumb(defaults: defaults, key: breadcrumbKey),
@@ -163,11 +163,13 @@ final class VoiceStudioDiagnostics: ObservableObject {
         }
         // MetricKit's subscriber has process lifetime; individual models only observe reports.
         _ = LocalCrashCollector.shared
-        snapshot.localCrashReport = LocalCrashCollector.latestReport
-        crashObserver = NotificationCenter.default.addObserver(
-            forName: LocalCrashCollector.reportNotification, object: nil, queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in self?.snapshot.localCrashReport = LocalCrashCollector.latestReport }
+        if includeDeviceCrashReports {
+            snapshot.localCrashReport = LocalCrashCollector.latestReport
+            crashObserver = NotificationCenter.default.addObserver(
+                forName: LocalCrashCollector.reportNotification, object: nil, queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in self?.snapshot.localCrashReport = LocalCrashCollector.latestReport }
+            }
         }
         memoryObserver = NotificationCenter.default.addObserver(
             forName: UIApplication.didReceiveMemoryWarningNotification,

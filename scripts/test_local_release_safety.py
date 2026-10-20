@@ -22,9 +22,23 @@ class ReleaseSafetyTests(unittest.TestCase):
             self.assertFalse(out.exists())
             plan = json.loads(result.stdout)
             self.assertFalse(plan['upload'])
+            self.assertIsNone(plan['build'])
             self.assertEqual(plan['upload_mode'], 'xcode-account')
             self.assertEqual(plan['bundle'], 'com.fireseed.voicestudio')
             self.assertIn('App XCTest + all UI tests', plan['stages'])
+
+    def test_execute_never_invents_or_resets_build_number(self):
+        result = self.invoke('--execute')
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('explicit --build-number', result.stderr)
+
+    def test_upload_requires_committed_source_including_untracked_files(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('local_release', SCRIPT)
+        release = importlib.util.module_from_spec(spec); spec.loader.exec_module(release)
+        release.require_clean_upload_source(b'')
+        for status in [b' M ios/VoiceStudioApp/VoiceStudioIdentity.swift\n', b'?? new-source.swift\n', b'A  staged.swift\n']:
+            with self.assertRaises(RuntimeError): release.require_clean_upload_source(status)
 
     def test_xcode_account_upload_plan_stays_dry_without_execute(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -98,6 +112,24 @@ class ReleaseSafetyTests(unittest.TestCase):
                 self.assertEqual(result.returncode, expected, result.stderr)
                 if expected == 0:
                     self.assertFalse(json.loads(report.read_text())['ITSAppUsesNonExemptEncryption'])
+
+    def test_actual_identity_plist_rejects_other_app_and_wrong_callback(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('local_verify', SCRIPT.with_name('local-ios-verify.py'))
+        verifier = importlib.util.module_from_spec(spec); spec.loader.exec_module(verifier)
+        source = SCRIPT.parents[1] / 'ios/VoiceStudioApp/Info.plist'
+        original = plistlib.loads(source.read_bytes())
+        with tempfile.TemporaryDirectory() as temp:
+            app = Path(temp)
+            (app / 'Info.plist').write_bytes(plistlib.dumps(original))
+            self.assertEqual(verifier.verify_identity_configuration(app)['FireseedIdentityClientID'], 'ghducpbvjml6ovk92e392')
+            for key, value in [('FireseedIdentityClientID', '2t5wb8w2qqo5d6e8f9aig'),
+                               ('FireseedIdentityIssuer', 'https://other.example/oidc'),
+                               ('FireseedIdentityRedirectURI', 'com.other://oauth/callback'),
+                               ('CFBundleURLTypes', [])]:
+                broken = dict(original); broken[key] = value
+                (app / 'Info.plist').write_bytes(plistlib.dumps(broken))
+                with self.assertRaises(RuntimeError): verifier.verify_identity_configuration(app)
 
 if __name__ == '__main__':
     unittest.main()

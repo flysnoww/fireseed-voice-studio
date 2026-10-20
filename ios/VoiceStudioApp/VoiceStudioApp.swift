@@ -12,30 +12,45 @@ struct FireseedVoiceStudioApp: App {
 }
 
 private struct VoiceStudioRootView: View {
-    @State private var model: VoiceStudioModel?
-    @State private var startupError: String?
+    @StateObject private var account: StudioAccountController
     @StateObject private var languagePreference = AppLanguagePreference()
-    @StateObject private var appearancePreference = AppAppearancePreference()
+    @Environment(\.scenePhase) private var scenePhase
 
     init() {
         do {
 #if DEBUG
-            if ProcessInfo.processInfo.arguments.contains("-ui-regression") {
-                _model = State(initialValue: try Self.regressionModel())
+            if ProcessInfo.processInfo.arguments.contains("-ui-identity") {
+                let controller = try Self.identityRegressionController()
+                _account = StateObject(wrappedValue: controller)
+            } else if ProcessInfo.processInfo.arguments.contains("-ui-regression") {
+                let fixtureModel = try Self.regressionModel()
+                _account = StateObject(wrappedValue: StudioAccountController(fixtureModel: fixtureModel))
+            } else if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil {
+                let controller = StudioAccountController(base: FileManager.default.temporaryDirectory.appendingPathComponent("XCTestHost-" + UUID().uuidString), provider: UIIdentityProvider())
+                _account = StateObject(wrappedValue: controller)
             } else {
-                _model = State(initialValue: try VoiceStudioModel())
+                _account = StateObject(wrappedValue: StudioAccountController())
             }
 #else
-            _model = State(initialValue: try VoiceStudioModel())
+            _account = StateObject(wrappedValue: StudioAccountController())
 #endif
-            _startupError = State(initialValue: nil)
         } catch {
-            _model = State(initialValue: nil)
-            _startupError = State(initialValue: error.localizedDescription)
+            _account = StateObject(wrappedValue: StudioAccountController(startupError: "Voice Studio could not safely initialize. Original files have been preserved."))
         }
     }
 
 #if DEBUG
+    @MainActor private static func identityRegressionController() throws -> StudioAccountController {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("IdentityUI-" + UUID().uuidString)
+        let store = try AudioFileStore(rootDirectory: root)
+        let source = root.appendingPathComponent("synthetic.wav")
+        let format = AVAudioFormat(standardFormatWithSampleRate: 24_000, channels: 1)!
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 2400)!; buffer.frameLength = 2400
+        try AVAudioFile(forWriting: source, settings: format.settings).write(from: buffer)
+        let audio = try store.importAudio(from: source, duration: 0.1)
+        _ = try store.saveVoice(VoiceAsset(name: "Legacy Fixture Voice", sourceType: .record, referenceAudio: audio))
+        return StudioAccountController(base: root, provider: UIIdentityProvider())
+    }
     /// Isolated synthetic test assets; no user files or fake renderer capabilities.
     @MainActor private static func regressionModel() throws -> VoiceStudioModel {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("UIRegression-\(UUID().uuidString)")
@@ -60,22 +75,41 @@ private struct VoiceStudioRootView: View {
             let packStore = OpenVoicePackStore(rootDirectory: root.appendingPathComponent("RendererPacks"))
             _ = try packStore.install(from: pack)
         }
-        return try VoiceStudioModel(rootDirectory: root)
+        return try VoiceStudioModel(rootDirectory: root, privatePersistenceAllowed: true)
     }
 #endif
 
     var body: some View {
         Group {
-            if let startupError {
+            if let startupError = account.startupError {
                 ContentUnavailableView("Voice Studio could not start", systemImage: "waveform", description: Text(startupError))
-            } else if let model {
-                VoiceStudioHome(model: model)
+            } else if let model = account.model {
+                VoiceStudioHome(model: model, generationText: $account.generationText).id(account.revision)
             } else {
                 ContentUnavailableView("Voice Studio could not start", systemImage: "waveform")
             }
         }
         .environmentObject(languagePreference)
-        .environmentObject(appearancePreference)
+        .environmentObject(account)
+        .environmentObject(account.session)
+        .environmentObject(account.appearance)
         .environment(\.locale, Locale(identifier: languagePreference.language.localeIdentifier ?? Locale.autoupdatingCurrent.identifier))
+        .task { if !account.fixture { await account.session.restore() } }
+        .onChange(of: scenePhase) { _, phase in if phase == .active, !account.fixture { account.session.revalidate() } }
+        .sheet(isPresented: $account.showAccount) {
+            StudioAccountView(session: account.session).environmentObject(account).presentationDetents([.medium, .large])
+        }
     }
 }
+
+#if DEBUG
+/// Explicit, isolated automation injection; never selected by Release or config failure.
+@MainActor private final class UIIdentityProvider: StudioIdentityProvider {
+    func restore() async throws -> StudioIdentityUser? { nil }
+    func signIn(_ method: IdentitySignInMethod) async throws -> StudioIdentityUser {
+        StudioIdentityUser(owner: try AssetOwner(issuer: StudioIdentityConfiguration.issuer, subject: "ui-fixture-" + method.rawValue), name: "UI Fixture " + method.rawValue)
+    }
+    func signOut() async throws {}
+    func clear() async {}
+}
+#endif

@@ -4,7 +4,185 @@ import UIKit
 import UniformTypeIdentifiers
 import XCTest
 import VoiceStudioCore
+import Logto
 @testable import VoiceStudio
+
+@MainActor private final class ControlledIdentityProvider: StudioIdentityProvider {
+    var restoreContinuation: CheckedContinuation<StudioIdentityUser?, Error>?
+    var loginContinuation: CheckedContinuation<StudioIdentityUser, Error>?
+    var immediateRestore: StudioIdentityUser?
+    var holdRestore = false
+    var signInCalls = 0
+    var clearCalls = 0
+    func restore() async throws -> StudioIdentityUser? {
+        if holdRestore { return try await withCheckedThrowingContinuation { restoreContinuation = $0 } }
+        return immediateRestore
+    }
+    func signIn(_ method: IdentitySignInMethod) async throws -> StudioIdentityUser {
+        signInCalls += 1
+        return try await withCheckedThrowingContinuation { loginContinuation = $0 }
+    }
+    func signOut() async throws {}
+    func clear() async { clearCalls += 1 }
+}
+
+@MainActor final class VoiceStudioIdentityTests: XCTestCase {
+    func testStartupFailureDoesNotFallBackToTheRealLibraryOrAnAuthenticatedUser() {
+        let account = StudioAccountController(startupError: "Fixture failed safely")
+        XCTAssertNil(account.model)
+        XCTAssertNil(account.session.user)
+        XCTAssertEqual(account.startupError, "Fixture failed safely")
+    }
+    private var user: StudioIdentityUser { StudioIdentityUser(owner: try! AssetOwner(issuer: StudioIdentityConfiguration.issuer, subject: "fixture-a"), name: "Fixture A") }
+    private func settle(_ condition: @escaping () -> Bool) async {
+        let deadline = Date().addingTimeInterval(3)
+        while !condition(), Date() < deadline { await Task.yield() }
+        XCTAssertTrue(condition(), "Timed out waiting for the deterministic test provider")
+    }
+    func testConfigurationRejectsWrongClientIssuerEnvironmentAndCallbacks() throws {
+        let data = try Data(contentsOf: Bundle.main.url(forResource: "Info", withExtension: "plist")!)
+        let info = try PropertyListSerialization.propertyList(from: data, format: nil) as! [String: Any]
+        XCTAssertNoThrow(try StudioIdentityConfiguration(info: info))
+        for (key, value) in [("FireseedIdentityClientID", "2t5wb8w2qqo5d6e8f9aig"), ("FireseedIdentityIssuer", "https://other.example/oidc"), ("FireseedIdentityEnvironment", "STAGING"), ("FireseedIdentityRedirectURI", "com.fireseed.aiquicknote://oauth/callback")] {
+            var bad = info; bad[key] = value
+            XCTAssertThrowsError(try StudioIdentityConfiguration(info: bad))
+        }
+    }
+    func testSDKUsesS256AndRejectsWrongStateAndRedirect() throws {
+        let verifier = LogtoUtilities.generateCodeVerifier()
+        let state = LogtoUtilities.generateState()
+        let uri = try LogtoCore.generateSignInUri(authorizationEndpoint: "https://auth.fireseed.work/oidc/auth", clientId: "ghducpbvjml6ovk92e392", redirectUri: URL(string: StudioIdentityConfiguration.callback)!, codeChallenge: LogtoUtilities.generateCodeChallenge(codeVerifier: verifier), state: state)
+        let query = URLComponents(url: uri, resolvingAgainstBaseURL: false)!.queryItems!
+        XCTAssertEqual(query.first { $0.name == "code_challenge_method" }?.value, "S256")
+        XCTAssertEqual(query.first { $0.name == "response_type" }?.value, "code")
+        XCTAssertNotEqual(verifier, LogtoUtilities.generateCodeVerifier())
+        let redirect = URL(string: StudioIdentityConfiguration.callback)!
+        XCTAssertThrowsError(try LogtoCore.verifyAndParseSignInCallbackUri(URL(string: StudioIdentityConfiguration.callback + "?code=fixture&state=wrong")!, redirectUri: redirect, state: state))
+        XCTAssertThrowsError(try LogtoCore.verifyAndParseSignInCallbackUri(URL(string: "com.other.app://oauth/callback?code=fixture&state=" + state)!, redirectUri: redirect, state: state))
+    }
+    func testColdRestoreDoesNotExposeUserUntilVerified() async {
+        let provider = ControlledIdentityProvider(); provider.holdRestore = true
+        let session = StudioIdentitySession(provider: provider)
+        let restore = Task { await session.restore() }
+        await settle { provider.restoreContinuation != nil }
+        XCTAssertNil(session.user); XCTAssertTrue(session.restoring)
+        provider.restoreContinuation?.resume(returning: user)
+        await restore.value
+        XCTAssertEqual(session.user, user); XCTAssertFalse(session.restoring)
+    }
+    func testLogoutInvalidatesDelayedRestoreAndKeepsNewLoginSerialized() async {
+        let provider = ControlledIdentityProvider(); provider.holdRestore = true
+        let session = StudioIdentitySession(provider: provider)
+        let restore = Task { await session.restore() }
+        await settle { provider.restoreContinuation != nil }
+        session.signOut(); session.signIn(.google)
+        XCTAssertNil(session.user); XCTAssertEqual(provider.signInCalls, 0)
+        provider.restoreContinuation?.resume(returning: user)
+        await restore.value
+        await settle { !session.busy }
+        XCTAssertNil(session.user); XCTAssertGreaterThan(provider.clearCalls, 0)
+    }
+    func testConcurrentLoginIsRejectedAndCancelDoesNotCreateSession() async {
+        let provider = ControlledIdentityProvider(); let session = StudioIdentitySession(provider: provider)
+        await session.restore()
+        session.signIn(.apple); session.signIn(.google)
+        await settle { provider.loginContinuation != nil }
+        XCTAssertEqual(provider.signInCalls, 1)
+        provider.loginContinuation?.resume(throwing: CancellationError())
+        await settle { !session.busy }
+        XCTAssertNil(session.user); XCTAssertNil(session.message)
+    }
+    func testNetworkFailureAndExpiredRefreshFailClosed() async {
+        let provider = ControlledIdentityProvider(); provider.holdRestore = true
+        let session = StudioIdentitySession(provider: provider)
+        let restore = Task { await session.restore() }
+        await settle { provider.restoreContinuation != nil }
+        provider.restoreContinuation?.resume(throwing: StudioIdentityError.network)
+        await restore.value
+        XCTAssertNil(session.user); XCTAssertNotNil(session.message)
+        session.signIn(.google)
+        await settle { provider.loginContinuation != nil }
+        provider.loginContinuation?.resume(throwing: StudioIdentityError.authentication)
+        await settle { !session.busy }
+        XCTAssertNil(session.user)
+    }
+    func testSignOutHidesAccountBeforeProviderFinishesAndColdReauthenticationRestoresIt() async {
+        let provider = ControlledIdentityProvider(); provider.immediateRestore = user
+        let session = StudioIdentitySession(provider: provider)
+        await session.restore(); XCTAssertEqual(session.user, user)
+        session.signOut(); XCTAssertNil(session.user)
+        await settle { !session.busy }
+        session.signIn(.google)
+        await settle { provider.loginContinuation != nil }
+        provider.loginContinuation?.resume(returning: user)
+        await settle { !session.busy }
+        XCTAssertEqual(session.user, user)
+    }
+    func testFirstSaveRequestsLoginAndCancellationPreservesDraft() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = try VoiceStudioModel(rootDirectory: root)
+        let source = root.appendingPathComponent("draft.wav")
+        let format = AVAudioFormat(standardFormatWithSampleRate: 24_000, channels: 1)!
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 2400)!; buffer.frameLength = 2400
+        try AVAudioFile(forWriting: source, settings: format.settings).write(from: buffer)
+        model.importAudio(from: source)
+        let draftID = model.currentReference?.asset.id
+        var requested = 0; model.requestIdentity = { requested += 1 }
+        model.saveVoice(name: "Unsaved reference")
+        XCTAssertEqual(requested, 1); XCTAssertTrue(model.savedVoices.isEmpty)
+        XCTAssertEqual(model.currentReference?.asset.id, draftID)
+        XCTAssertNotNil(model.currentReference.flatMap { model.managedURL(for: $0.asset) })
+    }
+    func testControllerPreservesGuestDraftRequiresExplicitSaveAndRestoresOnlyItsOwner() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let provider = ControlledIdentityProvider()
+        let account = StudioAccountController(base: root, provider: provider)
+        let guest = try XCTUnwrap(account.model)
+        await account.session.restore()
+        XCTAssertTrue(account.model === guest, "An empty cold session must not discard a guest draft")
+        let source = root.appendingPathComponent("draft.wav")
+        let format = AVAudioFormat(standardFormatWithSampleRate: 24_000, channels: 1)!
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 2400)!; buffer.frameLength = 2400
+        try AVAudioFile(forWriting: source, settings: format.settings).write(from: buffer)
+        guest.importAudio(from: source)
+        account.session.signIn(.apple)
+        await settle { provider.loginContinuation != nil }
+        provider.loginContinuation?.resume(returning: user); provider.loginContinuation = nil
+        await settle { !account.session.busy }
+        let modelA = try XCTUnwrap(account.model)
+        XCTAssertNotNil(modelA.currentReference); XCTAssertTrue(modelA.savedVoices.isEmpty)
+        modelA.saveVoice(name: "Owner A Voice")
+        let voice = try XCTUnwrap(modelA.savedVoices.first)
+        XCTAssertEqual(modelA.currentVoice, .saved(voice.id))
+        account.session.signOut(); await settle { !account.session.busy }
+        XCTAssertNil(modelA.managedURL(for: voice.referenceAudio))
+        account.session.signIn(.google); await settle { provider.loginContinuation != nil }
+        let other = StudioIdentityUser(owner: try AssetOwner(issuer: StudioIdentityConfiguration.issuer, subject: "fixture-b"), name: nil)
+        provider.loginContinuation?.resume(returning: other); provider.loginContinuation = nil
+        await settle { !account.session.busy }
+        XCTAssertTrue(account.model!.savedVoices.isEmpty)
+        XCTAssertNil(account.model!.managedURL(for: voice.referenceAudio))
+        XCTAssertEqual(account.model!.currentVoice, .systemDefault)
+        account.session.signOut(); await settle { !account.session.busy }
+        account.session.signIn(.apple); await settle { provider.loginContinuation != nil }
+        provider.loginContinuation?.resume(returning: user); provider.loginContinuation = nil
+        await settle { !account.session.busy }
+        XCTAssertEqual(account.model!.savedVoices.map(\.id), [voice.id])
+        XCTAssertEqual(account.model!.currentVoice, .saved(voice.id))
+    }
+    func testForegroundRefreshCannotSilentlyReplaceSubject() async throws {
+        let provider = ControlledIdentityProvider(); provider.immediateRestore = user
+        let session = StudioIdentitySession(provider: provider)
+        await session.restore()
+        provider.immediateRestore = StudioIdentityUser(owner: try AssetOwner(issuer: StudioIdentityConfiguration.issuer, subject: "other-subject"), name: nil)
+        session.revalidate(); await settle { !session.busy }
+        XCTAssertNil(session.user); XCTAssertNotNil(session.message)
+        XCTAssertGreaterThan(provider.clearCalls, 0)
+    }
+}
 
 final class VoiceStudioAppTests: XCTestCase {
     @MainActor
@@ -25,7 +203,7 @@ final class VoiceStudioAppTests: XCTestCase {
     func testTinyVoiceAuditionNeverSilentlyUsesSystemVoice() throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let model = try VoiceStudioModel(rootDirectory: root)
+        let model = try VoiceStudioModel(rootDirectory: root, privatePersistenceAllowed: true)
         model.audition(.tinyLocal, locale: Locale(identifier: "en"))
         XCTAssertFalse(model.isPlaying)
         XCTAssertEqual(model.statusMessage, "Install the local voice in Settings to hear this voice.")
@@ -37,7 +215,7 @@ final class VoiceStudioAppTests: XCTestCase {
         let source = root.appendingPathComponent("source.wav")
         try makeSilentWaveFile(at: source, duration: 0.25)
         let provider = DelayedTinyProvider(source: source)
-        let model = try VoiceStudioModel(rootDirectory: root,
+        let model = try VoiceStudioModel(rootDirectory: root, privatePersistenceAllowed: true,
             providerAssembly: SpeechProviderAssembly(providers: [.tinyLocal: provider], localPackProvider: StubLocalSpeechProvider()))
         let selected = model.currentVoice
         var profile = model.profile(for: .tinyLocal)
@@ -74,7 +252,7 @@ final class VoiceStudioAppTests: XCTestCase {
             let audio = try store.importAudio(from: source, duration: 3)
             voices.append(try store.saveVoice(VoiceAsset(name: "Voice \(index)", sourceType: .imported, referenceAudio: audio)))
         }
-        let model = try VoiceStudioModel(rootDirectory: root)
+        let model = try VoiceStudioModel(rootDirectory: root, privatePersistenceAllowed: true)
         let selected = model.currentVoice
         for _ in 0..<12 {
             model.audition(.saved(voices[0].id), locale: Locale(identifier: "en"))
@@ -112,7 +290,7 @@ final class VoiceStudioAppTests: XCTestCase {
         let source = root.appendingPathComponent("source.wav")
         try makeSilentWaveFile(at: source, duration: 1)
         let provider = DelayedTinyProvider(source: source)
-        let model = try VoiceStudioModel(rootDirectory: root,
+        let model = try VoiceStudioModel(rootDirectory: root, privatePersistenceAllowed: true,
             providerAssembly: SpeechProviderAssembly(providers: [.tinyLocal: provider], localPackProvider: StubLocalSpeechProvider()))
         let selected = model.currentVoice
         let rendered = await model.auditionForSharing(.tinyLocal, locale: Locale(identifier: "en"))
@@ -134,7 +312,7 @@ final class VoiceStudioAppTests: XCTestCase {
     func testUnsupportedImitationDoesNotCreateOutputAndReportsCapability() async throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let model = try VoiceStudioModel(rootDirectory: root)
+        let model = try VoiceStudioModel(rootDirectory: root, privatePersistenceAllowed: true)
         await model.imitate(optionalText: "new words")
         XCTAssertNil(model.generatedAudio)
         XCTAssertEqual(model.diagnostics.snapshot.imitationMode, "new-text (unsupported)")
@@ -149,7 +327,7 @@ final class VoiceStudioAppTests: XCTestCase {
         let source = root.appendingPathComponent("source.wav")
         try makeSilentWaveFile(at: source, duration: 0.25)
         let provider = DelayedTinyProvider(source: source)
-        let model = try VoiceStudioModel(rootDirectory: root,
+        let model = try VoiceStudioModel(rootDirectory: root, privatePersistenceAllowed: true,
             providerAssembly: SpeechProviderAssembly(providers: [.tinyLocal: provider], localPackProvider: StubLocalSpeechProvider()))
         var first: AudioAsset?
         var share: URL?
@@ -234,7 +412,7 @@ final class VoiceStudioAppTests: XCTestCase {
         try makeSilentWaveFile(at: source, duration: 0.25)
         let provider = DelayedTinyProvider(source: source)
         let local = StubLocalSpeechProvider()
-        let model = try VoiceStudioModel(rootDirectory: root,
+        let model = try VoiceStudioModel(rootDirectory: root, privatePersistenceAllowed: true,
             providerAssembly: SpeechProviderAssembly(providers: [.tinyLocal: provider], localPackProvider: local))
         let job = Task { await model.generateSpeech(text: "hello", voice: .tinyLocal, language: "en", accent: nil) }
         let didStart = await provider.waitUntilStarted()
@@ -262,7 +440,7 @@ final class VoiceStudioAppTests: XCTestCase {
     func testRapidVoiceSwitchInvalidatesEvenWhenReturningToOriginalVoice() throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let model = try VoiceStudioModel(rootDirectory: root)
+        let model = try VoiceStudioModel(rootDirectory: root, privatePersistenceAllowed: true)
         let original = model.operationGeneration
         model.selectVoice(.systemVoice("B"))
         model.selectVoice(.systemDefault)
@@ -282,7 +460,7 @@ final class VoiceStudioAppTests: XCTestCase {
             try? await Task.sleep(nanoseconds: 50_000_000)
             return false
         }
-        let model = try VoiceStudioModel(rootDirectory: root,
+        let model = try VoiceStudioModel(rootDirectory: root, privatePersistenceAllowed: true,
             systemVoices: [SystemVoiceDescriptor(identifier: "old", name: "Old", language: "en-US")], voiceAvailability: cache)
         model.selectVoice(.systemVoice("old"))
         let restoring = Task { await model.restoreCurrentVoiceAvailability() }
@@ -290,14 +468,14 @@ final class VoiceStudioAppTests: XCTestCase {
         model.selectVoice(.saved(saved[0].id))
         await restoring.value
         XCTAssertEqual(model.currentVoice, .saved(saved[0].id))
-        XCTAssertEqual(try VoiceStudioModel(rootDirectory: root).currentVoice, model.currentVoice)
+        XCTAssertEqual(try VoiceStudioModel(rootDirectory: root, privatePersistenceAllowed: true).currentVoice, model.currentVoice)
     }
     @MainActor
     func testLatestSelectionManualReselectAndProfilesSurviveRestartIndependently() throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let voices = try makePersistedVoices(in: root, count: 2)
-        let model = try VoiceStudioModel(rootDirectory: root)
+        let model = try VoiceStudioModel(rootDirectory: root, privatePersistenceAllowed: true)
         model.selectVoice(.saved(voices[0].id))
         let first = VoiceProfile(speed: 1.25, pitch: 250, language: "zh", accent: "zh-CN")
         model.updateProfile(first, for: .saved(voices[0].id))
@@ -309,7 +487,7 @@ final class VoiceStudioAppTests: XCTestCase {
         model.updateProfile(system, for: .systemVoice("test-system"))
         model.selectVoice(.saved(voices[0].id))
         XCTAssertEqual(model.currentVoiceProfile, first)
-        let restored = try VoiceStudioModel(rootDirectory: root)
+        let restored = try VoiceStudioModel(rootDirectory: root, privatePersistenceAllowed: true)
         XCTAssertEqual(restored.currentVoice, .saved(voices[0].id))
         XCTAssertEqual(restored.currentVoiceProfile, first)
         XCTAssertEqual(restored.profile(for: .systemVoice("test-system")), system)
@@ -324,7 +502,7 @@ final class VoiceStudioAppTests: XCTestCase {
         let store = try AudioFileStore(rootDirectory: root)
         let recorded = try makeStagedAsset(in: store)
         let imported = try makeStagedAsset(in: store)
-        let model = try VoiceStudioModel(rootDirectory: root, audioRecorder: StubAudioRecorder(asset: recorded), audioImporter: StubAudioImporter(asset: imported))
+        let model = try VoiceStudioModel(rootDirectory: root, privatePersistenceAllowed: true, audioRecorder: StubAudioRecorder(asset: recorded), audioImporter: StubAudioImporter(asset: imported))
         await model.startRecording(); model.stopRecording(); model.saveVoice(name: "Recorded test")
         XCTAssertEqual(model.currentVoice.savedVoiceID, model.mostRecentlySavedVoiceID)
         XCTAssertNil(model.currentReference)
@@ -333,7 +511,7 @@ final class VoiceStudioAppTests: XCTestCase {
         XCTAssertEqual(model.savedVoices.count, 2)
         model.saveVoice(name: "Duplicate")
         XCTAssertEqual(model.savedVoices.count, 2)
-        XCTAssertEqual(try VoiceStudioModel(rootDirectory: root).currentVoice, model.currentVoice)
+        XCTAssertEqual(try VoiceStudioModel(rootDirectory: root, privatePersistenceAllowed: true).currentVoice, model.currentVoice)
     }
 
     @MainActor
@@ -344,7 +522,7 @@ final class VoiceStudioAppTests: XCTestCase {
             + [SystemVoiceDescriptor(identifier: "gb", name: "UK", language: "en-GB"),
                SystemVoiceDescriptor(identifier: "failed", name: "Unavailable", language: "en-AU")]
         let cache = SystemVoiceAvailabilityCache { $0.identifier != "failed" }
-        let model = try VoiceStudioModel(rootDirectory: root, systemVoices: voices, voiceAvailability: cache)
+        let model = try VoiceStudioModel(rootDirectory: root, privatePersistenceAllowed: true, systemVoices: voices, voiceAvailability: cache)
         await model.probeSystemAccents("en-US")
         XCTAssertEqual(Set(model.usableSystemVoices.map(\.language)), Set(["en-US", "en-GB"]))
         XCTAssertEqual(cache.results.count, 3, "Probe one representative per locale, not every same-accent voice.")
@@ -386,7 +564,7 @@ final class VoiceStudioAppTests: XCTestCase {
         XCTAssertEqual(refreshedCount, 4)
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let model = try VoiceStudioModel(rootDirectory: root, systemVoices: voices,
+        let model = try VoiceStudioModel(rootDirectory: root, privatePersistenceAllowed: true, systemVoices: voices,
                                         voiceAvailability: SystemVoiceAvailabilityCache { $0.identifier == "good" })
         await model.probeSystemLanguage("en-US")
         XCTAssertEqual(model.usableSystemVoices.map(\.identifier), ["good"], "Legacy locale hints must resolve the same base-language group.")
@@ -404,7 +582,7 @@ final class VoiceStudioAppTests: XCTestCase {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let saved = try makePersistedVoices(in: root, count: 2)
-        let model = try VoiceStudioModel(rootDirectory: root)
+        let model = try VoiceStudioModel(rootDirectory: root, privatePersistenceAllowed: true)
         model.selectVoice(.saved(saved[0].id)); model.deleteSavedVoice(id: saved[0].id)
         XCTAssertEqual(model.currentVoice, .saved(saved[1].id))
         XCTAssertEqual(model.personalVoiceAuthorization, AVSpeechSynthesizer.personalVoiceAuthorizationStatus)
@@ -691,7 +869,7 @@ final class VoiceStudioAppTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let store = try AudioFileStore(rootDirectory: root)
         let asset = try makeStagedAsset(in: store)
-        let model = try VoiceStudioModel(rootDirectory: root, audioImporter: StubAudioImporter(asset: asset))
+        let model = try VoiceStudioModel(rootDirectory: root, privatePersistenceAllowed: true, audioImporter: StubAudioImporter(asset: asset))
         model.importAudio(from: root.appendingPathComponent("selected.wav"))
         model.saveVoice(name: "Recorded Voice")
         let savedID = try XCTUnwrap(model.savedVoices.first?.id)
@@ -748,7 +926,7 @@ final class VoiceStudioAppTests: XCTestCase {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let voices = try makePersistedVoices(in: root, count: 9)
-        let model = try VoiceStudioModel(rootDirectory: root)
+        let model = try VoiceStudioModel(rootDirectory: root, privatePersistenceAllowed: true)
         XCTAssertEqual(model.savedVoices.count, 9)
         XCTAssertEqual(model.savedVoicePageCount, 2)
         model.setSavedVoicePage(1)
@@ -774,7 +952,7 @@ final class VoiceStudioAppTests: XCTestCase {
         _ = try makePersistedVoices(in: root, count: 9)
         let store = try AudioFileStore(rootDirectory: root)
         let staged = try makeStagedAsset(in: store)
-        let model = try VoiceStudioModel(rootDirectory: root, audioImporter: StubAudioImporter(asset: staged))
+        let model = try VoiceStudioModel(rootDirectory: root, privatePersistenceAllowed: true, audioImporter: StubAudioImporter(asset: staged))
         model.setSavedVoicePage(1)
         model.importAudio(from: root.appendingPathComponent("selected.wav"))
 
@@ -791,7 +969,7 @@ final class VoiceStudioAppTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let store = try AudioFileStore(rootDirectory: root)
         let asset = try makeStagedAsset(in: store)
-        let model = try VoiceStudioModel(rootDirectory: root, audioImporter: StubAudioImporter(asset: asset))
+        let model = try VoiceStudioModel(rootDirectory: root, privatePersistenceAllowed: true, audioImporter: StubAudioImporter(asset: asset))
         model.importAudio(from: root.appendingPathComponent("selected.wav"))
 
         model.saveVoice(name: " \n  ")
@@ -820,7 +998,7 @@ final class VoiceStudioAppTests: XCTestCase {
         let assembly = SpeechProviderAssembly(providers: [.system: UnavailableSpeechProvider(),
                                                           .tinyLocal: tiny],
                                               localPackProvider: local)
-        let model = try VoiceStudioModel(rootDirectory: root, providerAssembly: assembly)
+        let model = try VoiceStudioModel(rootDirectory: root, privatePersistenceAllowed: true, providerAssembly: assembly)
 
         XCTAssertTrue(model.canGenerate(text: "Hello", voice: .tinyLocal, language: "en"))
         XCTAssertEqual(model.capabilities(for: .tinyLocal).status(for: .voiceCloning), .unsupported)
@@ -848,7 +1026,7 @@ final class VoiceStudioAppTests: XCTestCase {
     func testSystemShapingCapabilitiesMatchSharedDSPAndExpressionRemainsUnsupported() throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let model = try VoiceStudioModel(rootDirectory: root)
+        let model = try VoiceStudioModel(rootDirectory: root, privatePersistenceAllowed: true)
         let capabilities = model.capabilities(for: .systemDefault)
 
         XCTAssertNil(capabilities.shaping[.brightness])
@@ -927,7 +1105,7 @@ final class VoiceStudioAppTests: XCTestCase {
         let system = UnavailableSpeechProvider()
         let assembly = SpeechProviderAssembly(providers: [.system: system, .local: local],
                                               localPackProvider: local)
-        let model = try VoiceStudioModel(rootDirectory: root, providerAssembly: assembly)
+        let model = try VoiceStudioModel(rootDirectory: root, privatePersistenceAllowed: true, providerAssembly: assembly)
         await model.installLocalSpeechResource(from: root)
         let selection = VoiceSelection.saved(saved.id)
         XCTAssertFalse(model.canGenerate(text: "hello", voice: selection, language: "en"))
@@ -970,7 +1148,7 @@ final class VoiceStudioAppTests: XCTestCase {
                                                duration: 1)
         let assembly = SpeechProviderAssembly(providers: [.system: system, .local: local, .tinyLocal: tiny],
                                               localPackProvider: local)
-        let model = try VoiceStudioModel(rootDirectory: root, providerAssembly: assembly)
+        let model = try VoiceStudioModel(rootDirectory: root, privatePersistenceAllowed: true, providerAssembly: assembly)
         await model.installLocalSpeechResource(from: root)
 
         await model.prepareVoice(.systemDefault, language: "en")
@@ -1056,7 +1234,7 @@ final class VoiceStudioAppTests: XCTestCase {
     func testProductionCapabilitiesExposeSpeedPitchAndHideExperimentalEQ() throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let model = try VoiceStudioModel(rootDirectory: root)
+        let model = try VoiceStudioModel(rootDirectory: root, privatePersistenceAllowed: true)
         let system = model.capabilities(for: .systemDefault)
         XCTAssertEqual(system.status(for: .pitch), .supported)
         XCTAssertNil(system.shaping[.brightness])
@@ -1108,7 +1286,7 @@ final class VoiceStudioAppTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let permissions = StubMicrophonePermissionClient(status: .denied)
         let importer = StubAudioImporter(asset: AudioAsset(fileName: "\(UUID().uuidString.lowercased()).wav", duration: 1))
-        let model = try VoiceStudioModel(rootDirectory: root,
+        let model = try VoiceStudioModel(rootDirectory: root, privatePersistenceAllowed: true,
                                          microphonePermissionClient: permissions,
                                          audioImporter: importer)
 
@@ -1130,7 +1308,7 @@ final class VoiceStudioAppTests: XCTestCase {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let permissions = StubMicrophonePermissionClient(status: .undetermined, requestResult: false)
-        let model = try VoiceStudioModel(rootDirectory: root, microphonePermissionClient: permissions)
+        let model = try VoiceStudioModel(rootDirectory: root, privatePersistenceAllowed: true, microphonePermissionClient: permissions)
 
         await model.startRecording()
         await model.startRecording()
@@ -1149,7 +1327,7 @@ final class VoiceStudioAppTests: XCTestCase {
         let asset = try makeStagedAsset(in: store)
         let permissions = StubMicrophonePermissionClient(status: .undetermined)
         let importer = StubAudioImporter(asset: asset)
-        let model = try VoiceStudioModel(rootDirectory: root,
+        let model = try VoiceStudioModel(rootDirectory: root, privatePersistenceAllowed: true,
                                          microphonePermissionClient: permissions,
                                          audioImporter: importer)
 
@@ -1184,7 +1362,7 @@ final class VoiceStudioAppTests: XCTestCase {
         let asset = try makeStagedAsset(in: store)
         let recorder = StubAudioRecorder(asset: asset)
         let importer = StubAudioImporter(asset: asset)
-        let model = try VoiceStudioModel(rootDirectory: root,
+        let model = try VoiceStudioModel(rootDirectory: root, privatePersistenceAllowed: true,
                                          audioRecorder: recorder,
                                          audioImporter: importer)
 
@@ -1223,13 +1401,13 @@ final class VoiceStudioAppTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let store = try AudioFileStore(rootDirectory: root)
         let asset = try makeStagedAsset(in: store)
-        var model: VoiceStudioModel? = try VoiceStudioModel(rootDirectory: root,
+        var model: VoiceStudioModel? = try VoiceStudioModel(rootDirectory: root, privatePersistenceAllowed: true,
                                                             audioImporter: StubAudioImporter(asset: asset))
         model?.importAudio(from: root.appendingPathComponent("selected.wav"))
         model?.saveVoice(name: "Relaunch")
         let saved = try XCTUnwrap(model?.savedVoices.first)
         model = nil
-        let relaunched = try VoiceStudioModel(rootDirectory: root)
+        let relaunched = try VoiceStudioModel(rootDirectory: root, privatePersistenceAllowed: true)
         let loaded = try XCTUnwrap(relaunched.savedVoices.first)
         XCTAssertEqual(loaded.id, saved.id)
         XCTAssertEqual(loaded.name, saved.name)
@@ -1250,7 +1428,7 @@ final class VoiceStudioAppTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let store = try AudioFileStore(rootDirectory: root)
         let asset = try makeStagedAsset(in: store)
-        let model = try VoiceStudioModel(rootDirectory: root, audioImporter: StubAudioImporter(asset: asset))
+        let model = try VoiceStudioModel(rootDirectory: root, privatePersistenceAllowed: true, audioImporter: StubAudioImporter(asset: asset))
         model.importAudio(from: root.appendingPathComponent("selected.wav"))
 
         try FileManager.default.removeItem(at: store.managedURL(for: asset))
@@ -1270,7 +1448,7 @@ final class VoiceStudioAppTests: XCTestCase {
         let asset = try makeStagedAsset(in: store)
         let recorder = StubAudioRecorder(asset: asset)
         let importer = StubAudioImporter(asset: asset)
-        let model = try VoiceStudioModel(rootDirectory: root, audioRecorder: recorder, audioImporter: importer)
+        let model = try VoiceStudioModel(rootDirectory: root, privatePersistenceAllowed: true, audioRecorder: recorder, audioImporter: importer)
         model.importAudio(from: root.appendingPathComponent("selected.wav"))
         XCTAssertTrue(model.canSaveVoice)
         await model.startRecording()
@@ -1295,7 +1473,7 @@ final class VoiceStudioAppTests: XCTestCase {
         let asset = try makeStagedAsset(in: store)
         let permissions = PendingMicrophonePermissionClient()
         let importer = StubAudioImporter(asset: asset)
-        let model = try VoiceStudioModel(rootDirectory: root,
+        let model = try VoiceStudioModel(rootDirectory: root, privatePersistenceAllowed: true,
                                          microphonePermissionClient: permissions, audioImporter: importer)
         model.importAudio(from: root.appendingPathComponent("selected.wav"))
         let started = expectation(description: "Permission request started")

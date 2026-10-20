@@ -28,13 +28,17 @@ def require(condition, message):
         raise RuntimeError(message)
 
 
+def require_clean_upload_source(status):
+    require(not status.strip(), 'Upload requires a clean, committed Git working tree')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--execute', action='store_true', help='Perform tests/build/archive/export locally')
     mode.add_argument('--dry-run', action='store_true', help='Print plan; no writes or subprocesses')
     parser.add_argument('--version', default='0.1')
-    parser.add_argument('--build-number', help='ASC-confirmed unused build for upload; local validation defaults to tracked 1')
+    parser.add_argument('--build-number', help='Explicit build for local execution; must be ASC-confirmed unused for upload')
     parser.add_argument('--output', type=Path)
     parser.add_argument('--simulator-id', help='Explicit available iPhone UDID; otherwise use CI first-iPhone selection')
     parser.add_argument('--upload', action='store_true')
@@ -45,8 +49,11 @@ def main():
     args = parser.parse_args()
     upload_build_explicit = args.build_number is not None
     if args.build_number is None:
-        args.build_number = '1'
-    if not re.fullmatch(r'[0-9]+(?:\.[0-9]+){1,2}', args.version) or not re.fullmatch(r'[1-9][0-9]*', args.build_number):
+        if args.upload:
+            parser.error('Upload requires an explicitly supplied App Store Connect confirmed-unused build number')
+        if args.execute:
+            parser.error('Execution requires an explicit --build-number; never reset a build automatically')
+    if not re.fullmatch(r'[0-9]+(?:\.[0-9]+){1,2}', args.version) or (args.build_number is not None and not re.fullmatch(r'[1-9][0-9]*', args.build_number)):
         parser.error('Invalid version/build')
     phrase = 'UPLOAD {} {} ({})'.format(BUNDLE, args.version, args.build_number)
     if args.upload and not upload_build_explicit:
@@ -93,19 +100,22 @@ def main():
             raise RuntimeError(name + ' failed; inspect ' + str(out / (name + '.log')))
     try:
         state['git_head'] = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+        if args.upload:
+            require_clean_upload_source(subprocess.check_output(['git', 'status', '--porcelain']))
         state['git_diff_sha256'] = hashlib.sha256(subprocess.check_output(['git', 'diff', 'HEAD'])).hexdigest()
         run('core-tests', ['swift', 'test', '--package-path', 'ios/VoiceStudioCore', '-Xswiftc', '-strict-concurrency=complete'])
         run('node-tests', ['npm', 'test'])
         run('python-tests', ['python3', '-m', 'unittest', 'discover', '-s', 'scripts', '-p', 'test*.py'])
         run('runtime-simulator', ['bash', 'experiments/m2b-qwen-ios/scripts/build_formal_ios_runtime.sh', 'simulator'])
         derived = out / 'DerivedData'
-        xcode = ['xcodebuild', '-project', 'ios/VoiceStudio.xcodeproj', '-scheme', 'VoiceStudio', '-derivedDataPath', derived]
+        xcode = ['xcodebuild', '-project', 'ios/VoiceStudio.xcodeproj', '-scheme', 'VoiceStudio', '-derivedDataPath', derived,
+                 'MARKETING_VERSION=' + args.version, 'CURRENT_PROJECT_VERSION=' + args.build_number]
         run('resolve-packages', xcode + ['-resolvePackageDependencies'])
         run('kitten-manifest-compatibility', ['python3', 'scripts/prepare-local-kitten-package.py', derived])
         run('debug-build', xcode + ['-sdk', 'iphonesimulator', '-configuration', 'Debug', 'CODE_SIGNING_ALLOWED=NO', 'ARCHS=arm64', 'build'])
         run('debug-export-compliance', ['python3', 'scripts/local-ios-verify.py',
                                         derived / 'Build/Products/Debug-iphonesimulator/VoiceStudio.app',
-                                        '--check-export-compliance-only', '--report', out / 'debug-export-compliance.json'])
+                                        '--check-config-only', '--report', out / 'debug-export-compliance.json'])
         devices = json.loads(subprocess.check_output(['xcrun', 'simctl', 'list', 'devices', 'available', '-j']))['devices']
         candidates = [d for runtime in devices.values() for d in runtime if d['name'].startswith('iPhone') or d['udid'] == args.simulator_id]
         device = next(d for d in candidates if not args.simulator_id or d['udid'] == args.simulator_id)
@@ -134,12 +144,12 @@ def main():
                                         '-resultBundlePath', out / 'Tests.xcresult', '-parallel-testing-enabled', 'NO', '-collect-test-diagnostics', 'never', 'ARCHS=arm64', 'CODE_SIGNING_ALLOWED=NO'])
         summary = json.loads(subprocess.check_output(['xcrun', 'xcresulttool', 'get', 'test-results', 'summary', '--path', str(out / 'Tests.xcresult')]))
         (out / 'test-summary.json').write_text(json.dumps(summary, indent=2))
-        require(summary['failedTests'] == 0 and summary['skippedTests'] == 0 and summary['passedTests'] >= 73, 'Require full baseline App/UI suite: at least 73 passed, zero failed/skipped')
+        require(summary['failedTests'] == 0 and summary['skippedTests'] == 0 and summary['passedTests'] >= 86, 'Require full App/Identity/UI suite: at least 86 passed, zero failed/skipped')
         run('runtime-device', ['bash', 'experiments/m2b-qwen-ios/scripts/build_formal_ios_runtime.sh', 'device'])
         run('release-build', xcode + ['-sdk', 'iphoneos', '-configuration', 'Release', 'CODE_SIGNING_ALLOWED=NO', 'CODE_SIGNING_REQUIRED=NO', 'build'])
         run('release-export-compliance', ['python3', 'scripts/local-ios-verify.py',
                                           derived / 'Build/Products/Release-iphoneos/VoiceStudio.app',
-                                          '--check-export-compliance-only', '--report', out / 'release-export-compliance.json'])
+                                          '--check-config-only', '--report', out / 'release-export-compliance.json'])
         ort = next((derived / 'SourcePackages/artifacts').glob('**/onnxruntime.xcframework/ios-arm64/onnxruntime.framework'))
         run('align-ort', ['python3', 'scripts/align-onnxruntime-framework-minimum-os.py', ort, '17.0'])
         archive = out / 'VoiceStudio.xcarchive'
@@ -169,6 +179,8 @@ def main():
         state['status'] = 'PASS_LOCAL_NO_UPLOAD'
         save()
         if args.upload:
+            run('identity-service-preflight', ['python3', 'scripts/identity-service-preflight.py',
+                '--info-plist', apps[0] / 'Info.plist', '--report', out / 'identity-service-preflight.json'])
             if args.upload_mode == 'xcode-account':
                 # Xcode uses the account already configured in Xcode > Settings > Accounts.
                 # Keep the exact build from the archive and never request provisioning changes.

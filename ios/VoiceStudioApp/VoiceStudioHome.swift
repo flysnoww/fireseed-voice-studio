@@ -47,12 +47,15 @@ struct VoiceStudioHome: View {
     @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
     private var reduceMotion: Bool { StudioCardMotion.reduceMotion(systemReduceMotion) }
     @State private var voiceName = "My voice"
-    @State private var generationText = ""
+    @Binding private var generationText: String
+    @EnvironmentObject private var identity: StudioIdentitySession
     @FocusState private var focusedInput: Bool
     @EnvironmentObject private var appearance: AppAppearancePreference
     @Environment(\.locale) private var locale
     @Environment(\.openURL) private var openURL
-    init(model: VoiceStudioModel) { _model = StateObject(wrappedValue: model) }
+    init(model: VoiceStudioModel, generationText: Binding<String>) {
+        _model = StateObject(wrappedValue: model); _generationText = generationText
+    }
     var body: some View {
         NavigationStack {
             ZStack {
@@ -215,7 +218,7 @@ struct VoiceStudioHome: View {
         case .audio(let id): StudioAudioDetail(model: model, id: id)
         case .imitation: StudioImitation(model: model)
         case .settings: StudioFloatingCard(title: "Settings") { SettingsView(model: model) }
-        case .account: StudioFloatingCard(title: "Account") { AccountPlaceholderView() }
+        case .account: StudioFloatingCard(title: "Account") { StudioAccountView(session: identity) }
         case .appLanguage: StudioFloatingCard(title: "App Language") {
             VStack { ForEach(AppLanguage.allCases) { language in
                 Button { languagePreference.set(language); cards.pop() } label: { HStack { Text(language.displayName); Spacer(); if languagePreference.language == language { Image(systemName: "checkmark") } }.padding() }
@@ -687,6 +690,7 @@ private struct StudioBackdrop: View {
 }
 
 private struct SettingsView: View {
+    @EnvironmentObject private var identity: StudioIdentitySession
     private let backgroundLogger = Logger(subsystem: "com.fireseed.voicestudio", category: "background-import")
     @ObservedObject var model: VoiceStudioModel
     @EnvironmentObject private var languagePreference: AppLanguagePreference
@@ -707,7 +711,7 @@ private struct SettingsView: View {
                 Section("Account") {
                     Button { cards.push(.account) } label: {
                         Label("Account", systemImage: "person.circle")
-                        Text("Not signed in").foregroundStyle(.secondary)
+                        Text(identity.user == nil ? "Not signed in" : "Signed in to Fireseed").foregroundStyle(.secondary)
                     }.accessibilityIdentifier("accountPlaceholderLink")
                 }.listRowBackground(Rectangle().fill(appearance.skin.material))
                 Section("Language") {
@@ -878,17 +882,6 @@ private struct BackgroundPhotoFileTransfer: Transferable {
         FileRepresentation(importedContentType: .image) { received in
             BackgroundPhotoFileTransfer(data: try Data(contentsOf: received.file))
         }
-    }
-}
-
-private struct AccountPlaceholderView: View {
-    var body: some View {
-        VStack(spacing: 12) {
-            Label("Not signed in", systemImage: "person.circle").font(.headline)
-            Text("Sign in will be available after the shared Fireseed account system is integrated.")
-                .multilineTextAlignment(.center).foregroundStyle(.secondary)
-        }
-        .padding().navigationTitle("Account")
     }
 }
 

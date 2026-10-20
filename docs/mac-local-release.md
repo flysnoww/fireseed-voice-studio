@@ -6,14 +6,16 @@
 ```sh
 python3 scripts/local-ios-release.py --dry-run
 # 执行完整本地验证、Archive、导出及 IPA preflight；仍然不上传。
-python3 scripts/local-ios-release.py --execute --version 0.1 --build-number 1
+python3 scripts/local-ios-release.py --execute --version 0.1 --build-number <明确选择的本地验证编号>
 ```
 
-本地验证可保留工程的 0.1 (1)。这不证明 1 或任何其他编号可上传。未来发布前须在 ASC 核对未使用的编号，包括 processing/failed 历史，不能根据仓库值或上次 Build 6 推断可用编号。
+执行必须明确给出构建号；默认 dry-run 的 build 为 null，不会自动重置为 1。所有 Xcode 阶段统一使用指定值，Archive/IPA 再检查实际版本。构建号是否可上传须在 ASC 核对所有状态，包括 processing/failed 历史，不能根据仓库值或旧发布记录推断。Build 1 上传禁令继续保留。
 
 执行环境需要 Xcode、已安装 iPhone Simulator runtime、Git、CMake、Python 3、Node/npm、既有 Apple Distribution 私钥和 VoiceStudio 专用 profile。模型放在被忽略的 `local-models/OpenVoiceV2`。脚本选择首个名称以 iPhone 开头的可用模拟器，，也可通过 `--simulator-id <UDID>` 明确指定验收设备；脚本验证/复用字节完全一致的 fixture；不同的既存 fixture 会阻塞，不自动覆盖。
 
 顺序为 Core（严格并发）、Node、Python、固定 CPU runtime、Debug、真实 OpenVoice fixture、完整 App XCTest/UI、固定 device runtime、Release、ORT MinimumOSVersion 对齐、签名 Archive、Archive 验证、exportArchive、IPA 验证。Xcode 27.1 测试后 verbose sysdiagnose 收集出现挂起，因此使用 `-collect-test-diagnostics never`，保留普通测试日志/xcresult；这不改变测试范围或断言。任何失败立即停止，原始日志与 `result.json` 留在新的 `local-releases/<时间>/`。输出目录已存在时拒绝运行；脚本不编辑工程版本号。
+
+Identity V1 的配置、数据备份/认领策略、依赖与测试边界见 [identity-v1.md](identity-v1.md)。App XCTest 加 UI 的本地门禁现为至少 86 项、零失败、零跳过；Debug/Release、Archive 和 IPA 均验证 VoiceStudio 自己的 Native Client、Issuer 和完整回调配置。真实 Apple/Google 与实体 iPhone 的验收另记，不能用 fixture 替代。
 
 ## 固定签名和资源
 

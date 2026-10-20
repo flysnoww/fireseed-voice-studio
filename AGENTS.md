@@ -16,7 +16,16 @@ The core concepts are `Voice` (who speaks), `Accent` (which accent), `Attributes
 
 The intended simple loop is choose or create a voice → enter text → preview → adjust → generate → save or share. Record and import are voice sources. A Mock or BuiltIn renderer may prove the data flow when no real clone renderer is available, but it must label mock output and must never claim unsupported capabilities.
 
-Do not implement Language Learning, pronunciation scoring, Speech Comparator, Dub Together, Scene/Line/Target/Take/Version, community, feed, user accounts, cloud sync, a complex provider registry, Timbre IR, a large planner, model training, Qwen Audio scene generation, or video generation in this project. Do not download or integrate large models without a new explicit task.
+Do not implement Language Learning, pronunciation scoring, Speech Comparator, Dub Together, Scene/Line/Target/Take/Version, community, feed, cloud sync, a complex provider registry, Timbre IR, a large planner, model training, Qwen Audio scene generation, or video generation in this project. Fireseed Identity V1 sign-in and per-owner local assets are explicitly authorized; additional account services remain outside scope. Do not download or integrate large models without a new explicit task.
+
+## Identity and private assets
+
+- Reuse the existing Fireseed Logto service and VoiceStudio's dedicated Native Client. Never reuse another app's client/callbacks or infer ownership from email. See `docs/identity-v1.md`.
+- Owner identity is the verified exact `(issuer, sub)`. Open only that account's workspace. Private persistent saves require identity; guests use temporary files.
+- Cancel old work and revoke its file-store access before changing accounts. Never transfer a signed-in user's draft, Current Voice, cache or asset references to a different identity.
+- Existing unowned libraries require explicit user claim, verified backups and an atomic commit. Preserve original audio, IDs and relationships; never clear or automatically relabel legacy data.
+- Tokens belong in app-private Keychain, never UserDefaults, JSON, backups or logs. Configuration failure must not select a mock. DEBUG fixtures are isolated and explicitly injected.
+- Test mocked sessions separately from real Logto and device authentication. A successful build or mocked login never proves real Apple/Google login or token restoration.
 
 ## Data and model boundaries
 
