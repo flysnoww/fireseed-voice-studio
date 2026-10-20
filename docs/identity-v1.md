@@ -126,3 +126,18 @@ Archive 与 IPA 会检查专用 Client ID、环境、Issuer、两个 callback、
 修复过程中的实际失败也保留：首次保存 Sheet 未继承 account 环境对象导致崩溃，已明确注入并通过定点及完整 UI；新测试最初误将现有的“保存后禁用”控件判断为“保存后消失”，已按实际既有语义改为断言“登录后仍可保存、明确保存后禁用且显示持久化成功”；原有 7 项 UI 与断言未删除、未跳过、未降低。迁移测试还定位了 `/var` 与 `/private/var` 枚举差异，修复为一致规范化路径。失败日志在本次 evidence 目录，最终结果采用后续真实通过的运行。
 
 此阶段为 **本地开发、迁移测试和发布准备 PASS**，整体 Identity V1 **尚未 COMPLETE**。下一步须获得 0.1 (8) 单次上传授权，上传前刷新 ASC 未占用核验，再依已有 Xcode 账号流程上传一次；之后由真实 iPhone 验收 Apple/Google、退出重登、冷启动、过期/刷新、跨账号资产与旧库认领。禁止正式 App Store 审核。
+
+
+## 2026-10-20 获授权的 Build 8 单次上传
+
+发布源码 SHA：`84a8abfa8ed6bcfeb07ee9377b32dc788c13ee05`，上传前工作区干净，45 个 ios/scripts 文件的 SHA-256 与已验收产物清单一致，IPA SHA-256 为 `93ec3d64c3810b5baec14a9dd1cdb95413e1bcad129318ac1f72f18f78238c85`。本次复用此前实际通过的 159 项测试和已签名 Archive，没有将历史测试写成本次重跑。Archive、IPA 签名及线上无登录 OIDC 预检在上传前重新执行并通过。
+
+用户明确授权仅上传 VoiceStudio 0.1 (8)。ASC 上传前只读检查“所有状态”、展开全部历史，1–7 已使用，8 不存在。使用现有 Xcode 登录账号，对 `local-releases/Identity-V1-preflight-0.1-8/committed/VoiceStudio.xcarchive` 执行一次 `xcodebuild -exportArchive`，导出配置保持项目既有 profile/Team/证书，改为 `destination=upload`，`method=app-store-connect`，`manageAppVersionAndBuildNumber=false`。无 P8、无证书变更、无正式审核。
+
+上传 UTC 时间为 2026-10-20 07:57:43 至 07:58:40，退出码 0，明确回执 `Upload succeeded.` / `Uploaded package is processing.` / `EXPORT SUCCEEDED`。ASC 已出现 0.1 (8)，记录 ID `6bb6d129-b682-4665-9f1f-ace57330e069`，初次查询为“正在处理”。现有“内部测试”群组有 3 位测试员，设置为“自动分发 Xcode 构建版本”；处理期间尚不能将此配置称为 Build 8 已可安装。
+
+非阻断警告：供应商 `onnxruntime.framework` 缺少 UUID `835932C6-0955-3329-809C-DF68FA3D9E88` 对应 dSYM，影响该 framework 的崩溃符号化；Apple 上传成功，不因此重传。
+
+完整命令、一次性尝试账本、上传日志、分发日志与只读 ASC 证据保存在被忽略的 `local-releases/Identity-V1-upload-0.1-8/`，禁止提交其中产物或凭据。上传结果不明时先查该账本与 ASC，不能自动重试。实体 iPhone Apple/Google 登录、真实 token 生命周期、账号隔离及历史声音备份认领仍需用户验收；保持已有声音数据，不卸载或重置 App。
+
+最终只读复核：Apple 已处理完成，0.1 (8) 自动加入现有“内部测试”群组，群组构建列表明确显示“正在测试”、90 天后过期。因此 **UPLOAD SUCCESS / READY TO TEST / 内部测试员可安装 PASS**；实体 iPhone 实际安装与登录验收仍为 **NOT TESTED**。最终证据为 `asc-ready.txt`、`asc-ready.png` 和 `upload-result.json`。本次仅一次上传，未开始 Build 9，未提交正式审核。
