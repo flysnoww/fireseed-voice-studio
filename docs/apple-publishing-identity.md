@@ -12,8 +12,8 @@
 | Watch App / Extension Bundle ID | 当前发行目标无已核实的独立 Watch Bundle ID；如 target 变化，先检查工程与 ASC。 |
 | Apple Team ID | 见中央索引 |
 | 内部测试组 | `内部测试`；UUID `2d5ce665-0179-4dc8-92c2-89839e11ae5a` |
-| 最近成功上传 | `0.1 (13)`，2026-10-23；Delivery UUID `80384bb2-4a26-4666-b3f3-be32a42178d8` |
-| ASC 状态 | 上传完成并可供内部测试；不要据此声称所有后续版本已安装验收。 |
+| 最近成功上传 | `0.1 (13)`，2026-10-23；Delivery UUID `80384bb2-4a26-4666-b3f3-be32a42178d8`；2026-11-01 04:23Z 实时查询为 `COMPLETE` |
+| ASC 状态 | Build 13 `VALID`，内部组 `IN_BETA_TESTING`；不要据此声称已完成安装或真机验收。 |
 
 ## 签名配置
 
