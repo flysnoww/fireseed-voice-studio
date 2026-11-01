@@ -27,7 +27,9 @@
 
 - ASC Build/Upload 查询：`scripts/asc-build-query.py`，环境变量 `API_KEY_ID`、`API_ISSUER_ID`；默认私钥路径见中央索引。也有使用已认证 ASC 网页会话做全状态/全分页查询的历史证据。
 - 最近 Build 13 使用当时有效的 Xcode 账号上传，ASC 回执及内部组状态见 `local-releases/upload-existing-6816751639-0.1-13-20261023/`。
-- 本轮没有执行 Voice Studio 实时 ASC API 查询；查询凭据的当前运行态见中央索引，不要因历史查询成功就假设本轮认证有效。
+- 2026-10-31 已通过官方 ASC API 只读复核；查询使用的 Key/Issuer 与有效权限摘要见中央索引。
+
+2026-10-31 官方 ASC API 只读复核确认 App ID `6816751639`、Bundle `com.fireseed.voicestudio`、内部组 `内部测试` UUID `2d5ce665-0179-4dc8-92c2-89839e11ae5a`。最新 Build 13 为 `VALID`，内部组状态 `IN_BETA_TESTING`；未创建或修改 ASC 资源。
 
 ## 版本与复核入口
 
